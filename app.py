@@ -4,10 +4,12 @@ A lightweight, single-user telemetry container supporting OpenTelemetry,
 RUM, Logs, Errors, Traces, and AI transparency.
 """
 
+import base64
 import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import zlib
 from datetime import datetime, timezone
@@ -30,6 +32,8 @@ app = Flask(__name__)
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 DB_PATH = os.path.join(DATA_DIR, "sobs.db")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
+BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
+BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -173,6 +177,34 @@ def require_api_key(f):
             key = request.headers.get("X-API-Key") or request.args.get("api_key")
             if key != API_KEY:
                 return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+
+    return decorated
+
+
+# ---------------------------------------------------------------------------
+# Auth decorator (optional Basic Auth for Web UI)
+# ---------------------------------------------------------------------------
+def require_basic_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD:
+            auth = request.headers.get("Authorization", "")
+            if auth.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+                    username, _, password = decoded.partition(":")
+                    user_ok = secrets.compare_digest(username, BASIC_AUTH_USERNAME)
+                    pass_ok = secrets.compare_digest(password, BASIC_AUTH_PASSWORD)
+                    if user_ok and pass_ok:
+                        return f(*args, **kwargs)
+                except Exception:
+                    pass
+            return (
+                "Unauthorized",
+                401,
+                {"WWW-Authenticate": 'Basic realm="SOBS"'},
+            )
         return f(*args, **kwargs)
 
     return decorated
@@ -456,6 +488,7 @@ def ingest_errors():
 # Web UI – Dashboard
 # ---------------------------------------------------------------------------
 @app.route("/")
+@require_basic_auth
 def dashboard():
     db = get_db()
     stats = {
@@ -514,6 +547,7 @@ def dashboard():
 # Web UI – Logs
 # ---------------------------------------------------------------------------
 @app.route("/logs")
+@require_basic_auth
 def view_logs():
     db = get_db()
     q = request.args.get("q", "").strip()
@@ -595,6 +629,7 @@ def view_logs():
 # Web UI – Errors
 # ---------------------------------------------------------------------------
 @app.route("/errors")
+@require_basic_auth
 def view_errors():
     db = get_db()
     service = request.args.get("service", "").strip()
@@ -651,6 +686,7 @@ def view_errors():
 
 
 @app.route("/errors/<int:error_id>/resolve", methods=["POST"])
+@require_basic_auth
 def resolve_error(error_id: int):
     db = get_db()
     db.execute("UPDATE errors SET resolved=1 WHERE id=?", (error_id,))
@@ -662,6 +698,7 @@ def resolve_error(error_id: int):
 # Web UI – Traces
 # ---------------------------------------------------------------------------
 @app.route("/traces")
+@require_basic_auth
 def view_traces():
     db = get_db()
     service = request.args.get("service", "").strip()
@@ -725,6 +762,7 @@ def view_traces():
 # Web UI – RUM
 # ---------------------------------------------------------------------------
 @app.route("/rum")
+@require_basic_auth
 def view_rum():
     db = get_db()
     event_type = request.args.get("type", "").strip()
@@ -796,6 +834,7 @@ def view_rum():
 # Web UI – AI Transparency
 # ---------------------------------------------------------------------------
 @app.route("/ai")
+@require_basic_auth
 def view_ai():
     db = get_db()
     service = request.args.get("service", "").strip()

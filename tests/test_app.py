@@ -3,6 +3,7 @@ Tests for SOBS – Simple Observe.
 Run with:  pytest tests/
 """
 
+import base64
 import json
 import os
 import tempfile
@@ -384,3 +385,73 @@ class TestUIPages:
         r = client.get("/logs?sql=INVALID+SQL+))))")
         assert r.status_code == 200
         assert b"SQL error" in r.data
+
+
+# ---------------------------------------------------------------------------
+# Basic Auth
+# ---------------------------------------------------------------------------
+class TestBasicAuth:
+    """Tests for optional Basic Auth on Web UI routes."""
+
+    _TEST_USER = "admin"
+    _TEST_PASS = "secret"
+
+    def _auth_header(self, username=None, password=None):
+        u = username if username is not None else self._TEST_USER
+        p = password if password is not None else self._TEST_PASS
+        token = base64.b64encode(f"{u}:{p}".encode()).decode()
+        return {"Authorization": f"Basic {token}"}
+
+    @pytest.fixture
+    def authed_client(self, monkeypatch):
+        """Client with Basic Auth enabled via env vars."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "BASIC_AUTH_USERNAME", self._TEST_USER)
+        monkeypatch.setattr(app_module, "BASIC_AUTH_PASSWORD", self._TEST_PASS)
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            yield c
+
+    def test_ui_requires_auth_when_configured(self, authed_client):
+        """Web UI should return 401 when Basic Auth is configured and no credentials sent."""
+        r = authed_client.get("/")
+        assert r.status_code == 401
+        assert r.headers.get("WWW-Authenticate") == 'Basic realm="SOBS"'
+
+    def test_ui_accessible_with_correct_credentials(self, authed_client):
+        """Web UI should be accessible with correct Basic Auth credentials."""
+        r = authed_client.get("/", headers=self._auth_header())
+        assert r.status_code == 200
+
+    def test_ui_rejects_wrong_password(self, authed_client):
+        """Web UI should return 401 when password is wrong."""
+        r = authed_client.get("/", headers=self._auth_header(password="wrong"))
+        assert r.status_code == 401
+
+    def test_ui_rejects_wrong_username(self, authed_client):
+        """Web UI should return 401 when username is wrong."""
+        r = authed_client.get("/", headers=self._auth_header(username="nobody"))
+        assert r.status_code == 401
+
+    def test_ui_no_auth_without_config(self, client):
+        """Web UI should be freely accessible when Basic Auth is not configured."""
+        r = client.get("/")
+        assert r.status_code == 200
+
+    def test_all_ui_routes_protected(self, authed_client):
+        """All Web UI routes should require auth when Basic Auth is configured."""
+        ui_routes = ["/", "/logs", "/errors", "/traces", "/rum", "/ai"]
+        for route in ui_routes:
+            r = authed_client.get(route)
+            assert r.status_code == 401, f"Expected 401 for {route}, got {r.status_code}"
+
+    def test_api_endpoints_unaffected(self, authed_client):
+        """Ingest API endpoints (/v1/*) should not be gated by Basic Auth."""
+        r = authed_client.post("/v1/logs", json={})
+        assert r.status_code == 200
+
+    def test_health_endpoint_unaffected(self, authed_client):
+        """/health should remain accessible regardless of Basic Auth config."""
+        r = authed_client.get("/health")
+        assert r.status_code == 200
