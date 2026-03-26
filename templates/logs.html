@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h4 class="fw-semibold mb-0"><i class="bi bi-journal-text me-2 text-info"></i>Logs</h4>
+  <span class="text-secondary small">{{ total }} total records</span>
+</div>
+
+<!-- Search / Filter bar -->
+<div class="card border-secondary mb-3">
+  <div class="card-body">
+    <form method="get" class="row g-2 align-items-end">
+      <div class="col-md-4">
+        <label class="form-label small text-secondary">Grep pattern</label>
+        <input type="text" name="q" class="form-control form-control-sm" placeholder="regex search…" value="{{ q }}">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small text-secondary">Level</label>
+        <select name="level" class="form-select form-select-sm">
+          <option value="">All levels</option>
+          {% for l in levels %}
+          <option value="{{ l }}" {% if l == level %}selected{% endif %}>{{ l }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small text-secondary">Service</label>
+        <select name="service" class="form-select form-select-sm">
+          <option value="">All services</option>
+          {% for s in services %}
+          <option value="{{ s }}" {% if s == service %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">SQL WHERE <span class="text-muted">(overrides above)</span></label>
+        <input type="text" name="sql" class="form-control form-control-sm font-monospace"
+               placeholder="level='ERROR' AND service='api'" value="{{ sql_where }}">
+      </div>
+      <div class="col-md-1 d-flex gap-1">
+        <button type="submit" class="btn btn-primary btn-sm flex-grow-1">
+          <i class="bi bi-search"></i>
+        </button>
+        <a href="/logs" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x"></i></a>
+      </div>
+    </form>
+    {% if error_msg %}
+    <div class="alert alert-danger mt-2 mb-0 py-1 small">{{ error_msg }}</div>
+    {% endif %}
+  </div>
+</div>
+
+{% if logs %}
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead>
+      <tr>
+        <th style="width:155px;">Timestamp</th>
+        <th style="width:90px;">Level</th>
+        <th style="width:100px;">Service</th>
+        <th>Message</th>
+        <th style="width:120px;">Trace</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for log in logs %}
+      <tr>
+        <td class="text-secondary small font-monospace">{{ log.ts[:23] }}</td>
+        <td><span class="badge badge-level-{{ log.level }}">{{ log.level }}</span></td>
+        <td><span class="badge bg-secondary">{{ log.service or '—' }}</span></td>
+        <td class="log-body">{{ log.body }}</td>
+        <td>
+          {% if log.trace_id %}
+          <a href="/traces?trace_id={{ log.trace_id }}" class="trace-link text-truncate d-inline-block" style="max-width:110px;" title="{{ log.trace_id }}">
+            {{ log.trace_id[:12] }}…
+          </a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Pagination -->
+{% set prev_offset = [offset - limit, 0] | max %}
+{% set next_offset = offset + limit %}
+<nav class="d-flex justify-content-between align-items-center">
+  <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
+  <ul class="pagination pagination-sm mb-0">
+    {% if offset > 0 %}
+    <li class="page-item">
+      <a class="page-link" href="?q={{ q }}&level={{ level }}&service={{ service }}&sql={{ sql_where }}&limit={{ limit }}&offset={{ prev_offset }}">← Prev</a>
+    </li>
+    {% endif %}
+    {% if next_offset < total %}
+    <li class="page-item">
+      <a class="page-link" href="?q={{ q }}&level={{ level }}&service={{ service }}&sql={{ sql_where }}&limit={{ limit }}&offset={{ next_offset }}">Next →</a>
+    </li>
+    {% endif %}
+  </ul>
+</nav>
+{% else %}
+<div class="text-center py-5 text-secondary">
+  <i class="bi bi-journal-x" style="font-size:2rem;"></i>
+  <p class="mt-2">No logs found{% if q %} matching <code>{{ q }}</code>{% endif %}</p>
+</div>
+{% endif %}
+{% endblock %}

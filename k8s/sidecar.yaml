@@ -1,0 +1,35 @@
+---
+# SOBS as a sidecar container in an existing Pod
+# Add this container block to your existing Deployment's spec.containers list.
+#
+# Example – add to your app Deployment:
+#
+#   spec:
+#     containers:
+#       - name: my-app
+#         image: my-app:latest
+#         ...
+#       - name: sobs
+#         image: sobs:latest
+#         ports:
+#           - containerPort: 4317
+#         env:
+#           - name: SOBS_DATA_DIR
+#             value: /data
+#         volumeMounts:
+#           - name: sobs-data
+#             mountPath: /data
+#         resources:
+#           requests:
+#             memory: "32Mi"
+#             cpu: "20m"
+#           limits:
+#             memory: "128Mi"
+#             cpu: "100m"
+#     volumes:
+#       - name: sobs-data
+#         emptyDir: {}
+#
+# Your app can send OTLP data to http://localhost:4317/v1/logs etc.
+# Access the SOBS UI by port-forwarding:
+#   kubectl port-forward pod/<pod-name> 4317:4317

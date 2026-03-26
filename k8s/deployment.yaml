@@ -1,0 +1,76 @@
+---
+# SOBS as a standalone Deployment + Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sobs
+  labels:
+    app: sobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sobs
+  template:
+    metadata:
+      labels:
+        app: sobs
+    spec:
+      containers:
+        - name: sobs
+          image: sobs:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4317
+          env:
+            - name: SOBS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sobs-secret
+                  key: api-key
+                  optional: true
+            - name: SOBS_DATA_DIR
+              value: /data
+          volumeMounts:
+            - name: sobs-data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 4317
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+      volumes:
+        - name: sobs-data
+          persistentVolumeClaim:
+            claimName: sobs-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sobs
+spec:
+  selector:
+    app: sobs
+  ports:
+    - protocol: TCP
+      port: 4317
+      targetPort: 4317
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sobs-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h4 class="mb-4 fw-semibold">Dashboard</h4>
+
+<!-- Stats row -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-4 col-lg-2">
+    <a href="/logs" class="text-decoration-none">
+      <div class="stat-card p-3 text-center">
+        <div class="fs-2 fw-bold text-info">{{ stats.logs }}</div>
+        <div class="text-secondary small">Logs</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <a href="/errors" class="text-decoration-none">
+      <div class="stat-card p-3 text-center">
+        <div class="fs-2 fw-bold {% if stats.errors > 0 %}text-danger{% else %}text-success{% endif %}">{{ stats.errors }}</div>
+        <div class="text-secondary small">Open Errors</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <a href="/traces" class="text-decoration-none">
+      <div class="stat-card p-3 text-center">
+        <div class="fs-2 fw-bold text-warning">{{ stats.spans }}</div>
+        <div class="text-secondary small">Spans</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <a href="/rum" class="text-decoration-none">
+      <div class="stat-card p-3 text-center">
+        <div class="fs-2 fw-bold text-primary">{{ stats.rum }}</div>
+        <div class="text-secondary small">RUM Events</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <a href="/ai" class="text-decoration-none">
+      <div class="stat-card p-3 text-center">
+        <div class="fs-2 fw-bold text-success">{{ stats.ai }}</div>
+        <div class="text-secondary small">AI Calls</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-6 col-md-4 col-lg-2">
+    <div class="stat-card p-3 text-center">
+      <div class="fs-2 fw-bold text-secondary">{{ stats.services | length }}</div>
+      <div class="text-secondary small">Services</div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <!-- Recent Errors -->
+  <div class="col-lg-6">
+    <div class="card border-secondary">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-bug me-1 text-danger"></i>Recent Open Errors</span>
+        <a href="/errors" class="btn btn-sm btn-outline-secondary">View all</a>
+      </div>
+      <div class="card-body p-0">
+        {% if recent_errors %}
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Time</th><th>Service</th><th>Message</th></tr></thead>
+          <tbody>
+            {% for e in recent_errors %}
+            <tr>
+              <td class="text-secondary small">{{ e.ts[:19] }}</td>
+              <td><span class="badge bg-secondary">{{ e.service or '—' }}</span></td>
+              <td class="small text-truncate" style="max-width:200px;" title="{{ e.message }}">{{ e.message }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="text-secondary text-center py-3 mb-0"><i class="bi bi-check-circle text-success"></i> No open errors</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Logs -->
+  <div class="col-lg-6">
+    <div class="card border-secondary">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-journal-text me-1 text-info"></i>Recent Logs</span>
+        <a href="/logs" class="btn btn-sm btn-outline-secondary">View all</a>
+      </div>
+      <div class="card-body p-0">
+        {% if recent_logs %}
+        <table class="table table-sm table-hover mb-0">
+          <thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead>
+          <tbody>
+            {% for l in recent_logs %}
+            <tr>
+              <td class="text-secondary small">{{ l.ts[:19] }}</td>
+              <td><span class="badge badge-level-{{ l.level }}">{{ l.level }}</span></td>
+              <td class="small text-truncate log-body" style="max-width:220px;" title="{{ l.body }}">{{ l.body }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="text-secondary text-center py-3 mb-0">No logs yet</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- RUM Event Types -->
+  {% if rum_summary %}
+  <div class="col-lg-6">
+    <div class="card border-secondary">
+      <div class="card-header">
+        <i class="bi bi-globe me-1 text-primary"></i>RUM Event Types
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Type</th><th>Count</th></tr></thead>
+          <tbody>
+            {% for row in rum_summary %}
+            <tr>
+              <td><a href="/rum?type={{ row[0] }}">{{ row[0] }}</a></td>
+              <td class="fw-semibold">{{ row[1] }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- AI Summary -->
+  {% if ai_summary %}
+  <div class="col-lg-6">
+    <div class="card border-secondary">
+      <div class="card-header">
+        <i class="bi bi-cpu me-1 text-success"></i>AI Model Usage
+      </div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead><tr><th>Model</th><th>Calls</th><th>Tokens In</th><th>Tokens Out</th></tr></thead>
+          <tbody>
+            {% for row in ai_summary %}
+            <tr>
+              <td>{{ row[0] }}</td>
+              <td>{{ row[1] }}</td>
+              <td>{{ row[2] or 0 }}</td>
+              <td>{{ row[3] or 0 }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Services -->
+  {% if stats.services %}
+  <div class="col-12">
+    <div class="card border-secondary">
+      <div class="card-header"><i class="bi bi-layers me-1"></i>Services</div>
+      <div class="card-body">
+        {% for svc in stats.services %}
+        <span class="badge bg-secondary me-1 mb-1">{{ svc }}</span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

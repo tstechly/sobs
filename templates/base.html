@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SOBS{% endblock %} — Simple Observe</title>
+  <link rel="stylesheet" href="/static/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
+  <style>
+    body { font-size: .9rem; }
+    .nav-link.active { font-weight: 600; }
+    .sidebar { min-height: 100vh; background: #1a1d21; border-right: 1px solid #2d3035; }
+    .sidebar .nav-link { color: #adb5bd; border-radius: 6px; margin: 1px 4px; padding: .4rem .8rem; }
+    .sidebar .nav-link:hover, .sidebar .nav-link.active { background: #2d3035; color: #fff; }
+    .sidebar .nav-link i { width: 1.4rem; }
+    .main-content { min-height: 100vh; }
+    .badge-level-ERROR, .badge-level-FATAL, .badge-level-CRITICAL { background-color: #dc3545 !important; }
+    .badge-level-WARN, .badge-level-WARNING { background-color: #fd7e14 !important; }
+    .badge-level-INFO { background-color: #0d6efd !important; }
+    .badge-level-DEBUG { background-color: #6c757d !important; }
+    .badge-level-METRIC { background-color: #0dcaf0 !important; color: #000 !important; }
+    .log-body { font-family: "SFMono-Regular", Menlo, monospace; font-size: .78rem; word-break: break-all; }
+    .stack-trace { font-family: monospace; font-size: .78rem; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+    .stat-card { border: 1px solid #2d3035; border-radius: 10px; }
+    .vitals-good  { color: #198754; }
+    .vitals-needs { color: #ffc107; }
+    .vitals-poor  { color: #dc3545; }
+    .prompt-box { background: #1e2329; border-radius: 6px; padding: .5rem; font-size: .82rem; white-space: pre-wrap; max-height: 150px; overflow-y: auto; }
+    a.trace-link { font-family: monospace; font-size: .78rem; }
+  </style>
+</head>
+<body>
+<div class="d-flex">
+  <!-- Sidebar -->
+  <nav class="sidebar d-flex flex-column p-3" style="width:220px;flex-shrink:0;">
+    <a href="/" class="text-decoration-none mb-4 d-flex align-items-center gap-2">
+      <span style="font-size:1.4rem;">🔭</span>
+      <span class="fw-bold fs-5 text-white">SOBS</span>
+    </a>
+    <ul class="nav flex-column gap-1">
+      <li class="nav-item">
+        <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}">
+          <i class="bi bi-speedometer2"></i> Dashboard
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/logs" class="nav-link {% if request.path == '/logs' %}active{% endif %}">
+          <i class="bi bi-journal-text"></i> Logs
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/errors" class="nav-link {% if request.path == '/errors' %}active{% endif %}">
+          <i class="bi bi-bug"></i> Errors
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/traces" class="nav-link {% if request.path == '/traces' %}active{% endif %}">
+          <i class="bi bi-diagram-3"></i> Traces
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/rum" class="nav-link {% if request.path == '/rum' %}active{% endif %}">
+          <i class="bi bi-globe"></i> RUM
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="/ai" class="nav-link {% if request.path == '/ai' %}active{% endif %}">
+          <i class="bi bi-cpu"></i> AI
+        </a>
+      </li>
+    </ul>
+    <div class="mt-auto pt-3 border-top border-secondary">
+      <small class="text-secondary">Simple Observe v1.0</small>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div class="main-content flex-grow-1 p-4">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+          {{ message }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </div>
+</div>
+
+<script src="/static/bootstrap.bundle.min.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
