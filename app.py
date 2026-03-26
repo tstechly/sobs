@@ -12,11 +12,9 @@ import sqlite3
 import zlib
 from datetime import datetime, timezone
 from functools import wraps
-from io import StringIO
 
 from flask import (
     Flask,
-    abort,
     g,
     jsonify,
     render_template,
@@ -176,6 +174,7 @@ def require_api_key(f):
             if key != API_KEY:
                 return jsonify({"error": "Unauthorized"}), 401
         return f(*args, **kwargs)
+
     return decorated
 
 
@@ -240,9 +239,7 @@ def ingest_logs():
     db = get_db()
     count = 0
     for resource_log in payload.get("resourceLogs", []):
-        resource_attrs = _attr_list_to_dict(
-            resource_log.get("resource", {}).get("attributes", [])
-        )
+        resource_attrs = _attr_list_to_dict(resource_log.get("resource", {}).get("attributes", []))
         service = resource_attrs.get("service.name", "")
         for scope_log in resource_log.get("scopeLogs", []):
             for record in scope_log.get("logRecords", []):
@@ -273,9 +270,7 @@ def ingest_traces():
     db = get_db()
     count = 0
     for resource_span in payload.get("resourceSpans", []):
-        resource_attrs = _attr_list_to_dict(
-            resource_span.get("resource", {}).get("attributes", [])
-        )
+        resource_attrs = _attr_list_to_dict(resource_span.get("resource", {}).get("attributes", []))
         service = resource_attrs.get("service.name", "")
         for scope_span in resource_span.get("scopeSpans", []):
             for span in scope_span.get("spans", []):
@@ -293,9 +288,19 @@ def ingest_traces():
                 span_attrs = _attr_list_to_dict(span.get("attributes", []))
                 merged_attrs = {**resource_attrs, **span_attrs}
                 db.execute(
-                    "INSERT INTO spans(ts, trace_id, span_id, parent_span_id, name, service, duration_ms, status, attrs) "
+                    "INSERT INTO spans(ts, trace_id, span_id, parent_span_id, name, service, duration_ms, status, attrs) "  # noqa: E501
                     "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (ts, trace_id, span_id, parent_id, name, service, duration_ms, str(status), compress_json(merged_attrs)),
+                    (
+                        ts,
+                        trace_id,
+                        span_id,
+                        parent_id,
+                        name,
+                        service,
+                        duration_ms,
+                        str(status),
+                        compress_json(merged_attrs),
+                    ),
                 )
                 count += 1
                 # Detect errors from span status
@@ -306,8 +311,16 @@ def ingest_traces():
                     db.execute(
                         "INSERT INTO errors(ts, service, err_type, message, stack, attrs, trace_id, span_id) "
                         "VALUES(?,?,?,?,?,?,?,?)",
-                        (ts, service, err_type, err_msg, compress(stack) if stack else None,
-                         compress_json(merged_attrs), trace_id, span_id),
+                        (
+                            ts,
+                            service,
+                            err_type,
+                            err_msg,
+                            compress(stack) if stack else None,
+                            compress_json(merged_attrs),
+                            trace_id,
+                            span_id,
+                        ),
                     )
     db.commit()
     return jsonify({"accepted": count}), 200
@@ -323,9 +336,7 @@ def ingest_metrics():
     db = get_db()
     count = 0
     for resource_metric in payload.get("resourceMetrics", []):
-        resource_attrs = _attr_list_to_dict(
-            resource_metric.get("resource", {}).get("attributes", [])
-        )
+        resource_attrs = _attr_list_to_dict(resource_metric.get("resource", {}).get("attributes", []))
         service = resource_attrs.get("service.name", "metrics")
         for scope_metric in resource_metric.get("scopeMetrics", []):
             for metric in scope_metric.get("metrics", []):
@@ -369,10 +380,17 @@ def ingest_rum():
         # Persist JS errors into the errors table too
         if event_type in ("error", "unhandledrejection"):
             db.execute(
-                "INSERT INTO errors(ts, service, err_type, message, stack, attrs, trace_id, span_id) VALUES(?,?,?,?,?,?,?,?)",
-                (ts, "rum", event.get("errorType", "JSError"),
-                 event.get("message", ""), compress(event.get("stack", "")) if event.get("stack") else None,
-                 compress_json({"url": url, "sessionId": session_id}), "", ""),
+                "INSERT INTO errors(ts, service, err_type, message, stack, attrs, trace_id, span_id) VALUES(?,?,?,?,?,?,?,?)",  # noqa: E501
+                (
+                    ts,
+                    "rum",
+                    event.get("errorType", "JSError"),
+                    event.get("message", ""),
+                    compress(event.get("stack", "")) if event.get("stack") else None,
+                    compress_json({"url": url, "sessionId": session_id}),
+                    "",
+                    "",
+                ),
             )
     db.commit()
     return jsonify({"accepted": count}), 200
@@ -448,7 +466,8 @@ def dashboard():
         "rum": db.execute("SELECT COUNT(*) FROM rum_events").fetchone()[0],
         "ai": db.execute("SELECT COUNT(*) FROM ai_events").fetchone()[0],
         "services": [
-            r[0] for r in db.execute(
+            r[0]
+            for r in db.execute(
                 "SELECT DISTINCT service FROM logs WHERE service!='' "
                 "UNION SELECT DISTINCT service FROM spans WHERE service!='' "
                 "UNION SELECT DISTINCT service FROM errors WHERE service!=''"
@@ -456,20 +475,23 @@ def dashboard():
         ],
     }
     # Recent errors (last 5)
-    recent_errors = [dict(r) for r in db.execute(
-        "SELECT id, ts, service, err_type, message FROM errors WHERE resolved=0 ORDER BY ts DESC LIMIT 5"
-    ).fetchall()]
+    recent_errors = [
+        dict(r)
+        for r in db.execute(
+            "SELECT id, ts, service, err_type, message FROM errors WHERE resolved=0 ORDER BY ts DESC LIMIT 5"
+        ).fetchall()
+    ]
     # Recent logs (last 10)
     recent_logs = []
-    for r in db.execute(
-        "SELECT ts, level, service, body FROM logs ORDER BY ts DESC LIMIT 10"
-    ).fetchall():
-        recent_logs.append({
-            "ts": r["ts"],
-            "level": r["level"],
-            "service": r["service"],
-            "body": decompress(r["body"]),
-        })
+    for r in db.execute("SELECT ts, level, service, body FROM logs ORDER BY ts DESC LIMIT 10").fetchall():
+        recent_logs.append(
+            {
+                "ts": r["ts"],
+                "level": r["level"],
+                "service": r["service"],
+                "body": decompress(r["body"]),
+            }
+        )
     # RUM summary – page views last 24h
     rum_summary = db.execute(
         "SELECT event_type, COUNT(*) as cnt FROM rum_events GROUP BY event_type ORDER BY cnt DESC"
@@ -509,7 +531,7 @@ def view_logs():
         # Allow raw WHERE clause (SQL search)
         try:
             safe_sql = sql_where.replace(";", "")
-            query = f"SELECT ts, level, service, body, trace_id, span_id FROM logs WHERE {safe_sql} ORDER BY ts DESC LIMIT ? OFFSET ?"
+            query = f"SELECT ts, level, service, body, trace_id, span_id FROM logs WHERE {safe_sql} ORDER BY ts DESC LIMIT ? OFFSET ?"  # noqa: E501
             rows = db.execute(query, (limit, offset)).fetchall()
             total = db.execute(f"SELECT COUNT(*) FROM logs WHERE {safe_sql}").fetchone()[0]
         except Exception as exc:
@@ -537,21 +559,21 @@ def view_logs():
         body = decompress(r["body"])
         if grep_pat and not grep_pat.search(body):
             continue
-        log_rows.append({
-            "ts": r["ts"],
-            "level": r["level"],
-            "service": r["service"],
-            "body": body,
-            "trace_id": r["trace_id"],
-            "span_id": r["span_id"],
-        })
+        log_rows.append(
+            {
+                "ts": r["ts"],
+                "level": r["level"],
+                "service": r["service"],
+                "body": body,
+                "trace_id": r["trace_id"],
+                "span_id": r["span_id"],
+            }
+        )
 
-    services = [row[0] for row in db.execute(
-        "SELECT DISTINCT service FROM logs WHERE service!='' ORDER BY service"
-    ).fetchall()]
-    levels = [row[0] for row in db.execute(
-        "SELECT DISTINCT level FROM logs ORDER BY level"
-    ).fetchall()]
+    services = [
+        row[0] for row in db.execute("SELECT DISTINCT service FROM logs WHERE service!='' ORDER BY service").fetchall()
+    ]
+    levels = [row[0] for row in db.execute("SELECT DISTINCT level FROM logs ORDER BY level").fetchall()]
 
     return render_template(
         "logs.html",
@@ -592,26 +614,29 @@ def view_errors():
 
     total = db.execute(f"SELECT COUNT(*) FROM errors {where}", params).fetchone()[0]
     rows = db.execute(
-        f"SELECT id, ts, service, err_type, message, stack, trace_id, resolved FROM errors {where} ORDER BY ts DESC LIMIT ? OFFSET ?",
+        f"SELECT id, ts, service, err_type, message, stack, trace_id, resolved FROM errors {where} ORDER BY ts DESC LIMIT ? OFFSET ?",  # noqa: E501
         params + [limit, offset],
     ).fetchall()
 
     errors = []
     for r in rows:
-        errors.append({
-            "id": r["id"],
-            "ts": r["ts"],
-            "service": r["service"],
-            "err_type": r["err_type"],
-            "message": r["message"],
-            "stack": decompress(r["stack"]) if r["stack"] else "",
-            "trace_id": r["trace_id"],
-            "resolved": bool(r["resolved"]),
-        })
+        errors.append(
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "service": r["service"],
+                "err_type": r["err_type"],
+                "message": r["message"],
+                "stack": decompress(r["stack"]) if r["stack"] else "",
+                "trace_id": r["trace_id"],
+                "resolved": bool(r["resolved"]),
+            }
+        )
 
-    services = [row[0] for row in db.execute(
-        "SELECT DISTINCT service FROM errors WHERE service!='' ORDER BY service"
-    ).fetchall()]
+    services = [
+        row[0]
+        for row in db.execute("SELECT DISTINCT service FROM errors WHERE service!='' ORDER BY service").fetchall()
+    ]
 
     return render_template(
         "errors.html",
@@ -664,23 +689,25 @@ def view_traces():
     spans = []
     for r in rows:
         attrs = decompress_json(r["attrs"])
-        spans.append({
-            "ts": r["ts"],
-            "trace_id": r["trace_id"],
-            "span_id": r["span_id"],
-            "parent_span_id": r["parent_span_id"],
-            "name": r["name"],
-            "service": r["service"],
-            "duration_ms": round(r["duration_ms"], 2),
-            "status": r["status"],
-            "http_method": attrs.get("http.method", attrs.get("http.request.method", "")),
-            "http_url": attrs.get("http.url", attrs.get("url.full", "")),
-            "http_status": attrs.get("http.status_code", attrs.get("http.response.status_code", "")),
-        })
+        spans.append(
+            {
+                "ts": r["ts"],
+                "trace_id": r["trace_id"],
+                "span_id": r["span_id"],
+                "parent_span_id": r["parent_span_id"],
+                "name": r["name"],
+                "service": r["service"],
+                "duration_ms": round(r["duration_ms"], 2),
+                "status": r["status"],
+                "http_method": attrs.get("http.method", attrs.get("http.request.method", "")),
+                "http_url": attrs.get("http.url", attrs.get("url.full", "")),
+                "http_status": attrs.get("http.status_code", attrs.get("http.response.status_code", "")),
+            }
+        )
 
-    services = [row[0] for row in db.execute(
-        "SELECT DISTINCT service FROM spans WHERE service!='' ORDER BY service"
-    ).fetchall()]
+    services = [
+        row[0] for row in db.execute("SELECT DISTINCT service FROM spans WHERE service!='' ORDER BY service").fetchall()
+    ]
 
     return render_template(
         "traces.html",
@@ -720,17 +747,19 @@ def view_rum():
     events = []
     for r in rows:
         data = decompress_json(r["data"])
-        events.append({
-            "ts": r["ts"],
-            "session_id": r["session_id"][:8] if r["session_id"] else "",
-            "event_type": r["event_type"],
-            "url": r["url"],
-            "data": data,
-        })
+        events.append(
+            {
+                "ts": r["ts"],
+                "session_id": r["session_id"][:8] if r["session_id"] else "",
+                "event_type": r["event_type"],
+                "url": r["url"],
+                "data": data,
+            }
+        )
 
-    event_types = [row[0] for row in db.execute(
-        "SELECT DISTINCT event_type FROM rum_events ORDER BY event_type"
-    ).fetchall()]
+    event_types = [
+        row[0] for row in db.execute("SELECT DISTINCT event_type FROM rum_events ORDER BY event_type").fetchall()
+    ]
 
     # Web vitals summary
     vitals_rows = db.execute(
@@ -793,31 +822,32 @@ def view_ai():
 
     ai_items = []
     for r in rows:
-        ai_items.append({
-            "id": r["id"],
-            "ts": r["ts"],
-            "service": r["service"],
-            "provider": r["provider"],
-            "model": r["model"],
-            "prompt": decompress(r["prompt"]) if r["prompt"] else "",
-            "response": decompress(r["response"]) if r["response"] else "",
-            "tokens_in": r["tokens_in"],
-            "tokens_out": r["tokens_out"],
-            "duration_ms": round(r["duration_ms"], 1),
-            "trace_id": r["trace_id"],
-        })
+        ai_items.append(
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "service": r["service"],
+                "provider": r["provider"],
+                "model": r["model"],
+                "prompt": decompress(r["prompt"]) if r["prompt"] else "",
+                "response": decompress(r["response"]) if r["response"] else "",
+                "tokens_in": r["tokens_in"],
+                "tokens_out": r["tokens_out"],
+                "duration_ms": round(r["duration_ms"], 1),
+                "trace_id": r["trace_id"],
+            }
+        )
 
-    services = [row[0] for row in db.execute(
-        "SELECT DISTINCT service FROM ai_events WHERE service!='' ORDER BY service"
-    ).fetchall()]
-    models = [row[0] for row in db.execute(
-        "SELECT DISTINCT model FROM ai_events WHERE model!='' ORDER BY model"
-    ).fetchall()]
+    services = [
+        row[0]
+        for row in db.execute("SELECT DISTINCT service FROM ai_events WHERE service!='' ORDER BY service").fetchall()
+    ]
+    models = [
+        row[0] for row in db.execute("SELECT DISTINCT model FROM ai_events WHERE model!='' ORDER BY model").fetchall()
+    ]
 
     # Token usage totals
-    totals = db.execute(
-        "SELECT SUM(tokens_in) ti, SUM(tokens_out) to_, COUNT(*) cnt FROM ai_events"
-    ).fetchone()
+    totals = db.execute("SELECT SUM(tokens_in) ti, SUM(tokens_out) to_, COUNT(*) cnt FROM ai_events").fetchone()
 
     return render_template(
         "ai.html",
@@ -841,8 +871,7 @@ def view_ai():
 @app.route("/static/rum.js")
 def rum_js():
     return send_from_directory(
-        os.path.join(os.path.dirname(__file__), "static"), "rum.js",
-        mimetype="application/javascript"
+        os.path.join(os.path.dirname(__file__), "static"), "rum.js", mimetype="application/javascript"
     )
 
 
