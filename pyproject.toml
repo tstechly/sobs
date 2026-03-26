@@ -12,3 +12,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+markers = [
+    "integration: mark test as an integration test requiring a live server and Playwright browser",
+]
