@@ -83,12 +83,16 @@ bash examples/curl_examples.sh
 
 ## Configuration
 
-| Variable        | Default        | Description                   |
-|-----------------|----------------|-------------------------------|
-| `SOBS_DATA_DIR` | `./data`       | Directory for the SQLite DB   |
-| `SOBS_API_KEY`  | _(empty)_      | Optional auth key             |
-| `PORT`          | `4317`         | Listen port                   |
-| `FLASK_DEBUG`   | `0`            | Enable Flask debug mode       |
+| Variable                    | Default        | Description                                      |
+|-----------------------------|----------------|--------------------------------------------------|
+| `SOBS_DATA_DIR`             | `./data`       | Directory for the SQLite DB                      |
+| `SOBS_API_KEY`              | _(empty)_      | Optional auth key for ingest endpoints           |
+| `SOBS_BASIC_AUTH_USERNAME`  | _(empty)_      | Optional Basic Auth username for the Web UI      |
+| `SOBS_BASIC_AUTH_PASSWORD`  | _(empty)_      | Optional Basic Auth password for the Web UI      |
+| `PORT`                      | `4317`         | Listen port                                      |
+| `FLASK_DEBUG`               | `0`            | Enable Flask debug mode                          |
+
+When both `SOBS_BASIC_AUTH_USERNAME` and `SOBS_BASIC_AUTH_PASSWORD` are set, the Web UI requires HTTP Basic Authentication. The ingest API endpoints (`/v1/*`) use the separate `SOBS_API_KEY` mechanism.
 
 ## Kubernetes
 
