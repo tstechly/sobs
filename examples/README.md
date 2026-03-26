@@ -1,0 +1,77 @@
+# SOBS Examples
+
+This directory contains examples for sending telemetry to SOBS using various clients.
+
+## Prerequisites
+
+Start SOBS:
+
+```bash
+# Docker
+docker run -p 4317:4317 sobs:latest
+
+# or docker-compose
+docker-compose up -d
+```
+
+## Examples
+
+### Python – OpenTelemetry SDK
+
+```bash
+pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+python python/otel_example.py
+```
+
+### Python – Flask with auto-instrumentation
+
+```bash
+pip install flask opentelemetry-sdk opentelemetry-instrumentation-flask \
+    opentelemetry-exporter-otlp-proto-http requests
+python python/flask_example.py
+```
+
+### Node.js – Express with OpenTelemetry SDK
+
+```bash
+cd nodejs
+npm install
+node example.js
+```
+
+### curl – No SDK required
+
+```bash
+bash curl_examples.sh
+```
+
+## RUM (Client-side)
+
+Embed in your HTML:
+
+```html
+<script src="http://localhost:4317/static/rum.js"></script>
+<script>
+  SOBS.init({
+    endpoint: 'http://localhost:4317/v1/rum',
+    appName: 'my-app'
+  });
+</script>
+```
+
+## OTLP Endpoint Reference
+
+| Endpoint         | Method | Description                        |
+|------------------|--------|------------------------------------|
+| `/v1/logs`       | POST   | OTLP/JSON logs                     |
+| `/v1/traces`     | POST   | OTLP/JSON traces                   |
+| `/v1/metrics`    | POST   | OTLP/JSON metrics (stored as logs) |
+| `/v1/rum`        | POST   | RUM events (JSON array)            |
+| `/v1/errors`     | POST   | Direct error submission            |
+| `/v1/ai`         | POST   | AI/LLM call transparency           |
+| `/health`        | GET    | Health check                       |
+
+## Authentication
+
+Set `SOBS_API_KEY` environment variable to enable API key auth.
+Send key in `X-API-Key` header or `?api_key=` query parameter.

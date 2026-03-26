@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Errors{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h4 class="fw-semibold mb-0"><i class="bi bi-bug me-2 text-danger"></i>Errors</h4>
+  <span class="text-secondary small">{{ total }} matching records</span>
+</div>
+
+<!-- Filter bar -->
+<div class="card border-secondary mb-3">
+  <div class="card-body">
+    <form method="get" class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Service</label>
+        <select name="service" class="form-select form-select-sm">
+          <option value="">All services</option>
+          {% for s in services %}
+          <option value="{{ s }}" {% if s == service %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Status</label>
+        <select name="resolved" class="form-select form-select-sm">
+          <option value="0" {% if resolved == '0' %}selected{% endif %}>Open</option>
+          <option value="1" {% if resolved == '1' %}selected{% endif %}>Resolved</option>
+          <option value=""  {% if resolved == ''  %}selected{% endif %}>All</option>
+        </select>
+      </div>
+      <div class="col-md-2 d-flex gap-1">
+        <button type="submit" class="btn btn-primary btn-sm">Filter</button>
+        <a href="/errors" class="btn btn-outline-secondary btn-sm">Reset</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if errors %}
+<div class="accordion" id="errAccordion">
+  {% for err in errors %}
+  <div class="accordion-item border-secondary mb-1">
+    <h2 class="accordion-header">
+      <button class="accordion-button {% if not loop.first %}collapsed{% endif %} py-2"
+              type="button" data-bs-toggle="collapse" data-bs-target="#err{{ err.id }}">
+        <div class="d-flex gap-3 align-items-center w-100 me-2">
+          <span class="badge {% if err.resolved %}bg-success{% else %}bg-danger{% endif %}">
+            {{ 'Resolved' if err.resolved else 'Open' }}
+          </span>
+          <code class="small text-warning">{{ err.err_type }}</code>
+          <span class="small flex-grow-1 text-truncate">{{ err.message }}</span>
+          <span class="badge bg-secondary">{{ err.service or '—' }}</span>
+          <span class="text-secondary small">{{ err.ts[:19] }}</span>
+        </div>
+      </button>
+    </h2>
+    <div id="err{{ err.id }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}">
+      <div class="accordion-body py-2">
+        {% if err.stack %}
+        <pre class="stack-trace text-danger-emphasis bg-dark rounded p-2">{{ err.stack }}</pre>
+        {% endif %}
+        <div class="d-flex gap-2 mt-2">
+          {% if err.trace_id %}
+          <a href="/traces?trace_id={{ err.trace_id }}" class="btn btn-sm btn-outline-info">
+            <i class="bi bi-diagram-3 me-1"></i>Trace
+          </a>
+          {% endif %}
+          {% if not err.resolved %}
+          <button class="btn btn-sm btn-outline-success resolve-btn" data-id="{{ err.id }}">
+            <i class="bi bi-check2 me-1"></i>Resolve
+          </button>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% set prev_offset = [offset - limit, 0] | max %}
+{% set next_offset = offset + limit %}
+<nav class="d-flex justify-content-between align-items-center mt-3">
+  <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + errors | length, total] | min }} of {{ total }}</small>
+  <ul class="pagination pagination-sm mb-0">
+    {% if offset > 0 %}
+    <li class="page-item">
+      <a class="page-link" href="?service={{ service }}&resolved={{ resolved }}&limit={{ limit }}&offset={{ prev_offset }}">← Prev</a>
+    </li>
+    {% endif %}
+    {% if next_offset < total %}
+    <li class="page-item">
+      <a class="page-link" href="?service={{ service }}&resolved={{ resolved }}&limit={{ limit }}&offset={{ next_offset }}">Next →</a>
+    </li>
+    {% endif %}
+  </ul>
+</nav>
+{% else %}
+<div class="text-center py-5 text-secondary">
+  <i class="bi bi-check-circle text-success" style="font-size:2rem;"></i>
+  <p class="mt-2">No errors found</p>
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+document.querySelectorAll('.resolve-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id = btn.dataset.id;
+    const res = await fetch(`/errors/${id}/resolve`, {method: 'POST'});
+    if (res.ok) {
+      btn.closest('.accordion-item').querySelectorAll('.badge').forEach(b => {
+        if (b.classList.contains('bg-danger')) { b.classList.replace('bg-danger', 'bg-success'); b.textContent = 'Resolved'; }
+      });
+      btn.remove();
+    }
+  });
+});
+</script>
+{% endblock %}

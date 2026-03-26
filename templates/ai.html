@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}AI Transparency{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h4 class="fw-semibold mb-0"><i class="bi bi-cpu me-2 text-success"></i>AI Transparency</h4>
+  <span class="text-secondary small">{{ total_calls }} calls · {{ total_tokens_in + total_tokens_out }} total tokens</span>
+</div>
+
+<!-- Token summary -->
+<div class="row g-3 mb-3">
+  <div class="col-6 col-md-3">
+    <div class="stat-card p-3 text-center">
+      <div class="fs-4 fw-bold text-success">{{ total_calls }}</div>
+      <div class="text-secondary small">Total Calls</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="stat-card p-3 text-center">
+      <div class="fs-4 fw-bold text-info">{{ total_tokens_in }}</div>
+      <div class="text-secondary small">Tokens In</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="stat-card p-3 text-center">
+      <div class="fs-4 fw-bold text-warning">{{ total_tokens_out }}</div>
+      <div class="text-secondary small">Tokens Out</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="stat-card p-3 text-center">
+      <div class="fs-4 fw-bold text-primary">{{ total_tokens_in + total_tokens_out }}</div>
+      <div class="text-secondary small">Total Tokens</div>
+    </div>
+  </div>
+</div>
+
+<!-- Filter bar -->
+<div class="card border-secondary mb-3">
+  <div class="card-body">
+    <form method="get" class="row g-2 align-items-end">
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Service</label>
+        <select name="service" class="form-select form-select-sm">
+          <option value="">All services</option>
+          {% for s in services %}
+          <option value="{{ s }}" {% if s == service %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Model</label>
+        <select name="model" class="form-select form-select-sm">
+          <option value="">All models</option>
+          {% for m in models %}
+          <option value="{{ m }}" {% if m == model %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-2 d-flex gap-1">
+        <button type="submit" class="btn btn-primary btn-sm">Filter</button>
+        <a href="/ai" class="btn btn-outline-secondary btn-sm">Reset</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if ai_items %}
+<div class="accordion" id="aiAccordion">
+  {% for item in ai_items %}
+  <div class="accordion-item border-secondary mb-1">
+    <h2 class="accordion-header">
+      <button class="accordion-button collapsed py-2"
+              type="button" data-bs-toggle="collapse" data-bs-target="#ai{{ item.id }}">
+        <div class="d-flex gap-3 align-items-center w-100 me-2 flex-wrap">
+          <span class="badge bg-success">{{ item.model }}</span>
+          <span class="badge bg-info text-dark">{{ item.provider }}</span>
+          <span class="small flex-grow-1 text-truncate text-secondary" style="max-width:300px;" title="{{ item.prompt }}">
+            {{ item.prompt[:80] }}{% if item.prompt | length > 80 %}…{% endif %}
+          </span>
+          <span class="small text-warning">{{ item.tokens_in }}↑ {{ item.tokens_out }}↓</span>
+          <span class="small text-secondary">{{ item.duration_ms }}ms</span>
+          <span class="text-secondary small">{{ item.ts[:19] }}</span>
+        </div>
+      </button>
+    </h2>
+    <div id="ai{{ item.id }}" class="accordion-collapse collapse">
+      <div class="accordion-body py-2">
+        <div class="row g-2">
+          <div class="col-md-6">
+            <div class="fw-semibold small text-secondary mb-1"><i class="bi bi-chat-left-text me-1"></i>Prompt</div>
+            <div class="prompt-box">{{ item.prompt }}</div>
+          </div>
+          <div class="col-md-6">
+            <div class="fw-semibold small text-secondary mb-1"><i class="bi bi-chat-right-text me-1"></i>Response</div>
+            <div class="prompt-box">{{ item.response }}</div>
+          </div>
+        </div>
+        <div class="mt-2 d-flex gap-3 small text-secondary">
+          <span><strong>Service:</strong> {{ item.service }}</span>
+          <span><strong>Tokens in:</strong> {{ item.tokens_in }}</span>
+          <span><strong>Tokens out:</strong> {{ item.tokens_out }}</span>
+          <span><strong>Duration:</strong> {{ item.duration_ms }}ms</span>
+          {% if item.trace_id %}
+          <a href="/traces?trace_id={{ item.trace_id }}" class="trace-link">
+            Trace {{ item.trace_id[:12] }}…
+          </a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% set prev_offset = [offset - limit, 0] | max %}
+{% set next_offset = offset + limit %}
+<nav class="d-flex justify-content-between align-items-center mt-2">
+  <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + ai_items | length, total] | min }} of {{ total }}</small>
+  <ul class="pagination pagination-sm mb-0">
+    {% if offset > 0 %}
+    <li class="page-item">
+      <a class="page-link" href="?service={{ service }}&model={{ model }}&limit={{ limit }}&offset={{ prev_offset }}">← Prev</a>
+    </li>
+    {% endif %}
+    {% if next_offset < total %}
+    <li class="page-item">
+      <a class="page-link" href="?service={{ service }}&model={{ model }}&limit={{ limit }}&offset={{ next_offset }}">Next →</a>
+    </li>
+    {% endif %}
+  </ul>
+</nav>
+{% else %}
+<div class="text-center py-5 text-secondary">
+  <i class="bi bi-cpu" style="font-size:2rem;"></i>
+  <p class="mt-2">No AI events yet</p>
+  <p class="small">POST to <code>/v1/ai</code> with your LLM call details.</p>
+</div>
+{% endif %}
+
+<!-- Example snippet -->
+<div class="card border-secondary mt-4">
+  <div class="card-header small"><i class="bi bi-code-slash me-1"></i>Python instrumentation example</div>
+  <div class="card-body">
+    <pre class="mb-0 small text-info"><code>import requests, time
+
+def tracked_llm_call(prompt, model="gpt-4o", provider="openai"):
+    start = time.monotonic()
+    # ... your LLM API call ...
+    response_text = "..."
+    tokens_in, tokens_out = 50, 120
+    requests.post("http://YOUR_SOBS_HOST/v1/ai", json={
+        "service": "my-app",
+        "provider": provider,
+        "model": model,
+        "prompt": prompt,
+        "response": response_text,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "duration_ms": (time.monotonic() - start) * 1000,
+    })</code></pre>
+  </div>
+</div>
+{% endblock %}
