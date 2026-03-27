@@ -455,3 +455,136 @@ class TestBasicAuth:
         """/health should remain accessible regardless of Basic Auth config."""
         r = authed_client.get("/health")
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# External Auth
+# ---------------------------------------------------------------------------
+class TestExternalAuth:
+    """Tests for optional external auth handler on ingest API routes."""
+
+    _EXT_AUTH_URL = "http://auth-service"
+
+    @pytest.fixture
+    def ext_auth_client(self, monkeypatch):
+        """Client with external auth URL configured."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            yield c
+
+    def test_rejects_request_without_bearer_token(self, ext_auth_client):
+        """Ingest API should return 401 when external auth is configured and no Bearer token is sent."""
+        r = ext_auth_client.post("/v1/logs", json={})
+        assert r.status_code == 401
+
+    def test_allows_request_with_valid_bearer_token(self, ext_auth_client, monkeypatch):
+        """Ingest API should allow requests when external auth service approves the token."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: True)
+        r = ext_auth_client.post("/v1/logs", json={}, headers={"Authorization": "Bearer valid-token"})
+        assert r.status_code == 200
+
+    def test_rejects_request_with_invalid_bearer_token(self, ext_auth_client, monkeypatch):
+        """Ingest API should return 401 when external auth service rejects the token."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: False)
+        r = ext_auth_client.post("/v1/logs", json={}, headers={"Authorization": "Bearer bad-token"})
+        assert r.status_code == 401
+
+    def test_api_key_still_works_when_external_auth_configured(self, monkeypatch):
+        """Existing API key auth should still work when external auth is also configured."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "API_KEY", "test-key")
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            r = c.post("/v1/logs", json={}, headers={"X-API-Key": "test-key"})
+        assert r.status_code == 200
+
+    def test_no_auth_required_when_not_configured(self, client):
+        """Ingest API should be freely accessible when external auth is not configured."""
+        r = client.post("/v1/logs", json={})
+        assert r.status_code == 200
+
+    def test_check_external_auth_makes_correct_request(self, monkeypatch):
+        """_check_external_auth should POST to /internal/auth/validate with the Authorization header."""
+        import urllib.request
+
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+
+        captured = {}
+
+        class _FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["method"] = req.method
+            captured["auth"] = req.get_header("Authorization")
+            return _FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        result = app_module._check_external_auth("Bearer my-token")
+
+        assert result is True
+        assert captured["url"] == self._EXT_AUTH_URL + "/internal/auth/validate"
+        assert captured["method"] == "POST"
+        assert captured["auth"] == "Bearer my-token"
+
+    def test_check_external_auth_returns_false_on_non_200(self, monkeypatch):
+        """_check_external_auth should return False when the external service returns non-200."""
+        import urllib.request
+
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+
+        class _FakeResponse:
+            status = 401
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResponse())
+
+        assert app_module._check_external_auth("Bearer bad-token") is False
+
+    def test_check_external_auth_returns_false_on_network_error(self, monkeypatch):
+        """_check_external_auth should return False when the external service is unreachable."""
+        import urllib.request
+
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+
+        def _raise_network_error(req, timeout=None):
+            raise OSError("unreachable")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _raise_network_error)
+
+        assert app_module._check_external_auth("Bearer any-token") is False
+
+    def test_check_external_auth_returns_false_when_url_not_configured(self):
+        """_check_external_auth should return False immediately when EXTERNAL_AUTH_URL is empty."""
+        import app as app_module
+
+        # EXTERNAL_AUTH_URL is empty in the default test environment
+        assert app_module._check_external_auth("Bearer token") is False

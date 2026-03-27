@@ -11,6 +11,8 @@ import os
 import re
 import secrets
 import sqlite3
+import urllib.error
+import urllib.request
 import zlib
 from datetime import datetime, timezone
 from functools import wraps
@@ -34,6 +36,7 @@ DB_PATH = os.path.join(DATA_DIR, "sobs.db")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
 BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
 BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
+EXTERNAL_AUTH_URL = os.environ.get("SOBS_EXTERNAL_AUTH_URL", "")  # empty = disabled
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -170,14 +173,40 @@ def decompress_json(data: bytes):
 # ---------------------------------------------------------------------------
 # Auth decorator (optional API key)
 # ---------------------------------------------------------------------------
+def _check_external_auth(authorization: str) -> bool:
+    """Validate a Bearer token against the configured external auth service.
+
+    Makes a POST to ``{EXTERNAL_AUTH_URL}/internal/auth/validate`` forwarding
+    the ``Authorization`` header.  Returns ``True`` only on an HTTP 200 reply.
+    """
+    if not EXTERNAL_AUTH_URL:
+        return False
+    try:
+        url = EXTERNAL_AUTH_URL.rstrip("/") + "/internal/auth/validate"
+        req = urllib.request.Request(url, method="POST")
+        req.add_header("Authorization", authorization)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if not API_KEY and not EXTERNAL_AUTH_URL:
+            return f(*args, **kwargs)
+        # Accept a matching static API key
         if API_KEY:
             key = request.headers.get("X-API-Key") or request.args.get("api_key")
-            if key != API_KEY:
-                return jsonify({"error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
+            if key == API_KEY:
+                return f(*args, **kwargs)
+        # Accept a Bearer token validated by the external auth service
+        if EXTERNAL_AUTH_URL:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer ") and _check_external_auth(auth_header):
+                return f(*args, **kwargs)
+        return jsonify({"error": "Unauthorized"}), 401
 
     return decorated
 
