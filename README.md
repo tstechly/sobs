@@ -1,4 +1,4 @@
-# SOBS – Simple Observe
+# SOBS – Simple Observe Stack
 
 **SOBS** is a lightweight, single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), and **AI call transparency** — all in one tiny container you can run as a standalone pod or sidecar.
 
