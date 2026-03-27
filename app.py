@@ -191,6 +191,25 @@ def _check_external_auth(authorization: str) -> bool:
         return False
 
 
+def _auth_mode() -> str:
+    """Return auth mode: none, basic, external, or invalid."""
+    has_user = bool(BASIC_AUTH_USERNAME)
+    has_pass = bool(BASIC_AUTH_PASSWORD)
+    has_external = bool(EXTERNAL_AUTH_URL)
+
+    # Configuration is exclusive: use at most one auth type.
+    if has_external and (has_user or has_pass):
+        return "invalid"
+    # Basic auth requires both username and password.
+    if has_user != has_pass:
+        return "invalid"
+    if has_external:
+        return "external"
+    if has_user and has_pass:
+        return "basic"
+    return "none"
+
+
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -209,11 +228,14 @@ def require_api_key(f):
 def require_basic_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not BASIC_AUTH_USERNAME and not BASIC_AUTH_PASSWORD and not EXTERNAL_AUTH_URL:
+        mode = _auth_mode()
+        if mode == "invalid":
+            return jsonify({"error": "Server auth misconfiguration"}), 500
+        if mode == "none":
             return f(*args, **kwargs)
         auth = request.headers.get("Authorization", "")
-        # Accept valid HTTP Basic credentials when configured
-        if BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD and auth.startswith("Basic "):
+        # Accept valid HTTP Basic credentials when configured.
+        if mode == "basic" and auth.startswith("Basic "):
             try:
                 decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
                 username, _, password = decoded.partition(":")
@@ -223,11 +245,11 @@ def require_basic_auth(f):
                     return f(*args, **kwargs)
             except Exception:
                 pass
-        # Accept a Bearer token validated by the external auth service
-        if EXTERNAL_AUTH_URL and auth.startswith("Bearer ") and _check_external_auth(auth):
+        # Accept a Bearer token validated by the external auth service.
+        if mode == "external" and auth.startswith("Bearer ") and _check_external_auth(auth):
             return f(*args, **kwargs)
-        # Advertise the appropriate auth scheme(s) in the challenge header
-        if BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD:
+        # Advertise the configured auth scheme.
+        if mode == "basic":
             www_auth = 'Basic realm="SOBS"'
         else:
             www_auth = 'Bearer realm="SOBS"'

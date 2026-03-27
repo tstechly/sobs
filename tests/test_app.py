@@ -456,6 +456,19 @@ class TestBasicAuth:
         r = authed_client.get("/health")
         assert r.status_code == 200
 
+    def test_partial_basic_auth_config_is_error(self, monkeypatch):
+        """Supplying only one Basic Auth credential should be treated as misconfiguration."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "BASIC_AUTH_USERNAME", self._TEST_USER)
+        monkeypatch.setattr(app_module, "BASIC_AUTH_PASSWORD", "")
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", "")
+        app.config["TESTING"] = True
+        with app.test_client() as c:
+            r = c.get("/")
+        assert r.status_code == 500
+        assert r.get_json() == {"error": "Server auth misconfiguration"}
+
 
 # ---------------------------------------------------------------------------
 # External Auth
@@ -497,18 +510,18 @@ class TestExternalAuth:
         r = ext_auth_client.get("/", headers={"Authorization": "Bearer bad-token"})
         assert r.status_code == 401
 
-    def test_basic_auth_still_works_when_external_auth_configured(self, monkeypatch):
-        """Basic Auth credentials should still work when external auth is also configured."""
+    def test_basic_and_external_together_is_error(self, monkeypatch):
+        """Basic and external auth configured together should be treated as misconfiguration."""
         import app as app_module
 
         monkeypatch.setattr(app_module, "BASIC_AUTH_USERNAME", "admin")
         monkeypatch.setattr(app_module, "BASIC_AUTH_PASSWORD", "secret")
         monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
         app.config["TESTING"] = True
-        token = base64.b64encode(b"admin:secret").decode()
         with app.test_client() as c:
-            r = c.get("/", headers={"Authorization": f"Basic {token}"})
-        assert r.status_code == 200
+            r = c.get("/")
+        assert r.status_code == 500
+        assert r.get_json() == {"error": "Server auth misconfiguration"}
 
     def test_ingest_endpoints_unaffected_by_external_auth(self, ext_auth_client):
         """Ingest API endpoints (/v1/*) should not be gated by external auth."""
