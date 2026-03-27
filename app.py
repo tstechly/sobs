@@ -11,6 +11,8 @@ import os
 import re
 import secrets
 import sqlite3
+import urllib.error
+import urllib.request
 import zlib
 from datetime import datetime, timezone
 from functools import wraps
@@ -34,6 +36,7 @@ DB_PATH = os.path.join(DATA_DIR, "sobs.db")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
 BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
 BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
+EXTERNAL_AUTH_URL = os.environ.get("SOBS_EXTERNAL_AUTH_URL", "")  # empty = disabled
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -170,6 +173,43 @@ def decompress_json(data: bytes):
 # ---------------------------------------------------------------------------
 # Auth decorator (optional API key)
 # ---------------------------------------------------------------------------
+def _check_external_auth(authorization: str) -> bool:
+    """Validate a Bearer token against the configured external auth service.
+
+    Makes a POST to ``{EXTERNAL_AUTH_URL}/internal/auth/validate`` forwarding
+    the ``Authorization`` header.  Returns ``True`` only on an HTTP 200 reply.
+    """
+    if not EXTERNAL_AUTH_URL:
+        return False
+    try:
+        url = EXTERNAL_AUTH_URL.rstrip("/") + "/internal/auth/validate"
+        req = urllib.request.Request(url, method="POST")
+        req.add_header("Authorization", authorization)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _auth_mode() -> str:
+    """Return auth mode: none, basic, external, or invalid."""
+    has_user = bool(BASIC_AUTH_USERNAME)
+    has_pass = bool(BASIC_AUTH_PASSWORD)
+    has_external = bool(EXTERNAL_AUTH_URL)
+
+    # Configuration is exclusive: use at most one auth type.
+    if has_external and (has_user or has_pass):
+        return "invalid"
+    # Basic auth requires both username and password.
+    if has_user != has_pass:
+        return "invalid"
+    if has_external:
+        return "external"
+    if has_user and has_pass:
+        return "basic"
+    return "none"
+
+
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -188,24 +228,36 @@ def require_api_key(f):
 def require_basic_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD:
-            auth = request.headers.get("Authorization", "")
-            if auth.startswith("Basic "):
-                try:
-                    decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
-                    username, _, password = decoded.partition(":")
-                    user_ok = secrets.compare_digest(username, BASIC_AUTH_USERNAME)
-                    pass_ok = secrets.compare_digest(password, BASIC_AUTH_PASSWORD)
-                    if user_ok and pass_ok:
-                        return f(*args, **kwargs)
-                except Exception:
-                    pass
-            return (
-                "Unauthorized",
-                401,
-                {"WWW-Authenticate": 'Basic realm="SOBS"'},
-            )
-        return f(*args, **kwargs)
+        mode = _auth_mode()
+        if mode == "invalid":
+            return jsonify({"error": "Server auth misconfiguration"}), 500
+        if mode == "none":
+            return f(*args, **kwargs)
+        auth = request.headers.get("Authorization", "")
+        # Accept valid HTTP Basic credentials when configured.
+        if mode == "basic" and auth.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+                username, _, password = decoded.partition(":")
+                user_ok = secrets.compare_digest(username, BASIC_AUTH_USERNAME)
+                pass_ok = secrets.compare_digest(password, BASIC_AUTH_PASSWORD)
+                if user_ok and pass_ok:
+                    return f(*args, **kwargs)
+            except Exception:
+                pass
+        # Accept a Bearer token validated by the external auth service.
+        if mode == "external" and auth.startswith("Bearer ") and _check_external_auth(auth):
+            return f(*args, **kwargs)
+        # Advertise the configured auth scheme.
+        if mode == "basic":
+            www_auth = 'Basic realm="SOBS"'
+        else:
+            www_auth = 'Bearer realm="SOBS"'
+        return (
+            "Unauthorized",
+            401,
+            {"WWW-Authenticate": www_auth},
+        )
 
     return decorated
 

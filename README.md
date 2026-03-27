@@ -20,7 +20,7 @@
 
 ```bash
 # Docker
-docker run -p 4317:4317 -v sobs_data:/data sobs:latest
+docker run -p 4317:4317 -v sobs_data:/data ghcr.io/abartrim/sobs:latest
 
 # docker-compose
 docker-compose up -d
@@ -31,6 +31,10 @@ python app.py
 ```
 
 Open `http://localhost:4317` in your browser.
+
+Prebuilt image published by CI:
+
+`ghcr.io/abartrim/sobs:latest`
 
 ## Sending Data
 
@@ -89,10 +93,19 @@ bash examples/curl_examples.sh
 | `SOBS_API_KEY`              | _(empty)_      | Optional auth key for ingest endpoints           |
 | `SOBS_BASIC_AUTH_USERNAME`  | _(empty)_      | Optional Basic Auth username for the Web UI      |
 | `SOBS_BASIC_AUTH_PASSWORD`  | _(empty)_      | Optional Basic Auth password for the Web UI      |
+| `SOBS_EXTERNAL_AUTH_URL`    | _(empty)_      | Optional external Bearer validator for the Web UI |
 | `PORT`                      | `4317`         | Listen port                                      |
 | `FLASK_DEBUG`               | `0`            | Enable Flask debug mode                          |
 
-When both `SOBS_BASIC_AUTH_USERNAME` and `SOBS_BASIC_AUTH_PASSWORD` are set, the Web UI requires HTTP Basic Authentication. The ingest API endpoints (`/v1/*`) use the separate `SOBS_API_KEY` mechanism.
+Authentication details and setup examples are documented in [AUTHENTICATION.md](AUTHENTICATION.md).
+
+The Web UI supports exactly one mode at a time:
+
+- no auth
+- basic auth (requires both `SOBS_BASIC_AUTH_USERNAME` and `SOBS_BASIC_AUTH_PASSWORD`)
+- external bearer validation (`SOBS_EXTERNAL_AUTH_URL`)
+
+Ingest API endpoints (`/v1/*`) use the separate `SOBS_API_KEY` mechanism.
 
 ## Kubernetes
 

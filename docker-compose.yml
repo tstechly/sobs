@@ -3,7 +3,7 @@ version: "3.9"
 services:
   sobs:
     build: .
-    image: sobs:latest
+    image: ghcr.io/abartrim/sobs:latest
     container_name: sobs
     ports:
       - "4317:4317"
