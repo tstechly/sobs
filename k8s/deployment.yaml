@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: sobs
-          image: sobs:latest
+          image: ghcr.io/abartrim/sobs:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 4317

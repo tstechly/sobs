@@ -20,7 +20,7 @@
 
 ```bash
 # Docker
-docker run -p 4317:4317 -v sobs_data:/data sobs:latest
+docker run -p 4317:4317 -v sobs_data:/data ghcr.io/abartrim/sobs:latest
 
 # docker-compose
 docker-compose up -d
@@ -31,6 +31,10 @@ python app.py
 ```
 
 Open `http://localhost:4317` in your browser.
+
+Prebuilt image published by CI:
+
+`ghcr.io/abartrim/sobs:latest`
 
 ## Sending Data
 

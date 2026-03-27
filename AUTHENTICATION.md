@@ -101,7 +101,7 @@ Basic mode:
 
     services:
       sobs:
-        image: sobs:latest
+        image: ghcr.io/abartrim/sobs:latest
         ports:
           - "4317:4317"
         environment:
@@ -113,7 +113,7 @@ External mode:
 
     services:
       sobs:
-        image: sobs:latest
+        image: ghcr.io/abartrim/sobs:latest
         ports:
           - "4317:4317"
         environment:

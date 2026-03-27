@@ -10,7 +10,7 @@
 #         image: my-app:latest
 #         ...
 #       - name: sobs
-#         image: sobs:latest
+#         image: ghcr.io/abartrim/sobs:latest
 #         ports:
 #           - containerPort: 4317
 #         env:
