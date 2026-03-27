@@ -194,19 +194,11 @@ def _check_external_auth(authorization: str) -> bool:
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not API_KEY and not EXTERNAL_AUTH_URL:
-            return f(*args, **kwargs)
-        # Accept a matching static API key
         if API_KEY:
             key = request.headers.get("X-API-Key") or request.args.get("api_key")
-            if key == API_KEY:
-                return f(*args, **kwargs)
-        # Accept a Bearer token validated by the external auth service
-        if EXTERNAL_AUTH_URL:
-            auth_header = request.headers.get("Authorization", "")
-            if auth_header.startswith("Bearer ") and _check_external_auth(auth_header):
-                return f(*args, **kwargs)
-        return jsonify({"error": "Unauthorized"}), 401
+            if key != API_KEY:
+                return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
 
     return decorated
 
@@ -217,24 +209,33 @@ def require_api_key(f):
 def require_basic_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if not BASIC_AUTH_USERNAME and not BASIC_AUTH_PASSWORD and not EXTERNAL_AUTH_URL:
+            return f(*args, **kwargs)
+        auth = request.headers.get("Authorization", "")
+        # Accept valid HTTP Basic credentials when configured
+        if BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD and auth.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+                username, _, password = decoded.partition(":")
+                user_ok = secrets.compare_digest(username, BASIC_AUTH_USERNAME)
+                pass_ok = secrets.compare_digest(password, BASIC_AUTH_PASSWORD)
+                if user_ok and pass_ok:
+                    return f(*args, **kwargs)
+            except Exception:
+                pass
+        # Accept a Bearer token validated by the external auth service
+        if EXTERNAL_AUTH_URL and auth.startswith("Bearer ") and _check_external_auth(auth):
+            return f(*args, **kwargs)
+        # Advertise the appropriate auth scheme(s) in the challenge header
         if BASIC_AUTH_USERNAME and BASIC_AUTH_PASSWORD:
-            auth = request.headers.get("Authorization", "")
-            if auth.startswith("Basic "):
-                try:
-                    decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
-                    username, _, password = decoded.partition(":")
-                    user_ok = secrets.compare_digest(username, BASIC_AUTH_USERNAME)
-                    pass_ok = secrets.compare_digest(password, BASIC_AUTH_PASSWORD)
-                    if user_ok and pass_ok:
-                        return f(*args, **kwargs)
-                except Exception:
-                    pass
-            return (
-                "Unauthorized",
-                401,
-                {"WWW-Authenticate": 'Basic realm="SOBS"'},
-            )
-        return f(*args, **kwargs)
+            www_auth = 'Basic realm="SOBS"'
+        else:
+            www_auth = 'Bearer realm="SOBS"'
+        return (
+            "Unauthorized",
+            401,
+            {"WWW-Authenticate": www_auth},
+        )
 
     return decorated
 

@@ -461,7 +461,7 @@ class TestBasicAuth:
 # External Auth
 # ---------------------------------------------------------------------------
 class TestExternalAuth:
-    """Tests for optional external auth handler on ingest API routes."""
+    """Tests for optional external auth handler on Web UI routes."""
 
     _EXT_AUTH_URL = "http://auth-service"
 
@@ -476,41 +476,59 @@ class TestExternalAuth:
             yield c
 
     def test_rejects_request_without_bearer_token(self, ext_auth_client):
-        """Ingest API should return 401 when external auth is configured and no Bearer token is sent."""
-        r = ext_auth_client.post("/v1/logs", json={})
+        """Web UI should return 401 with Bearer challenge when external auth is configured and no token is sent."""
+        r = ext_auth_client.get("/")
         assert r.status_code == 401
+        assert r.headers.get("WWW-Authenticate") == 'Bearer realm="SOBS"'
 
     def test_allows_request_with_valid_bearer_token(self, ext_auth_client, monkeypatch):
-        """Ingest API should allow requests when external auth service approves the token."""
+        """Web UI should allow requests when external auth service approves the token."""
         import app as app_module
 
         monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: True)
-        r = ext_auth_client.post("/v1/logs", json={}, headers={"Authorization": "Bearer valid-token"})
+        r = ext_auth_client.get("/", headers={"Authorization": "Bearer valid-token"})
         assert r.status_code == 200
 
     def test_rejects_request_with_invalid_bearer_token(self, ext_auth_client, monkeypatch):
-        """Ingest API should return 401 when external auth service rejects the token."""
+        """Web UI should return 401 when external auth service rejects the token."""
         import app as app_module
 
         monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: False)
-        r = ext_auth_client.post("/v1/logs", json={}, headers={"Authorization": "Bearer bad-token"})
+        r = ext_auth_client.get("/", headers={"Authorization": "Bearer bad-token"})
         assert r.status_code == 401
 
-    def test_api_key_still_works_when_external_auth_configured(self, monkeypatch):
-        """Existing API key auth should still work when external auth is also configured."""
+    def test_basic_auth_still_works_when_external_auth_configured(self, monkeypatch):
+        """Basic Auth credentials should still work when external auth is also configured."""
         import app as app_module
 
-        monkeypatch.setattr(app_module, "API_KEY", "test-key")
+        monkeypatch.setattr(app_module, "BASIC_AUTH_USERNAME", "admin")
+        monkeypatch.setattr(app_module, "BASIC_AUTH_PASSWORD", "secret")
         monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
         app.config["TESTING"] = True
+        token = base64.b64encode(b"admin:secret").decode()
         with app.test_client() as c:
-            r = c.post("/v1/logs", json={}, headers={"X-API-Key": "test-key"})
+            r = c.get("/", headers={"Authorization": f"Basic {token}"})
         assert r.status_code == 200
 
-    def test_no_auth_required_when_not_configured(self, client):
-        """Ingest API should be freely accessible when external auth is not configured."""
-        r = client.post("/v1/logs", json={})
+    def test_ingest_endpoints_unaffected_by_external_auth(self, ext_auth_client):
+        """Ingest API endpoints (/v1/*) should not be gated by external auth."""
+        r = ext_auth_client.post("/v1/logs", json={})
         assert r.status_code == 200
+
+    def test_ui_no_auth_required_when_not_configured(self, client):
+        """Web UI should be freely accessible when external auth is not configured."""
+        r = client.get("/")
+        assert r.status_code == 200
+
+    def test_all_ui_routes_protected(self, ext_auth_client, monkeypatch):
+        """All Web UI routes should require auth when external auth is configured."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: False)
+        ui_routes = ["/", "/logs", "/errors", "/traces", "/rum", "/ai"]
+        for route in ui_routes:
+            r = ext_auth_client.get(route, headers={"Authorization": "Bearer bad-token"})
+            assert r.status_code == 401, f"Expected 401 for {route}, got {r.status_code}"
 
     def test_check_external_auth_makes_correct_request(self, monkeypatch):
         """_check_external_auth should POST to /internal/auth/validate with the Authorization header."""
