@@ -1,5 +1,15 @@
+from typing import Any
+
 import pytest
-from playwright.sync_api import sync_playwright
+
+sync_playwright: Any | None
+
+try:
+    from playwright.sync_api import sync_playwright as _real_sync_playwright
+
+    sync_playwright = _real_sync_playwright
+except ModuleNotFoundError:  # pragma: no cover - depends on environment
+    sync_playwright = None
 
 
 @pytest.fixture(scope="function")
@@ -9,6 +19,9 @@ def page():
     This avoids requiring pytest-playwright plugin wiring while keeping
     test_integration.py unchanged.
     """
+    if sync_playwright is None:
+        pytest.skip("Playwright is not installed in this test environment")
+
     with sync_playwright() as p:
         browser = None
         try:
