@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import urllib.error
 import urllib.request
 import zlib
@@ -17,10 +18,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
 
-import duckdb
+import chdb.dbapi as chdb_driver
 from flask import (
     Flask,
-    g,
     jsonify,
     render_template,
     request,
@@ -98,7 +98,7 @@ class BasePathMiddleware:
 app.wsgi_app = BasePathMiddleware(app.wsgi_app)  # type: ignore[method-assign]
 
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-DB_PATH = os.path.join(DATA_DIR, "sobs.duckdb")
+DB_PATH = os.path.join(DATA_DIR, "sobs.chdb")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
 BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
 BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
@@ -113,90 +113,76 @@ log = logging.getLogger("sobs")
 # Database helpers
 # ---------------------------------------------------------------------------
 SCHEMA = """
-CREATE SEQUENCE IF NOT EXISTS logs_id_seq START 1;
-CREATE SEQUENCE IF NOT EXISTS errors_id_seq START 1;
-CREATE SEQUENCE IF NOT EXISTS spans_id_seq START 1;
-CREATE SEQUENCE IF NOT EXISTS rum_events_id_seq START 1;
-CREATE SEQUENCE IF NOT EXISTS ai_events_id_seq START 1;
-
 CREATE TABLE IF NOT EXISTS logs (
-    id          BIGINT PRIMARY KEY DEFAULT nextval('logs_id_seq'),
-    ts          TEXT    NOT NULL,
-    level       TEXT    NOT NULL DEFAULT 'INFO',
-    service     TEXT    NOT NULL DEFAULT '',
-    body        BLOB    NOT NULL,          -- zlib-compressed UTF-8 message
-    attrs       BLOB,                      -- zlib-compressed JSON attributes
-    trace_id    TEXT    DEFAULT '',
-    span_id     TEXT    DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_logs_ts      ON logs(ts);
-CREATE INDEX IF NOT EXISTS idx_logs_level   ON logs(level);
-CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
+    id          String DEFAULT generateUUIDv4(),
+    ts          String NOT NULL DEFAULT '',
+    level       LowCardinality(String) DEFAULT 'INFO',
+    service     LowCardinality(String) DEFAULT '',
+    body        Nullable(String),
+    attrs       Nullable(String),
+    trace_id    String DEFAULT '',
+    span_id     String DEFAULT ''
+) ENGINE = MergeTree()
+ORDER BY (service, ts);
 
 CREATE TABLE IF NOT EXISTS errors (
-    id          BIGINT PRIMARY KEY DEFAULT nextval('errors_id_seq'),
-    ts          TEXT    NOT NULL,
-    service     TEXT    NOT NULL DEFAULT '',
-    err_type    TEXT    NOT NULL DEFAULT '',
-    message     TEXT    NOT NULL DEFAULT '',
-    stack       BLOB,                      -- zlib-compressed stack trace
-    attrs       BLOB,                      -- zlib-compressed JSON
-    trace_id    TEXT    DEFAULT '',
-    span_id     TEXT    DEFAULT '',
-    resolved    INTEGER DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_errors_ts      ON errors(ts);
-CREATE INDEX IF NOT EXISTS idx_errors_service ON errors(service);
+    id          String DEFAULT generateUUIDv4(),
+    ts          String NOT NULL DEFAULT '',
+    service     LowCardinality(String) DEFAULT '',
+    err_type    String DEFAULT '',
+    message     String DEFAULT '',
+    stack       Nullable(String),
+    attrs       Nullable(String),
+    trace_id    String DEFAULT '',
+    span_id     String DEFAULT '',
+    resolved    UInt8 DEFAULT 0
+) ENGINE = MergeTree()
+ORDER BY (ts);
 
 CREATE TABLE IF NOT EXISTS spans (
-    id              BIGINT PRIMARY KEY DEFAULT nextval('spans_id_seq'),
-    ts              TEXT    NOT NULL,
-    trace_id        TEXT    NOT NULL DEFAULT '',
-    span_id         TEXT    NOT NULL DEFAULT '',
-    parent_span_id  TEXT    DEFAULT '',
-    name            TEXT    NOT NULL DEFAULT '',
-    service         TEXT    NOT NULL DEFAULT '',
-    duration_ms     REAL    DEFAULT 0,
-    status          TEXT    DEFAULT 'OK',
-    attrs           BLOB                       -- zlib-compressed JSON
-);
-CREATE INDEX IF NOT EXISTS idx_spans_ts       ON spans(ts);
-CREATE INDEX IF NOT EXISTS idx_spans_trace_id ON spans(trace_id);
-CREATE INDEX IF NOT EXISTS idx_spans_service  ON spans(service);
+    id              String DEFAULT generateUUIDv4(),
+    ts              String NOT NULL DEFAULT '',
+    trace_id        String DEFAULT '',
+    span_id         String DEFAULT '',
+    parent_span_id  String DEFAULT '',
+    name            String DEFAULT '',
+    service         LowCardinality(String) DEFAULT '',
+    duration_ms     Float64 DEFAULT 0,
+    status          LowCardinality(String) DEFAULT 'OK',
+    attrs           Nullable(String)
+) ENGINE = MergeTree()
+ORDER BY (service, ts);
 
 CREATE TABLE IF NOT EXISTS rum_events (
-    id          BIGINT PRIMARY KEY DEFAULT nextval('rum_events_id_seq'),
-    ts          TEXT    NOT NULL,
-    session_id  TEXT    NOT NULL DEFAULT '',
-    event_type  TEXT    NOT NULL DEFAULT '',
-    url         TEXT    DEFAULT '',
-    data        BLOB                           -- zlib-compressed JSON
-);
-CREATE INDEX IF NOT EXISTS idx_rum_ts         ON rum_events(ts);
-CREATE INDEX IF NOT EXISTS idx_rum_session    ON rum_events(session_id);
-CREATE INDEX IF NOT EXISTS idx_rum_event_type ON rum_events(event_type);
+    id          String DEFAULT generateUUIDv4(),
+    ts          String NOT NULL DEFAULT '',
+    session_id  String DEFAULT '',
+    event_type  LowCardinality(String) DEFAULT '',
+    url         String DEFAULT '',
+    data        Nullable(String)
+) ENGINE = MergeTree()
+ORDER BY (ts);
 
 CREATE TABLE IF NOT EXISTS ai_events (
-    id          BIGINT PRIMARY KEY DEFAULT nextval('ai_events_id_seq'),
-    ts          TEXT    NOT NULL,
-    service     TEXT    NOT NULL DEFAULT '',
-    provider    TEXT    NOT NULL DEFAULT '',
-    model       TEXT    NOT NULL DEFAULT '',
-    prompt      BLOB,                          -- zlib-compressed
-    response    BLOB,                          -- zlib-compressed
-    tokens_in   INTEGER DEFAULT 0,
-    tokens_out  INTEGER DEFAULT 0,
-    duration_ms REAL    DEFAULT 0,
-    trace_id    TEXT    DEFAULT '',
-    span_id     TEXT    DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_ai_ts      ON ai_events(ts);
-CREATE INDEX IF NOT EXISTS idx_ai_service ON ai_events(service);
+    id          String DEFAULT generateUUIDv4(),
+    ts          String NOT NULL DEFAULT '',
+    service     LowCardinality(String) DEFAULT '',
+    provider    LowCardinality(String) DEFAULT '',
+    model       String DEFAULT '',
+    prompt      Nullable(String),
+    response    Nullable(String),
+    tokens_in   UInt32 DEFAULT 0,
+    tokens_out  UInt32 DEFAULT 0,
+    duration_ms Float64 DEFAULT 0,
+    trace_id    String DEFAULT '',
+    span_id     String DEFAULT ''
+) ENGINE = MergeTree()
+ORDER BY (service, ts);
 """
 
 
 class RowCompat(dict):
-    """DuckDB row wrapper supporting both key and index access."""
+    """Row wrapper supporting both key and integer-index access."""
 
     def __init__(self, columns, values):
         super().__init__(zip(columns, values))
@@ -208,76 +194,82 @@ class RowCompat(dict):
         return super().__getitem__(key)
 
 
-class CursorCompat:
-    def __init__(self, cursor):
-        self._cursor = cursor
-        self._columns = [desc[0] for desc in (cursor.description or [])]
+class ChDbResult:
+    """Pre-materialised query result; data fetched while the lock is held."""
+
+    def __init__(self, columns, rows):
+        self._columns = columns
+        self._rows = rows
+        self._idx = 0
 
     def fetchone(self):
-        row = self._cursor.fetchone()
-        if row is None:
+        if self._idx >= len(self._rows):
             return None
-        return RowCompat(self._columns, row)
+        row = RowCompat(self._columns, self._rows[self._idx])
+        self._idx += 1
+        return row
 
     def fetchall(self):
-        return [RowCompat(self._columns, row) for row in self._cursor.fetchall()]
+        return [RowCompat(self._columns, r) for r in self._rows[self._idx :]]
 
 
-class DuckDbCompatConnection:
-    """Small compatibility layer so existing query code can stay largely unchanged."""
+class ChDbConnection:
+    """Thread-safe global chDB connection wrapper."""
 
     def __init__(self, path: str):
-        self._conn = duckdb.connect(path)
+        self._conn = chdb_driver.connect(path)
+        self._lock = threading.Lock()
 
     def execute(self, query: str, params=None):
-        if params is None:
-            params = []
-        return CursorCompat(self._conn.execute(query, params))
+        with self._lock:
+            cur = self._conn.cursor()
+            if params:
+                cur.execute(query, params)
+            else:
+                cur.execute(query)
+            columns = [d[0] for d in (cur.description or [])]
+            rows = cur.fetchall() or []
+        return ChDbResult(columns, rows)
 
     def executescript(self, script: str):
-        statements = [stmt.strip() for stmt in script.split(";") if stmt.strip()]
-        for statement in statements:
-            self._conn.execute(statement)
+        statements = [s.strip() for s in script.split(";") if s.strip()]
+        with self._lock:
+            cur = self._conn.cursor()
+            for stmt in statements:
+                cur.execute(stmt)
 
     def commit(self):
-        return None
+        return None  # ClickHouse auto-commits
 
     def close(self):
         self._conn.close()
 
 
-def get_db():
-    if "db" not in g:
-        conn = DuckDbCompatConnection(DB_PATH)
-        g.db = conn
-    return g.db
+_global_db: ChDbConnection | None = None
 
 
-@app.teardown_appcontext
-def close_db(exc=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+def get_db() -> ChDbConnection:
+    global _global_db
+    if _global_db is None:
+        _global_db = ChDbConnection(DB_PATH)
+    return _global_db
 
 
 def init_db():
-    with app.app_context():
-        db = get_db()
-        db.executescript(SCHEMA)
-        db.commit()
+    """(Re-)initialise the global DB connection and apply the schema."""
+    global _global_db
+    _global_db = ChDbConnection(DB_PATH)
+    _global_db.executescript(SCHEMA)
 
 
 def ensure_db_schema():
-    """Create schema if the active DB is empty or tables are missing."""
-    db = get_db()
+    """Create schema if tables are missing (fallback for fresh DB directories)."""
     try:
-        has_logs_table = db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='logs'").fetchone()
+        has_logs = get_db().execute("SELECT 1 FROM system.tables WHERE database='default' AND name='logs'").fetchone()
     except Exception:
-        has_logs_table = None
-
-    if has_logs_table is None:
-        db.executescript(SCHEMA)
-        db.commit()
+        has_logs = None
+    if has_logs is None:
+        get_db().executescript(SCHEMA)
 
 
 # Initialize schema at import time so WSGI/sidecar startups are covered.
@@ -287,21 +279,24 @@ init_db()
 # ---------------------------------------------------------------------------
 # Compression helpers
 # ---------------------------------------------------------------------------
-def compress(text: str) -> bytes:
-    return zlib.compress(text.encode("utf-8"), level=9)
+def compress(text: str) -> str:
+    """Compress text and return as a base64-encoded string (chDB-safe)."""
+    return base64.b64encode(zlib.compress(text.encode("utf-8"), level=9)).decode("ascii")
 
 
-def decompress(data: bytes) -> str:
-    if data is None:
+def decompress(data) -> str:
+    """Decompress a base64-encoded compressed value. Returns '' for None/empty."""
+    if not data:
         return ""
-    return zlib.decompress(data).decode("utf-8")
+    raw = base64.b64decode(data) if isinstance(data, str) else data
+    return zlib.decompress(raw).decode("utf-8")
 
 
-def compress_json(obj) -> bytes:
+def compress_json(obj) -> str:
     return compress(json.dumps(obj, ensure_ascii=False))
 
 
-def decompress_json(data: bytes):
+def decompress_json(data):
     if data is None:
         return {}
     return json.loads(decompress(data))
@@ -878,8 +873,8 @@ def dashboard():
             r[0]
             for r in db.execute(
                 "SELECT DISTINCT service FROM logs WHERE service!='' "
-                "UNION SELECT DISTINCT service FROM spans WHERE service!='' "
-                "UNION SELECT DISTINCT service FROM errors WHERE service!=''"
+                "UNION DISTINCT SELECT DISTINCT service FROM spans WHERE service!='' "
+                "UNION DISTINCT SELECT DISTINCT service FROM errors WHERE service!=''"
             ).fetchall()
         ],
     }
@@ -1061,11 +1056,14 @@ def view_errors():
     )
 
 
-@app.route("/errors/<int:error_id>/resolve", methods=["POST"])
+@app.route("/errors/<string:error_id>/resolve", methods=["POST"])
 @require_basic_auth
-def resolve_error(error_id: int):
+def resolve_error(error_id: str):
     db = get_db()
-    db.execute("UPDATE errors SET resolved=1 WHERE id=?", (error_id,))
+    db.execute(
+        "ALTER TABLE errors UPDATE resolved = 1 WHERE id = ? SETTINGS mutations_sync = 1",
+        (error_id,),
+    )
     db.commit()
     return jsonify({"ok": True})
 

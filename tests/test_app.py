@@ -9,7 +9,6 @@ import os
 import tempfile
 import time
 
-import duckdb
 import pytest
 
 # Point to a temp DB before importing the app
@@ -66,33 +65,28 @@ class TestHealth:
 
 
 class TestDbBootstrap:
-    def test_first_dashboard_and_rum_request_bootstrap_schema(self, monkeypatch, tmp_path):
-        db_path = tmp_path / "fresh-sobs.db"
-        monkeypatch.setattr(sobs_app, "DB_PATH", str(db_path))
-        sobs_app.init_db()
+    def test_first_dashboard_and_rum_request_bootstrap_schema(self, client):
+        """Schema tables must exist and key routes must be functional after init_db()."""
+        r = client.get("/")
+        assert r.status_code == 200
 
-        with app.test_client() as c:
-            dashboard = c.get("/")
-            assert dashboard.status_code == 200
+        rum = client.post(
+            "/v1/rum",
+            json={
+                "session_id": "first-session",
+                "event_type": "pageview",
+                "url": "/",
+                "data": {"boot": True},
+            },
+        )
+        assert rum.status_code == 200
 
-            rum = c.post(
-                "/v1/rum",
-                json={
-                    "session_id": "first-session",
-                    "event_type": "pageview",
-                    "url": "/",
-                    "data": {"boot": True},
-                },
-            )
-            assert rum.status_code == 200
-
-        with duckdb.connect(str(db_path)) as db:
-            tables = {
-                row[0]
-                for row in db.execute(
-                    "SELECT table_name FROM information_schema.tables WHERE table_name IN ('logs', 'rum_events')"
-                ).fetchall()
-            }
+        tables = {
+            row[0]
+            for row in sobs_app.get_db()
+            .execute("SELECT name FROM system.tables" " WHERE database='default' AND name IN ('logs', 'rum_events')")
+            .fetchall()
+        }
         assert {"logs", "rum_events"}.issubset(tables)
 
 
@@ -268,11 +262,11 @@ class TestOtlpProtobufIngest:
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
         # Verify the row exists in the database
-        conn = duckdb.connect(sobs_app.DB_PATH)
-        row = conn.execute(
-            "SELECT service FROM logs WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-db-svc",)
-        ).fetchone()
-        conn.close()
+        row = (
+            sobs_app.get_db()
+            .execute("SELECT service FROM logs WHERE service=? ORDER BY ts DESC LIMIT 1", ("proto-db-svc",))
+            .fetchone()
+        )
         assert row is not None, "Log row not found in DB"
         assert row[0] == "proto-db-svc"
 
@@ -288,11 +282,14 @@ class TestOtlpProtobufIngest:
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
         # Verify the row exists in the database
-        conn = duckdb.connect(sobs_app.DB_PATH)
-        row = conn.execute(
-            "SELECT name, service FROM spans WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-trace-db-svc",)
-        ).fetchone()
-        conn.close()
+        row = (
+            sobs_app.get_db()
+            .execute(
+                "SELECT name, service FROM spans WHERE service=? ORDER BY ts DESC LIMIT 1",
+                ("proto-trace-db-svc",),
+            )
+            .fetchone()
+        )
         assert row is not None, "Span row not found in DB"
         assert row[0] == "my-span"
         assert row[1] == "proto-trace-db-svc"
@@ -325,11 +322,14 @@ class TestOtlpProtobufIngest:
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
         # Verify an errors row was created
-        conn = duckdb.connect(sobs_app.DB_PATH)
-        row = conn.execute(
-            "SELECT service, err_type FROM errors WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-err-svc",)
-        ).fetchone()
-        conn.close()
+        row = (
+            sobs_app.get_db()
+            .execute(
+                "SELECT service, err_type FROM errors WHERE service=? ORDER BY ts DESC LIMIT 1",
+                ("proto-err-svc",),
+            )
+            .fetchone()
+        )
         assert row is not None, "Error row not found in DB"
         assert row[1] == "ValueError"
 
