@@ -15,8 +15,9 @@ Run as part of the full suite (unit tests excluded from integration marker):
 """
 
 import os
+import subprocess
+import sys
 import tempfile
-import threading
 import time
 from typing import Any
 
@@ -43,8 +44,6 @@ BASE_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 if "SOBS_DATA_DIR" not in os.environ:
     os.environ["SOBS_DATA_DIR"] = tempfile.mkdtemp()
 
-from app import app, init_db  # noqa: E402
-
 # ---------------------------------------------------------------------------
 # Session-scoped live-server fixture
 # ---------------------------------------------------------------------------
@@ -52,22 +51,28 @@ from app import app, init_db  # noqa: E402
 
 @pytest.fixture(scope="session", autouse=True)
 def live_server():
-    """Start a live Flask dev server in a background thread for the session."""
-    init_db()
+    """Start a live SOBS server in a subprocess for the session."""
     os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    data_dir = tempfile.mkdtemp(prefix="sobs-integration-")
 
-    def _run() -> None:
-        import logging
+    env = os.environ.copy()
+    env["PORT"] = str(SERVER_PORT)
+    env["SOBS_DATA_DIR"] = data_dir
 
-        logging.getLogger("werkzeug").setLevel(logging.ERROR)
-        app.run(host=SERVER_HOST, port=SERVER_PORT, use_reloader=False, threaded=True)
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    proc = subprocess.Popen(
+        [sys.executable, "app.py"],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
     # Wait up to 10 s for the server to become ready.
     deadline = time.time() + 10
     while time.time() < deadline:
+        if proc.poll() is not None:
+            pytest.fail("Live SOBS server process exited before becoming ready")
         try:
             resp = requests.get(f"{BASE_URL}/health", timeout=1)
             if resp.status_code == 200:
@@ -76,9 +81,16 @@ def live_server():
             pass
         time.sleep(0.2)
     else:
+        proc.terminate()
         pytest.fail("Live SOBS server did not start within 10 seconds")
 
     yield BASE_URL
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 # ---------------------------------------------------------------------------

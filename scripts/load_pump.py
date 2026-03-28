@@ -1,3 +1,16 @@
+"""
+Load pump for SOBS — fires mixed OTEL/RUM/AI/Error requests against a running instance.
+
+Usage:
+    python scripts/load_pump.py [--base URL] [--total N] [--workers N]
+
+Defaults:
+    --base      http://127.0.0.1:4317
+    --total     420
+    --workers   28
+"""
+
+import argparse
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -5,9 +18,19 @@ from typing import Any
 
 import requests
 
-BASE = "http://127.0.0.1:44318"
-TOTAL = 420
-WORKERS = 28
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="SOBS load pump")
+    p.add_argument("--base", default="http://127.0.0.1:4317", help="Base URL of the SOBS instance")
+    p.add_argument("--total", type=int, default=420, help="Total number of requests to send")
+    p.add_argument("--workers", type=int, default=28, help="Number of concurrent sender threads")
+    return p.parse_args()
+
+
+args = parse_args()
+BASE = args.base
+TOTAL = args.total
+WORKERS = args.workers
 
 
 def send(i: int) -> tuple[str, int]:
@@ -127,6 +150,7 @@ def send(i: int) -> tuple[str, int]:
 
 
 if __name__ == "__main__":
+    print(f"base={BASE}  total={TOTAL}  workers={WORKERS}")
     start = time.time()
     endpoint_counts: Counter[str] = Counter()
     status_counts: Counter[int] = Counter()

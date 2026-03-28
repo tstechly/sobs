@@ -1,4 +1,4 @@
-flask>=3.0.0
-gunicorn>=25.3.0
+quart>=0.20.0
+hypercorn>=0.17.3
 chdb>=4.0.0
 opentelemetry-proto>=1.12.0

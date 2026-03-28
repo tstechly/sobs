@@ -8,7 +8,7 @@
 
 - 📦 **Tiny** – single Python service + embedded chDB, ~256 MB RAM target
 - 🗜️ **Compressed storage** – MergeTree schema uses ZSTD with selective Delta/T64 codecs
-- 🔭 **OpenTelemetry** – accepts OTLP/JSON for logs, traces, metrics
+- 🔭 **OpenTelemetry** – accepts OTLP (JSON and protobuf) for logs, traces, metrics
 - 🌐 **RUM** – client-side JS snippet with Web Vitals (LCP, CLS, INP, TTFB, FCP)
 - 🐛 **Error tracking** – with stack traces and one-click resolve
 - 🤖 **AI transparency** – record LLM prompts, responses and token usage
@@ -30,7 +30,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Note: `python app.py` runs Gunicorn (`gthread`) so local execution follows the same runtime model as containerized deployments.
+Note: `python app.py` runs Hypercorn with a Quart ASGI app in single-process mode.
 
 Open `http://localhost:4317` in your browser.
 
@@ -41,15 +41,15 @@ Prebuilt image published by CI:
 ## Runtime Modes
 
 - Local and production process manager:
-  - `python app.py` starts Gunicorn.
+  - `python app.py` starts Hypercorn.
   - With embedded chDB, keep a single process by default.
   - Equivalent explicit command:
 
 ```bash
-gunicorn --worker-class gthread --workers 1 --threads ${GUNICORN_THREADS:-4} --bind 0.0.0.0:${PORT:-4317} app:app
+hypercorn --workers 1 --bind 0.0.0.0:${PORT:-4317} app:app
 ```
 
-Why: embedded chDB is process-sensitive. Multiple Gunicorn workers can fork separate processes and trigger DB lock/stall behavior in embedded mode.
+Why: embedded chDB is process-sensitive. Multiple process workers can trigger DB lock/stall behavior in embedded mode.
 
 ## Sending Data
 
@@ -123,13 +123,13 @@ Use `/health/db` for readiness checks in orchestrated deployments when you need 
 | `SOBS_BASIC_AUTH_PASSWORD`  | _(empty)_      | Optional Basic Auth password for the Web UI      |
 | `SOBS_EXTERNAL_AUTH_URL`    | _(empty)_      | Optional external Bearer validator for the Web UI |
 | `SOBS_BASE_PATH`            | _(empty)_      | Optional URL prefix (for example `/sobs`) for UI/API routing and generated links |
+| `SOBS_SECRET_KEY`           | `sobs-dev-secret-key` | Secret key used by Quart session handling (set explicitly in production) |
 | `PORT`                      | `4317`         | Listen port                                      |
 | `SOBS_WRITE_QUEUE_MAX`      | `5000`         | Max buffered write operations before ingest returns `503` |
 | `SOBS_WRITE_BATCH_MAX`      | `200`          | Max writes processed per DB batch |
 | `SOBS_WRITE_BATCH_WAIT_MS`  | `20`           | Max milliseconds to wait for filling a write batch |
-| `GUNICORN_WORKERS`          | `1`            | Gunicorn worker process count |
-| `GUNICORN_THREADS`          | `4`            | Threads per Gunicorn worker (gthread class) |
-| `GUNICORN_BIND`             | `0.0.0.0:$PORT` | Gunicorn bind address override |
+| `HYPERCORN_WORKERS`         | `1`            | Hypercorn worker process count (forced to 1 for embedded chDB safety) |
+| `HYPERCORN_BIND`            | `0.0.0.0:$PORT` | Hypercorn bind address override |
 
 Authentication details and setup examples are documented in [AUTHENTICATION.md](AUTHENTICATION.md).
 
@@ -162,8 +162,18 @@ Or as a **sidecar** – see `k8s/sidecar.yaml` for instructions.
 ## Running Tests
 
 ```bash
-pip install flask pytest
+pip install -r requirements.txt -r requirements-integration.txt
 pytest tests/
+```
+
+## Running Benchmarks
+
+```bash
+# Start SOBS first (for example: python app.py)
+./scripts/benchmark.sh
+
+# Or target a custom endpoint
+./scripts/benchmark.sh http://127.0.0.1:44318
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and quality checks.

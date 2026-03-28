@@ -12,8 +12,6 @@ services:
     environment:
       # Optional API key – leave empty to disable auth
       - SOBS_API_KEY=
-      # Set to "1" to enable Flask debug mode (dev only)
-      - FLASK_DEBUG=0
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4317/health')"]

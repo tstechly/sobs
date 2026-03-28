@@ -5,15 +5,16 @@ RUM, Logs, Errors, Traces, and AI transparency.
 """
 
 import ast
+import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import os
 import queue
 import re
 import secrets
-import sys
 import threading
 import time
 import urllib.error
@@ -25,22 +26,24 @@ from functools import wraps
 from typing import Callable
 
 import chdb.dbapi as chdb_driver
-from flask import (
-    Flask,
+from google.protobuf.json_format import ParseDict
+from hypercorn.asyncio import serve as hypercorn_serve
+from hypercorn.config import Config as HypercornConfig
+from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from quart import (
+    Quart,
     jsonify,
     render_template,
     request,
     send_from_directory,
 )
-from google.protobuf.json_format import ParseDict
-from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
-from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
-app = Flask(__name__)
+app = Quart(__name__)
 
 
 def _normalize_base_path(value: str) -> str:
@@ -70,38 +73,61 @@ def _merge_script_name(script_name: str, base_path: str) -> str:
 
 BASE_PATH = _normalize_base_path(os.environ.get("SOBS_BASE_PATH", ""))
 app.config["APPLICATION_ROOT"] = BASE_PATH or "/"
+app.config["SECRET_KEY"] = os.environ.get("SOBS_SECRET_KEY", "sobs-dev-secret-key")
 
 
 class BasePathMiddleware:
-    """Support deployment behind a path prefix and reverse-proxy prefix headers."""
+    """ASGI middleware for deployment behind a path prefix and proxy prefix headers."""
 
-    def __init__(self, wrapped_app):
+    def __init__(self, wrapped_app, configured_base_path: str):
         self.wrapped_app = wrapped_app
+        self.configured_base_path = configured_base_path
 
-    def __call__(self, environ, start_response):
-        forwarded = _normalize_base_path(environ.get("HTTP_X_FORWARDED_PREFIX", ""))
-        effective_base = forwarded or BASE_PATH
+    @staticmethod
+    def _merge_root_path(root_path: str, base_path: str) -> str:
+        if not base_path:
+            return root_path or ""
+        current = root_path or ""
+        if current.endswith(base_path):
+            return current
+        if not current:
+            return base_path
+        return current.rstrip("/") + base_path
 
+    @staticmethod
+    def _header_value(scope, header_name: str) -> str:
+        needle = header_name.lower().encode("latin-1")
+        for key, value in scope.get("headers", []):
+            if key.lower() == needle:
+                return value.decode("latin-1")
+        return ""
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") not in ("http", "websocket"):
+            return await self.wrapped_app(scope, receive, send)
+
+        scope = dict(scope)
+        forwarded = _normalize_base_path(self._header_value(scope, "x-forwarded-prefix"))
+        effective_base = forwarded or BASE_PATH  # read module-level var so monkeypatch works in tests
         if effective_base:
-            path_info = environ.get("PATH_INFO", "") or "/"
-            script_name = environ.get("SCRIPT_NAME", "")
+            path_info = scope.get("path", "") or "/"
+            root_path = scope.get("root_path", "")
 
-            # Proxy kept the base path in PATH_INFO: strip it for route matching.
-            if path_info == effective_base:
-                environ["SCRIPT_NAME"] = _merge_script_name(script_name, effective_base)
-                environ["PATH_INFO"] = "/"
-            elif path_info.startswith(effective_base + "/"):
-                environ["SCRIPT_NAME"] = _merge_script_name(script_name, effective_base)
-                trimmed = path_info[len(effective_base) :]
-                environ["PATH_INFO"] = trimmed or "/"
+            if path_info.startswith(effective_base + "/") or path_info == effective_base:
+                # Prefix is present in PATH_INFO.
+                # Set root_path and leave scope["path"] intact — Quart's ASGI handler
+                # strips root_path from scope["path"] internally before routing.
+                scope["root_path"] = self._merge_root_path(root_path, effective_base)
             else:
-                # Proxy already stripped prefix; still publish it for url_for generation.
-                environ["SCRIPT_NAME"] = _merge_script_name(script_name, effective_base)
+                # Proxy already stripped the prefix.  Re-prepend it so Quart can
+                # strip correctly via root_path (and url_for generates prefixed links).
+                scope["root_path"] = self._merge_root_path(root_path, effective_base)
+                scope["path"] = effective_base + (path_info if path_info.startswith("/") else "/" + path_info)
 
-        return self.wrapped_app(environ, start_response)
+        return await self.wrapped_app(scope, receive, send)
 
 
-app.wsgi_app = BasePathMiddleware(app.wsgi_app)  # type: ignore[method-assign]
+app.asgi_app = BasePathMiddleware(app.asgi_app, BASE_PATH)  # type: ignore[method-assign]
 
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 DB_PATH = os.path.join(DATA_DIR, "sobs.chdb")
@@ -472,12 +498,15 @@ def _auth_mode() -> str:
 
 def require_api_key(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
+    async def decorated(*args, **kwargs):
         if API_KEY:
             key = request.headers.get("X-API-Key") or request.args.get("api_key")
             if key != API_KEY:
                 return jsonify({"error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
+        result = f(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     return decorated
 
@@ -487,12 +516,15 @@ def require_api_key(f):
 # ---------------------------------------------------------------------------
 def require_basic_auth(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
+    async def decorated(*args, **kwargs):
         mode = _auth_mode()
         if mode == "invalid":
             return jsonify({"error": "Server auth misconfiguration"}), 500
         if mode == "none":
-            return f(*args, **kwargs)
+            result = f(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
         auth = request.headers.get("Authorization", "")
         # Accept valid HTTP Basic credentials when configured.
         if mode == "basic" and auth.startswith("Basic "):
@@ -502,7 +534,10 @@ def require_basic_auth(f):
                 user_ok = secrets.compare_digest(username, BASIC_AUTH_USERNAME)
                 pass_ok = secrets.compare_digest(password, BASIC_AUTH_PASSWORD)
                 if user_ok and pass_ok:
-                    return f(*args, **kwargs)
+                    result = f(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        return await result
+                    return result
             except Exception:
                 pass
         # Accept a Bearer token validated by the external auth service.
@@ -513,8 +548,11 @@ def require_basic_auth(f):
                 session_cookie = request.cookies.get("session")
                 if session_cookie and "\r" not in session_cookie and "\n" not in session_cookie:
                     auth = "Bearer " + session_cookie
-            if auth.startswith("Bearer ") and _check_external_auth(auth):
-                return f(*args, **kwargs)
+            if auth.startswith("Bearer ") and await asyncio.to_thread(_check_external_auth, auth):
+                result = f(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
         # Advertise the configured auth scheme.
         if mode == "basic":
             www_auth = 'Basic realm="SOBS"'
@@ -953,7 +991,7 @@ def _insert_metric_events(db, events: list[MetricEvent]) -> int:
 _PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
 
 
-def _parse_otlp_request(proto_class):
+async def _parse_otlp_request(proto_class):
     """
     Parse an OTLP HTTP request body.
 
@@ -969,13 +1007,13 @@ def _parse_otlp_request(proto_class):
     if mimetype == _PROTOBUF_CONTENT_TYPE:
         app.logger.debug("OTLP ingest: parse_path=protobuf endpoint=%s", request.path)
         try:
-            msg.ParseFromString(request.data)
+            msg.ParseFromString(await request.get_data())
         except Exception as exc:
             app.logger.warning("OTLP protobuf parse error [%s]: %s", request.path, exc)
             return None, (jsonify({"error": "failed to parse protobuf body"}), 400)
         return msg, None
     app.logger.debug("OTLP ingest: parse_path=json endpoint=%s", request.path)
-    payload = request.get_json(force=True, silent=True)
+    payload = await request.get_json(force=True, silent=True)
     if payload is None:
         payload = {}
     try:
@@ -991,8 +1029,8 @@ def _parse_otlp_request(proto_class):
 # ---------------------------------------------------------------------------
 @app.route("/v1/logs", methods=["POST"])
 @require_api_key
-def ingest_logs():
-    msg, err = _parse_otlp_request(ExportLogsServiceRequest)
+async def ingest_logs():
+    msg, err = await _parse_otlp_request(ExportLogsServiceRequest)
     if err:
         return err
     events = _proto_logs_to_events(msg)
@@ -1013,8 +1051,8 @@ def ingest_logs():
 # ---------------------------------------------------------------------------
 @app.route("/v1/traces", methods=["POST"])
 @require_api_key
-def ingest_traces():
-    msg, err = _parse_otlp_request(ExportTraceServiceRequest)
+async def ingest_traces():
+    msg, err = await _parse_otlp_request(ExportTraceServiceRequest)
     if err:
         return err
     span_events, error_events = _proto_traces_to_events(msg)
@@ -1040,8 +1078,8 @@ def ingest_traces():
 # ---------------------------------------------------------------------------
 @app.route("/v1/metrics", methods=["POST"])
 @require_api_key
-def ingest_metrics():
-    msg, err = _parse_otlp_request(ExportMetricsServiceRequest)
+async def ingest_metrics():
+    msg, err = await _parse_otlp_request(ExportMetricsServiceRequest)
     if err:
         return err
     events = _proto_metrics_to_events(msg)
@@ -1062,8 +1100,8 @@ def ingest_metrics():
 # ---------------------------------------------------------------------------
 @app.route("/v1/rum", methods=["POST"])
 @require_api_key
-def ingest_rum():
-    payload = request.get_json(force=True, silent=True)
+async def ingest_rum():
+    payload = await request.get_json(force=True, silent=True)
     if payload is None:
         payload = {}
     if isinstance(payload, list):
@@ -1152,8 +1190,8 @@ def ingest_rum():
 # ---------------------------------------------------------------------------
 @app.route("/v1/ai", methods=["POST"])
 @require_api_key
-def ingest_ai():
-    payload = request.get_json(force=True, silent=True) or {}
+async def ingest_ai():
+    payload = await request.get_json(force=True, silent=True) or {}
     ts = payload.get("timestamp", _now_iso())
     model = str(payload.get("model", ""))
     operation = str(payload.get("operation", "chat"))
@@ -1205,8 +1243,8 @@ def ingest_ai():
 # ---------------------------------------------------------------------------
 @app.route("/v1/errors", methods=["POST"])
 @require_api_key
-def ingest_errors():
-    payload = request.get_json(force=True, silent=True) or {}
+async def ingest_errors():
+    payload = await request.get_json(force=True, silent=True) or {}
     ts = payload.get("timestamp", _now_iso())
     attrs = _stringify_attrs(payload.get("attributes", {}))
     attrs["exception.type"] = str(payload.get("type", "Error"))
@@ -1290,7 +1328,7 @@ def _get_resolved_error_ids(db) -> set[str]:
 # ---------------------------------------------------------------------------
 @app.route("/")
 @require_basic_auth
-def dashboard():
+async def dashboard():
     db = get_db()
     resolved_ids = _get_resolved_error_ids(db)
     error_items = []
@@ -1357,7 +1395,7 @@ def dashboard():
         "WHERE SpanAttributes['gen_ai.provider.name'] != '' "
         "GROUP BY model"
     ).fetchall()
-    return render_template(
+    return await render_template(
         "dashboard.html",
         stats=stats,
         recent_errors=recent_errors,
@@ -1372,7 +1410,7 @@ def dashboard():
 # ---------------------------------------------------------------------------
 @app.route("/logs")
 @require_basic_auth
-def view_logs():
+async def view_logs():
     db = get_db()
     q = request.args.get("q", "").strip()
     level = request.args.get("level", "").strip().upper()
@@ -1448,7 +1486,7 @@ def view_logs():
         row[0] for row in db.execute("SELECT DISTINCT SeverityText FROM otel_logs ORDER BY SeverityText").fetchall()
     ]
 
-    return render_template(
+    return await render_template(
         "logs.html",
         logs=log_rows,
         total=total,
@@ -1469,7 +1507,7 @@ def view_logs():
 # ---------------------------------------------------------------------------
 @app.route("/errors")
 @require_basic_auth
-def view_errors():
+async def view_errors():
     db = get_db()
     service = request.args.get("service", "").strip()
     resolved = request.args.get("resolved", "0").strip()
@@ -1496,7 +1534,7 @@ def view_errors():
         ).fetchall()
     ]
 
-    return render_template(
+    return await render_template(
         "errors.html",
         errors=errors,
         total=total,
@@ -1510,7 +1548,7 @@ def view_errors():
 
 @app.route("/errors/<string:error_id>/resolve", methods=["POST"])
 @require_basic_auth
-def resolve_error(error_id: str):
+async def resolve_error(error_id: str):
     try:
 
         def _op(db: ChDbConnection) -> None:
@@ -1528,7 +1566,7 @@ def resolve_error(error_id: str):
 # ---------------------------------------------------------------------------
 @app.route("/traces")
 @require_basic_auth
-def view_traces():
+async def view_traces():
     db = get_db()
     service = request.args.get("service", "").strip()
     trace_id = request.args.get("trace_id", "").strip()
@@ -1578,7 +1616,7 @@ def view_traces():
         ).fetchall()
     ]
 
-    return render_template(
+    return await render_template(
         "traces.html",
         spans=spans,
         total=total,
@@ -1595,7 +1633,7 @@ def view_traces():
 # ---------------------------------------------------------------------------
 @app.route("/rum")
 @require_basic_auth
-def view_rum():
+async def view_rum():
     db = get_db()
     event_type = request.args.get("type", "").strip()
     limit = _parse_limit(200)
@@ -1667,7 +1705,7 @@ def view_rum():
             "count": len(vals),
         }
 
-    return render_template(
+    return await render_template(
         "rum.html",
         events=events,
         total=total,
@@ -1684,7 +1722,7 @@ def view_rum():
 # ---------------------------------------------------------------------------
 @app.route("/ai")
 @require_basic_auth
-def view_ai():
+async def view_ai():
     db = get_db()
     service = request.args.get("service", "").strip()
     model = request.args.get("model", "").strip()
@@ -1763,7 +1801,7 @@ def view_ai():
         "FROM otel_traces WHERE SpanAttributes['gen_ai.provider.name'] != ''"
     ).fetchone()
 
-    return render_template(
+    return await render_template(
         "ai.html",
         ai_items=ai_items,
         total=total,
@@ -1783,8 +1821,8 @@ def view_ai():
 # Static RUM script
 # ---------------------------------------------------------------------------
 @app.route("/static/rum.js")
-def rum_js():
-    return send_from_directory(
+async def rum_js():
+    return await send_from_directory(
         os.path.join(os.path.dirname(__file__), "static"), "rum.js", mimetype="application/javascript"
     )
 
@@ -1793,12 +1831,12 @@ def rum_js():
 # Health check
 # ---------------------------------------------------------------------------
 @app.route("/health")
-def health():
+async def health():
     return jsonify({"status": "ok", "version": "1.0.0"})
 
 
 @app.route("/health/db")
-def health_db():
+async def health_db():
     started = time.perf_counter()
     try:
         ensure_db_schema()
@@ -1835,23 +1873,22 @@ def health_db():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4317))
-    workers = max(1, int(os.environ.get("GUNICORN_WORKERS", "1")))
-    threads = max(1, int(os.environ.get("GUNICORN_THREADS", "4")))
-    bind = os.environ.get("GUNICORN_BIND", f"0.0.0.0:{port}")
+    requested_workers = max(
+        1,
+        int(
+            os.environ.get(
+                "HYPERCORN_WORKERS",
+                os.environ.get("GUNICORN_WORKERS", "1"),
+            )
+        ),
+    )
+    if requested_workers != 1:
+        log.warning("Embedded chDB requires single-process mode; forcing worker count to 1")
+    bind = os.environ.get("HYPERCORN_BIND", os.environ.get("GUNICORN_BIND", f"0.0.0.0:{port}"))
 
-    # Keep a single process by default for embedded chDB safety.
-    cmd = [
-        sys.executable,
-        "-m",
-        "gunicorn",
-        "--worker-class",
-        "gthread",
-        "--workers",
-        str(workers),
-        "--threads",
-        str(threads),
-        "--bind",
-        bind,
-        "app:app",
-    ]
-    os.execvp(cmd[0], cmd)
+    config = HypercornConfig()
+    config.bind = [bind]
+    config.workers = 1
+    config.use_reloader = False
+
+    asyncio.run(hypercorn_serve(app, config))
