@@ -21,5 +21,5 @@ ENV SOBS_DATA_DIR=/data
 # Expose default port
 EXPOSE 4317
 
-# Production server
-CMD ["python", "-m", "flask", "--app", "app", "run", "--host", "0.0.0.0", "--port", "4317"]
+# Production server (gunicorn with gthread workers for async processing)
+CMD gunicorn --worker-class gthread --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --bind 0.0.0.0:${PORT:-4317} app:app

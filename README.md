@@ -26,8 +26,8 @@ docker run -p 4317:4317 -v sobs_data:/data ghcr.io/abartrim/sobs:latest
 docker-compose up -d
 
 # Python (dev)
-pip install flask
-python app.py
+pip install flask gunicorn
+FLASK_DEBUG=1 python app.py
 ```
 
 Open `http://localhost:4317` in your browser.
@@ -96,7 +96,9 @@ bash examples/curl_examples.sh
 | `SOBS_EXTERNAL_AUTH_URL`    | _(empty)_      | Optional external Bearer validator for the Web UI |
 | `SOBS_BASE_PATH`            | _(empty)_      | Optional URL prefix (for example `/sobs`) for UI/API routing and generated links |
 | `PORT`                      | `4317`         | Listen port                                      |
-| `FLASK_DEBUG`               | `0`            | Enable Flask debug mode                          |
+| `FLASK_DEBUG`               | `0`            | Enable Flask debug mode (uses dev server when set to `1`) |
+| `GUNICORN_WORKERS`          | `cpu*2+1`      | Number of gunicorn worker processes (production mode)     |
+| `GUNICORN_THREADS`          | `4`            | Number of threads per gunicorn worker (production mode)   |
 
 Authentication details and setup examples are documented in [AUTHENTICATION.md](AUTHENTICATION.md).
 
