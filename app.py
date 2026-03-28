@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.error
@@ -1834,7 +1835,23 @@ def health_db():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 4317))
-    # chDB embedded mode is sensitive to process forking; run as a single process
-    # to avoid DB stalls caused by forked worker models.
-    threaded = os.environ.get("SOBS_THREADED", "1") == "1"
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=threaded)
+    workers = max(1, int(os.environ.get("GUNICORN_WORKERS", "1")))
+    threads = max(1, int(os.environ.get("GUNICORN_THREADS", "4")))
+    bind = os.environ.get("GUNICORN_BIND", f"0.0.0.0:{port}")
+
+    # Keep a single process by default for embedded chDB safety.
+    cmd = [
+        sys.executable,
+        "-m",
+        "gunicorn",
+        "--worker-class",
+        "gthread",
+        "--workers",
+        str(workers),
+        "--threads",
+        str(threads),
+        "--bind",
+        bind,
+        "app:app",
+    ]
+    os.execvp(cmd[0], cmd)
