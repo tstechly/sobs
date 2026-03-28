@@ -25,6 +25,9 @@ from flask import (
     request,
     send_from_directory,
 )
+from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -404,13 +407,148 @@ def _attr_list_to_dict(attr_list: list) -> dict:
     return out
 
 
+def _proto_any_value_to_json_dict(val) -> dict:
+    """Convert an OTLP AnyValue proto object to JSON-equivalent value dict."""
+    kind = val.WhichOneof("value")
+    if kind == "string_value":
+        return {"stringValue": val.string_value}
+    if kind == "int_value":
+        return {"intValue": val.int_value}
+    if kind == "double_value":
+        return {"doubleValue": val.double_value}
+    if kind == "bool_value":
+        return {"boolValue": val.bool_value}
+    if kind == "bytes_value":
+        return {"bytesValue": val.bytes_value}
+    if kind == "array_value":
+        return {"stringValue": json.dumps([_proto_any_value_to_json_dict(v) for v in val.array_value.values])}
+    if kind == "kvlist_value":
+        return {"stringValue": json.dumps({kv.key: _proto_any_value_to_json_dict(kv.value) for kv in val.kvlist_value.values})}
+    return {}
+
+
+def _proto_kvlist_to_attr_list(attributes) -> list:
+    """Convert OTLP proto KeyValue iterable to JSON-equivalent attribute list."""
+    return [{"key": kv.key, "value": _proto_any_value_to_json_dict(kv.value)} for kv in attributes]
+
+
+def _proto_resource_to_dict(resource) -> dict:
+    return {"attributes": _proto_kvlist_to_attr_list(resource.attributes)}
+
+
+def _proto_logs_to_payload_dict(msg: ExportLogsServiceRequest) -> dict:
+    """Convert ExportLogsServiceRequest proto to the same dict structure as OTLP/JSON."""
+    result: dict = {"resourceLogs": []}
+    for resource_log in msg.resource_logs:
+        scope_logs = []
+        for scope_log in resource_log.scope_logs:
+            log_records = []
+            for record in scope_log.log_records:
+                log_records.append(
+                    {
+                        "timeUnixNano": str(record.time_unix_nano),
+                        "severityText": record.severity_text or "INFO",
+                        "body": _proto_any_value_to_json_dict(record.body),
+                        "attributes": _proto_kvlist_to_attr_list(record.attributes),
+                        "traceId": record.trace_id.hex() if record.trace_id else "",
+                        "spanId": record.span_id.hex() if record.span_id else "",
+                    }
+                )
+            scope_logs.append({"logRecords": log_records})
+        result["resourceLogs"].append(
+            {"resource": _proto_resource_to_dict(resource_log.resource), "scopeLogs": scope_logs}
+        )
+    return result
+
+
+def _proto_traces_to_payload_dict(msg: ExportTraceServiceRequest) -> dict:
+    """Convert ExportTraceServiceRequest proto to the same dict structure as OTLP/JSON."""
+    result: dict = {"resourceSpans": []}
+    for resource_span in msg.resource_spans:
+        scope_spans = []
+        for scope_span in resource_span.scope_spans:
+            spans = []
+            for span in scope_span.spans:
+                spans.append(
+                    {
+                        "traceId": span.trace_id.hex() if span.trace_id else "",
+                        "spanId": span.span_id.hex() if span.span_id else "",
+                        "parentSpanId": span.parent_span_id.hex() if span.parent_span_id else "",
+                        "name": span.name,
+                        "startTimeUnixNano": str(span.start_time_unix_nano),
+                        "endTimeUnixNano": str(span.end_time_unix_nano),
+                        "status": {"code": span.status.code},
+                        "attributes": _proto_kvlist_to_attr_list(span.attributes),
+                    }
+                )
+            scope_spans.append({"spans": spans})
+        result["resourceSpans"].append(
+            {"resource": _proto_resource_to_dict(resource_span.resource), "scopeSpans": scope_spans}
+        )
+    return result
+
+
+def _proto_metrics_to_payload_dict(msg: ExportMetricsServiceRequest) -> dict:
+    """Convert ExportMetricsServiceRequest proto to the same dict structure as OTLP/JSON."""
+    result: dict = {"resourceMetrics": []}
+    for resource_metric in msg.resource_metrics:
+        scope_metrics = []
+        for scope_metric in resource_metric.scope_metrics:
+            metrics = []
+            for metric in scope_metric.metrics:
+                metrics.append({"name": metric.name})
+            scope_metrics.append({"metrics": metrics})
+        result["resourceMetrics"].append(
+            {"resource": _proto_resource_to_dict(resource_metric.resource), "scopeMetrics": scope_metrics}
+        )
+    return result
+
+
+_PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
+
+
+def _parse_otlp_request(proto_class):
+    """
+    Parse an OTLP HTTP request body.
+
+    Returns ``(payload_dict, error_response)`` where ``error_response`` is
+    ``None`` on success or a ``(flask_response, status_code)`` tuple on failure.
+
+    - ``Content-Type: application/x-protobuf`` → deserialise with *proto_class*
+      and convert to a JSON-equivalent dict so the downstream processing code
+      can be shared between both wire formats.
+    - Any other content-type (including ``application/json``) → fall back to
+      the existing ``request.get_json`` path.
+    """
+    content_type = request.content_type or ""
+    if _PROTOBUF_CONTENT_TYPE in content_type:
+        app.logger.debug("OTLP ingest: parse_path=protobuf endpoint=%s", request.path)
+        try:
+            proto_converters = {
+                ExportLogsServiceRequest: _proto_logs_to_payload_dict,
+                ExportTraceServiceRequest: _proto_traces_to_payload_dict,
+                ExportMetricsServiceRequest: _proto_metrics_to_payload_dict,
+            }
+            msg = proto_class()
+            msg.ParseFromString(request.data)
+            payload = proto_converters[proto_class](msg)
+        except Exception as exc:
+            app.logger.warning("OTLP protobuf parse error [%s]: %s", request.path, exc)
+            return None, (jsonify({"error": "failed to parse protobuf body"}), 400)
+        return payload, None
+    app.logger.debug("OTLP ingest: parse_path=json endpoint=%s", request.path)
+    return request.get_json(force=True, silent=True) or {}, None
+
+
 # ---------------------------------------------------------------------------
 # OTLP Ingest – Logs  POST /v1/logs
 # ---------------------------------------------------------------------------
 @app.route("/v1/logs", methods=["POST"])
 @require_api_key
 def ingest_logs():
-    payload = request.get_json(force=True, silent=True) or {}
+    payload, err = _parse_otlp_request(ExportLogsServiceRequest)
+    if err:
+        return err
     db = get_db()
     count = 0
     for resource_log in payload.get("resourceLogs", []):
@@ -441,7 +579,9 @@ def ingest_logs():
 @app.route("/v1/traces", methods=["POST"])
 @require_api_key
 def ingest_traces():
-    payload = request.get_json(force=True, silent=True) or {}
+    payload, err = _parse_otlp_request(ExportTraceServiceRequest)
+    if err:
+        return err
     db = get_db()
     count = 0
     for resource_span in payload.get("resourceSpans", []):
@@ -507,7 +647,9 @@ def ingest_traces():
 @app.route("/v1/metrics", methods=["POST"])
 @require_api_key
 def ingest_metrics():
-    payload = request.get_json(force=True, silent=True) or {}
+    payload, err = _parse_otlp_request(ExportMetricsServiceRequest)
+    if err:
+        return err
     db = get_db()
     count = 0
     for resource_metric in payload.get("resourceMetrics", []):

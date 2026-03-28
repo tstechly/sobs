@@ -205,8 +205,159 @@ class TestTracesIngest:
 
 
 # ---------------------------------------------------------------------------
-# Errors ingest
+# OTLP protobuf ingest
 # ---------------------------------------------------------------------------
+class TestOtlpProtobufIngest:
+    """Verify that application/x-protobuf payloads are accepted and persisted."""
+
+    PROTOBUF_CT = "application/x-protobuf"
+
+    def _make_log_proto_bytes(self, message="proto log", level="INFO", service="proto-svc"):
+        from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
+        from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+        from opentelemetry.proto.logs.v1.logs_pb2 import LogRecord, ResourceLogs, ScopeLogs
+        from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+
+        ts_ns = int(time.time() * 1_000_000_000)
+        record = LogRecord(
+            time_unix_nano=ts_ns,
+            severity_text=level,
+            body=AnyValue(string_value=message),
+            attributes=[KeyValue(key="env", value=AnyValue(string_value="test"))],
+            trace_id=bytes.fromhex("aabbccdd11223344aabbccdd11223344"),
+            span_id=bytes.fromhex("1122334455667788"),
+        )
+        resource = Resource(
+            attributes=[KeyValue(key="service.name", value=AnyValue(string_value=service))]
+        )
+        msg = ExportLogsServiceRequest(
+            resource_logs=[ResourceLogs(resource=resource, scope_logs=[ScopeLogs(log_records=[record])])]
+        )
+        return msg.SerializeToString()
+
+    def _make_trace_proto_bytes(self, name="proto-span", status_code=1, service="proto-trace-svc"):
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+        from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+        from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+        from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
+
+        start_ns = int(time.time() * 1_000_000_000)
+        span = Span(
+            trace_id=bytes.fromhex("deadbeefdeadbeefdeadbeefdeadbeef"),
+            span_id=bytes.fromhex("cafebabe12345678"),
+            name=name,
+            start_time_unix_nano=start_ns,
+            end_time_unix_nano=start_ns + 50_000_000,
+            status=Status(code=status_code),
+            attributes=[KeyValue(key="http.method", value=AnyValue(string_value="GET"))],
+        )
+        resource = Resource(
+            attributes=[KeyValue(key="service.name", value=AnyValue(string_value=service))]
+        )
+        msg = ExportTraceServiceRequest(
+            resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[span])])]
+        )
+        return msg.SerializeToString()
+
+    def test_protobuf_log_ingest_accepted(self, client):
+        body = self._make_log_proto_bytes()
+        r = client.post("/v1/logs", data=body, content_type=self.PROTOBUF_CT)
+        assert r.status_code == 200
+        assert json.loads(r.data)["accepted"] == 1
+
+    def test_protobuf_log_persisted_in_db(self, client):
+        body = self._make_log_proto_bytes(message="hello protobuf", service="proto-db-svc")
+        r = client.post("/v1/logs", data=body, content_type=self.PROTOBUF_CT)
+        assert r.status_code == 200
+        assert json.loads(r.data)["accepted"] == 1
+        # Verify the row exists in the database
+        conn = sqlite3.connect(sobs_app.DB_PATH)
+        row = conn.execute("SELECT service FROM logs WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-db-svc",)).fetchone()
+        conn.close()
+        assert row is not None, "Log row not found in DB"
+        assert row[0] == "proto-db-svc"
+
+    def test_protobuf_trace_ingest_accepted(self, client):
+        body = self._make_trace_proto_bytes()
+        r = client.post("/v1/traces", data=body, content_type=self.PROTOBUF_CT)
+        assert r.status_code == 200
+        assert json.loads(r.data)["accepted"] == 1
+
+    def test_protobuf_trace_persisted_in_db(self, client):
+        body = self._make_trace_proto_bytes(name="my-span", service="proto-trace-db-svc")
+        r = client.post("/v1/traces", data=body, content_type=self.PROTOBUF_CT)
+        assert r.status_code == 200
+        assert json.loads(r.data)["accepted"] == 1
+        # Verify the row exists in the database
+        conn = sqlite3.connect(sobs_app.DB_PATH)
+        row = conn.execute("SELECT name, service FROM spans WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-trace-db-svc",)).fetchone()
+        conn.close()
+        assert row is not None, "Span row not found in DB"
+        assert row[0] == "my-span"
+        assert row[1] == "proto-trace-db-svc"
+
+    def test_protobuf_error_span_creates_error(self, client):
+        """An ERROR span sent via protobuf should also create an errors table entry."""
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+        from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+        from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+        from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
+
+        start_ns = int(time.time() * 1_000_000_000)
+        span = Span(
+            trace_id=bytes.fromhex("deadbeefdeadbeefdeadbeefdeadbeef"),
+            span_id=bytes.fromhex("cafebabe12345678"),
+            name="failing-proto-op",
+            start_time_unix_nano=start_ns,
+            end_time_unix_nano=start_ns + 10_000_000,
+            status=Status(code=2),  # STATUS_CODE_ERROR
+            attributes=[
+                KeyValue(key="exception.type", value=AnyValue(string_value="ValueError")),
+                KeyValue(key="exception.message", value=AnyValue(string_value="proto bad input")),
+            ],
+        )
+        resource = Resource(
+            attributes=[KeyValue(key="service.name", value=AnyValue(string_value="proto-err-svc"))]
+        )
+        msg = ExportTraceServiceRequest(
+            resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[span])])]
+        )
+        r = client.post("/v1/traces", data=msg.SerializeToString(), content_type=self.PROTOBUF_CT)
+        assert r.status_code == 200
+        assert json.loads(r.data)["accepted"] == 1
+        # Verify an errors row was created
+        conn = sqlite3.connect(sobs_app.DB_PATH)
+        row = conn.execute("SELECT service, err_type FROM errors WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-err-svc",)).fetchone()
+        conn.close()
+        assert row is not None, "Error row not found in DB"
+        assert row[1] == "ValueError"
+
+    def test_protobuf_invalid_body_returns_400(self, client):
+        r = client.post("/v1/logs", data=b"not valid protobuf", content_type=self.PROTOBUF_CT)
+        assert r.status_code == 400
+        assert "error" in json.loads(r.data)
+
+    def test_protobuf_invalid_traces_body_returns_400(self, client):
+        r = client.post("/v1/traces", data=b"\xff\xfe garbage", content_type=self.PROTOBUF_CT)
+        assert r.status_code == 400
+        assert "error" in json.loads(r.data)
+
+    def test_json_ingest_still_works_alongside_protobuf(self, client):
+        """Regression: JSON ingest path must remain functional."""
+        ts_ns = str(int(time.time() * 1_000_000_000))
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "json-svc"}}]},
+                    "scopeLogs": [
+                        {"logRecords": [{"timeUnixNano": ts_ns, "severityText": "INFO", "body": {"stringValue": "json ok"}}]}
+                    ],
+                }
+            ]
+        }
+        r = client.post("/v1/logs", json=payload)
+        assert r.status_code == 200
+        assert json.loads(r.data)["accepted"] == 1
 class TestErrorsIngest:
     def test_ingest_error(self, client):
         r = client.post(
