@@ -1072,4 +1072,32 @@ if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", 4317))
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    if debug:
+        app.run(host="0.0.0.0", port=port, debug=debug)
+    else:
+        from gunicorn.app.base import BaseApplication
+
+        class _StandaloneApplication(BaseApplication):
+            def __init__(self, wsgi_app, options=None):
+                self.options = options or {}
+                self.application = wsgi_app
+                super().__init__()
+
+            def load_config(self):
+                for key, value in self.options.items():
+                    self.cfg.set(key.lower(), value)
+
+            def load(self):
+                return self.application
+
+        workers = int(os.environ.get("GUNICORN_WORKERS", 2))
+        threads = int(os.environ.get("GUNICORN_THREADS", 4))
+        _StandaloneApplication(
+            app,
+            {
+                "bind": f"0.0.0.0:{port}",
+                "workers": workers,
+                "threads": threads,
+                "worker_class": "gthread",
+            },
+        ).run()
