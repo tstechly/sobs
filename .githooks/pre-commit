@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Prefer the repository virtualenv when present.
+if [[ -d "$repo_root/.venv/bin" ]]; then
+  export PATH="$repo_root/.venv/bin:$PATH"
+fi
+
+required_tools=(isort black flake8 mypy)
+for tool in "${required_tools[@]}"; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "pre-commit: missing required tool '$tool'." >&2
+    echo "Install dev dependencies, then retry your commit." >&2
+    exit 1
+  fi
+done
+
+python_files=()
+while IFS= read -r -d '' file; do
+  if [[ "$file" == *.py ]]; then
+    python_files+=("$file")
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [[ ${#python_files[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+echo "pre-commit: formatting staged Python files with isort and black"
+isort "${python_files[@]}"
+black "${python_files[@]}"
+
+echo "pre-commit: linting staged Python files with flake8"
+flake8 "${python_files[@]}"
+
+echo "pre-commit: type-checking staged Python files with mypy"
+mypy "${python_files[@]}"
+
+# Re-stage in case formatters made changes.
+git add -- "${python_files[@]}"

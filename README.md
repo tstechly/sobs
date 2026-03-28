@@ -130,3 +130,25 @@ pip install flask pytest
 pytest tests/
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and quality checks.
+
+## Git Pre-Commit Hook (Python)
+
+This repository includes a version-controlled Git pre-commit hook at `.githooks/pre-commit`.
+
+It runs on staged Python files and performs:
+
+- `isort`
+- `black`
+- `flake8`
+- `mypy`
+
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
+
+If formatting changes are applied, the hook re-stages those Python files before commit.
+
