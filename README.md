@@ -94,6 +94,7 @@ bash examples/curl_examples.sh
 | `SOBS_BASIC_AUTH_USERNAME`  | _(empty)_      | Optional Basic Auth username for the Web UI      |
 | `SOBS_BASIC_AUTH_PASSWORD`  | _(empty)_      | Optional Basic Auth password for the Web UI      |
 | `SOBS_EXTERNAL_AUTH_URL`    | _(empty)_      | Optional external Bearer validator for the Web UI |
+| `SOBS_BASE_PATH`            | _(empty)_      | Optional URL prefix (for example `/sobs`) for UI/API routing and generated links |
 | `PORT`                      | `4317`         | Listen port                                      |
 | `FLASK_DEBUG`               | `0`            | Enable Flask debug mode                          |
 
@@ -106,6 +107,8 @@ The Web UI supports exactly one mode at a time:
 - external bearer validation (`SOBS_EXTERNAL_AUTH_URL`)
 
 Ingest API endpoints (`/v1/*`) use the separate `SOBS_API_KEY` mechanism.
+
+For reverse proxies, SOBS also honors `X-Forwarded-Prefix` for URL generation and prefixed routing.
 
 ## Kubernetes
 

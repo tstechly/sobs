@@ -6,7 +6,7 @@
 <!-- Stats row -->
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-4 col-lg-2">
-    <a href="/logs" class="text-decoration-none">
+    <a href="{{ url_for('view_logs') }}" class="text-decoration-none">
       <div class="stat-card p-3 text-center">
         <div class="fs-2 fw-bold text-info">{{ stats.logs }}</div>
         <div class="text-secondary small">Logs</div>
@@ -14,7 +14,7 @@
     </a>
   </div>
   <div class="col-6 col-md-4 col-lg-2">
-    <a href="/errors" class="text-decoration-none">
+    <a href="{{ url_for('view_errors') }}" class="text-decoration-none">
       <div class="stat-card p-3 text-center">
         <div class="fs-2 fw-bold {% if stats.errors > 0 %}text-danger{% else %}text-success{% endif %}">{{ stats.errors }}</div>
         <div class="text-secondary small">Open Errors</div>
@@ -22,7 +22,7 @@
     </a>
   </div>
   <div class="col-6 col-md-4 col-lg-2">
-    <a href="/traces" class="text-decoration-none">
+    <a href="{{ url_for('view_traces') }}" class="text-decoration-none">
       <div class="stat-card p-3 text-center">
         <div class="fs-2 fw-bold text-warning">{{ stats.spans }}</div>
         <div class="text-secondary small">Spans</div>
@@ -30,7 +30,7 @@
     </a>
   </div>
   <div class="col-6 col-md-4 col-lg-2">
-    <a href="/rum" class="text-decoration-none">
+    <a href="{{ url_for('view_rum') }}" class="text-decoration-none">
       <div class="stat-card p-3 text-center">
         <div class="fs-2 fw-bold text-primary">{{ stats.rum }}</div>
         <div class="text-secondary small">RUM Events</div>
@@ -38,7 +38,7 @@
     </a>
   </div>
   <div class="col-6 col-md-4 col-lg-2">
-    <a href="/ai" class="text-decoration-none">
+    <a href="{{ url_for('view_ai') }}" class="text-decoration-none">
       <div class="stat-card p-3 text-center">
         <div class="fs-2 fw-bold text-success">{{ stats.ai }}</div>
         <div class="text-secondary small">AI Calls</div>
@@ -59,7 +59,7 @@
     <div class="card border-secondary">
       <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="bi bi-bug me-1 text-danger"></i>Recent Open Errors</span>
-        <a href="/errors" class="btn btn-sm btn-outline-secondary">View all</a>
+        <a href="{{ url_for('view_errors') }}" class="btn btn-sm btn-outline-secondary">View all</a>
       </div>
       <div class="card-body p-0">
         {% if recent_errors %}
@@ -87,7 +87,7 @@
     <div class="card border-secondary">
       <div class="card-header d-flex justify-content-between align-items-center">
         <span><i class="bi bi-journal-text me-1 text-info"></i>Recent Logs</span>
-        <a href="/logs" class="btn btn-sm btn-outline-secondary">View all</a>
+        <a href="{{ url_for('view_logs') }}" class="btn btn-sm btn-outline-secondary">View all</a>
       </div>
       <div class="card-body p-0">
         {% if recent_logs %}
@@ -123,7 +123,7 @@
           <tbody>
             {% for row in rum_summary %}
             <tr>
-              <td><a href="/rum?type={{ row[0] }}">{{ row[0] }}</a></td>
+              <td><a href="{{ url_for('view_rum', type=row[0]) }}">{{ row[0] }}</a></td>
               <td class="fw-semibold">{{ row[1] }}</td>
             </tr>
             {% endfor %}

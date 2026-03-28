@@ -31,6 +31,67 @@ from flask import (
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 
+
+def _normalize_base_path(value: str) -> str:
+    """Normalize base path values to either '' or '/segment[/subsegment]'."""
+    if not value:
+        return ""
+    normalized = re.sub(r"/+", "/", str(value).strip())
+    if not normalized or normalized == "/":
+        return ""
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    normalized = normalized.rstrip("/")
+    return normalized if normalized != "/" else ""
+
+
+def _merge_script_name(script_name: str, base_path: str) -> str:
+    """Append base path to SCRIPT_NAME once."""
+    if not base_path:
+        return script_name or ""
+    current = script_name or ""
+    if current.endswith(base_path):
+        return current
+    if not current:
+        return base_path
+    return current.rstrip("/") + base_path
+
+
+BASE_PATH = _normalize_base_path(os.environ.get("SOBS_BASE_PATH", ""))
+app.config["APPLICATION_ROOT"] = BASE_PATH or "/"
+
+
+class BasePathMiddleware:
+    """Support deployment behind a path prefix and reverse-proxy prefix headers."""
+
+    def __init__(self, wrapped_app):
+        self.wrapped_app = wrapped_app
+
+    def __call__(self, environ, start_response):
+        forwarded = _normalize_base_path(environ.get("HTTP_X_FORWARDED_PREFIX", ""))
+        effective_base = forwarded or BASE_PATH
+
+        if effective_base:
+            path_info = environ.get("PATH_INFO", "") or "/"
+            script_name = environ.get("SCRIPT_NAME", "")
+
+            # Proxy kept the base path in PATH_INFO: strip it for route matching.
+            if path_info == effective_base:
+                environ["SCRIPT_NAME"] = _merge_script_name(script_name, effective_base)
+                environ["PATH_INFO"] = "/"
+            elif path_info.startswith(effective_base + "/"):
+                environ["SCRIPT_NAME"] = _merge_script_name(script_name, effective_base)
+                trimmed = path_info[len(effective_base) :]
+                environ["PATH_INFO"] = trimmed or "/"
+            else:
+                # Proxy already stripped prefix; still publish it for url_for generation.
+                environ["SCRIPT_NAME"] = _merge_script_name(script_name, effective_base)
+
+        return self.wrapped_app(environ, start_response)
+
+
+app.wsgi_app = BasePathMiddleware(app.wsgi_app)  # type: ignore[method-assign]
+
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 DB_PATH = os.path.join(DATA_DIR, "sobs.db")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required

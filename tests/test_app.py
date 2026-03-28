@@ -418,6 +418,44 @@ class TestUIPages:
         assert r.status_code == 200
         assert b"SQL error" in r.data
 
+    def test_root_mode_uses_root_relative_links(self, client):
+        """Default deployment should generate links/assets without a path prefix."""
+        r = client.get("/")
+        assert r.status_code == 200
+        assert b'href="/logs"' in r.data
+        assert b'href="/errors"' in r.data
+        assert b'src="/static/bootstrap.bundle.min.js"' in r.data
+
+
+class TestBasePathSupport:
+    def test_prefixed_mode_routes_and_generates_prefixed_links(self, monkeypatch):
+        """When SOBS base path is configured, both routing and generated links should honor it."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "BASE_PATH", "/sobs")
+        app.config["TESTING"] = True
+
+        with app.test_client() as c:
+            dashboard = c.get("/sobs/")
+            assert dashboard.status_code == 200
+            assert b'href="/sobs/logs"' in dashboard.data
+            assert b'href="/sobs/errors"' in dashboard.data
+            assert b'src="/sobs/static/bootstrap.bundle.min.js"' in dashboard.data
+
+            logs_ingest = c.post("/sobs/v1/logs", json={})
+            assert logs_ingest.status_code == 200
+
+            rum_script = c.get("/sobs/static/rum.js")
+            assert rum_script.status_code == 200
+
+    def test_forwarded_prefix_generates_prefixed_links(self, client):
+        """X-Forwarded-Prefix should influence generated links even when backend paths are unprefixed."""
+        r = client.get("/", headers={"X-Forwarded-Prefix": "/sobs"})
+        assert r.status_code == 200
+        assert b'href="/sobs/logs"' in r.data
+        assert b'href="/sobs/errors"' in r.data
+        assert b'src="/sobs/static/bootstrap.bundle.min.js"' in r.data
+
 
 # ---------------------------------------------------------------------------
 # Basic Auth
