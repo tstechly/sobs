@@ -88,6 +88,8 @@ bash examples/curl_examples.sh
 
 Ingest writes are queued and flushed by a single background DB writer thread. In normal runtime this keeps API latency low under load.
 
+Fresh chDB databases are created with schema compression tuned using ZSTD plus selective Delta/T64 codecs. Embedded chDB via the Python API does not currently expose ClickHouse `storage_configuration`/encrypted-disk setup reliably, so encrypted-disk storage should be handled by an external ClickHouse server if required.
+
 ## Configuration
 
 | Variable                    | Default        | Description                                      |

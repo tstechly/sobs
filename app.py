@@ -120,12 +120,12 @@ log = logging.getLogger("sobs")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS otel_logs (
     Timestamp DateTime64(9) CODEC(Delta(8), ZSTD(1)),
-    TimestampTime DateTime DEFAULT toDateTime(Timestamp),
+    TimestampTime DateTime DEFAULT toDateTime(Timestamp) CODEC(Delta(4), ZSTD(1)),
     TraceId String CODEC(ZSTD(1)),
     SpanId String CODEC(ZSTD(1)),
-    TraceFlags UInt8,
+    TraceFlags UInt8 CODEC(T64, ZSTD(1)),
     SeverityText LowCardinality(String) CODEC(ZSTD(1)),
-    SeverityNumber UInt8,
+    SeverityNumber UInt8 CODEC(T64, ZSTD(1)),
     ServiceName LowCardinality(String) CODEC(ZSTD(1)),
     Body String CODEC(ZSTD(1)),
     ResourceSchemaUrl LowCardinality(String) CODEC(ZSTD(1)),
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS otel_traces (
     ScopeName String CODEC(ZSTD(1)),
     ScopeVersion String CODEC(ZSTD(1)),
     SpanAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
-    Duration UInt64 CODEC(ZSTD(1)),
+    Duration UInt64 CODEC(T64, ZSTD(1)),
     StatusCode LowCardinality(String) CODEC(ZSTD(1)),
     StatusMessage String CODEC(ZSTD(1)),
     Events Nested (
@@ -175,12 +175,12 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 
 CREATE TABLE IF NOT EXISTS hyperdx_sessions (
     Timestamp DateTime64(9) CODEC(Delta(8), ZSTD(1)),
-    TimestampTime DateTime DEFAULT toDateTime(Timestamp),
+    TimestampTime DateTime DEFAULT toDateTime(Timestamp) CODEC(Delta(4), ZSTD(1)),
     TraceId String CODEC(ZSTD(1)),
     SpanId String CODEC(ZSTD(1)),
-    TraceFlags UInt8,
+    TraceFlags UInt8 CODEC(T64, ZSTD(1)),
     SeverityText LowCardinality(String) CODEC(ZSTD(1)),
-    SeverityNumber UInt8,
+    SeverityNumber UInt8 CODEC(T64, ZSTD(1)),
     ServiceName LowCardinality(String) CODEC(ZSTD(1)),
     Body String CODEC(ZSTD(1)),
     ResourceSchemaUrl LowCardinality(String) CODEC(ZSTD(1)),
@@ -197,11 +197,21 @@ ORDER BY (ServiceName, TimestampTime, Timestamp)
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 
 CREATE TABLE IF NOT EXISTS sobs_error_resolutions (
-    ErrorId String,
-    ResolvedAt DateTime64(3) DEFAULT now64(3)
+    ErrorId String CODEC(ZSTD(1)),
+    ResolvedAt DateTime64(3) DEFAULT now64(3) CODEC(Delta(8), ZSTD(1))
 ) ENGINE = MergeTree()
-ORDER BY (ErrorId, ResolvedAt);
+ORDER BY (ErrorId, ResolvedAt)
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 """
+
+
+def _validate_unsupported_storage_configuration() -> None:
+    if os.environ.get("SOBS_CHDB_ENCRYPTION_KEY", "").strip():
+        raise RuntimeError(
+            "Embedded chDB does not support ClickHouse storage_configuration/custom_local_disks_base_directory "
+            "for encrypted disks via the Python API. Keep schema compression enabled, but use an external "
+            "ClickHouse server if you need encrypted-disk storage."
+        )
 
 
 class RowCompat(dict):
@@ -240,6 +250,7 @@ class ChDbConnection:
     """Thread-safe global chDB connection wrapper."""
 
     def __init__(self, path: str):
+        _validate_unsupported_storage_configuration()
         self._conn = chdb_driver.connect(path)
         self._lock = threading.Lock()
 

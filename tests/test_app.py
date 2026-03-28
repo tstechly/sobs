@@ -175,6 +175,14 @@ class TestWriteQueue:
         assert int(cnt) >= 60
 
 
+class TestStorageConfigurationGuard:
+    def test_embedded_chdb_rejects_encrypted_disk_config(self, monkeypatch):
+        monkeypatch.setenv("SOBS_CHDB_ENCRYPTION_KEY", "1234567812345678")
+
+        with pytest.raises(RuntimeError, match="Embedded chDB does not support ClickHouse storage_configuration"):
+            sobs_app._validate_unsupported_storage_configuration()
+
+
 class TestDbBootstrap:
     def test_first_dashboard_and_rum_request_bootstrap_schema(self, client):
         """Schema tables must exist and key routes must be functional after init_db()."""
