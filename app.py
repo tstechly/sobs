@@ -1075,8 +1075,6 @@ if __name__ == "__main__":
     if debug:
         app.run(host="0.0.0.0", port=port, debug=debug)
     else:
-        import multiprocessing
-
         from gunicorn.app.base import BaseApplication
 
         class _StandaloneApplication(BaseApplication):
@@ -1092,7 +1090,7 @@ if __name__ == "__main__":
             def load(self):
                 return self.application
 
-        workers = int(os.environ.get("GUNICORN_WORKERS", multiprocessing.cpu_count() * 2 + 1))
+        workers = int(os.environ.get("GUNICORN_WORKERS", 2))
         threads = int(os.environ.get("GUNICORN_THREADS", 4))
         _StandaloneApplication(
             app,

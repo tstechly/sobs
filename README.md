@@ -97,7 +97,7 @@ bash examples/curl_examples.sh
 | `SOBS_BASE_PATH`            | _(empty)_      | Optional URL prefix (for example `/sobs`) for UI/API routing and generated links |
 | `PORT`                      | `4317`         | Listen port                                      |
 | `FLASK_DEBUG`               | `0`            | Enable Flask debug mode (uses dev server when set to `1`) |
-| `GUNICORN_WORKERS`          | `cpu*2+1`      | Number of gunicorn worker processes (production mode)     |
+| `GUNICORN_WORKERS`          | `2`            | Number of gunicorn worker processes (production mode)     |
 | `GUNICORN_THREADS`          | `4`            | Number of threads per gunicorn worker (production mode)   |
 
 Authentication details and setup examples are documented in [AUTHENTICATION.md](AUTHENTICATION.md).
