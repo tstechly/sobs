@@ -151,9 +151,7 @@ def ensure_db_schema():
     """Create schema if the active DB is empty or tables are missing."""
     db = get_db()
     try:
-        has_logs_table = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='logs'"
-        ).fetchone()
+        has_logs_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='logs'").fetchone()
     except sqlite3.OperationalError:
         has_logs_table = None
 
