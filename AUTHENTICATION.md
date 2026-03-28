@@ -88,6 +88,18 @@ Example request:
     curl -i http://localhost:4317/ \
       -H "Authorization: Bearer eyJhbGciOi..."
 
+### Same-origin session-cookie fallback
+
+When SOBS UI is served under `/sobs` on the same domain as a management UI, browsers include the management `session` cookie but typically do **not** send an explicit `Authorization: Bearer ...` header.
+
+To support this deployment model, external auth mode automatically falls back to the `session` cookie when no `Authorization` header is present:
+
+1. If `Authorization: Bearer ...` is present, it is forwarded to the external validator as usual.
+2. If no Bearer header is present and a `session` cookie exists, SOBS synthesizes `Authorization: Bearer <session_cookie_value>` and forwards that to the external validator.
+3. If neither a Bearer header nor a `session` cookie is present, SOBS returns `401` with `WWW-Authenticate: Bearer realm="SOBS"`.
+
+This allows users already authenticated in the management UI to access `/sobs` routes without any extra configuration or manual bearer injection.
+
 ## 5) Invalid UI auth configurations
 
 These are invalid and will return `500` on Web UI routes:
