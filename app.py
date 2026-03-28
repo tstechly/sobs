@@ -246,8 +246,15 @@ def require_basic_auth(f):
             except Exception:
                 pass
         # Accept a Bearer token validated by the external auth service.
-        if mode == "external" and auth.startswith("Bearer ") and _check_external_auth(auth):
-            return f(*args, **kwargs)
+        # Fall back to the `session` cookie for same-origin browser requests
+        # that carry no explicit Authorization header.
+        if mode == "external":
+            if not auth.startswith("Bearer "):
+                session_cookie = request.cookies.get("session")
+                if session_cookie and "\r" not in session_cookie and "\n" not in session_cookie:
+                    auth = "Bearer " + session_cookie
+            if auth.startswith("Bearer ") and _check_external_auth(auth):
+                return f(*args, **kwargs)
         # Advertise the configured auth scheme.
         if mode == "basic":
             www_auth = 'Basic realm="SOBS"'

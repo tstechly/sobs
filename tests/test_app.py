@@ -619,3 +619,43 @@ class TestExternalAuth:
 
         # EXTERNAL_AUTH_URL is empty in the default test environment
         assert app_module._check_external_auth("Bearer token") is False
+
+    def test_session_cookie_used_as_bearer_fallback_when_valid(self, ext_auth_client, monkeypatch):
+        """When no Bearer header is present, a valid session cookie should be accepted via external auth."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: True)
+        ext_auth_client.set_cookie("session", "valid-session-token")
+        r = ext_auth_client.get("/")
+        assert r.status_code == 200
+
+    def test_session_cookie_denied_when_validator_rejects(self, ext_auth_client, monkeypatch):
+        """When session cookie is present but the external validator rejects it, return 401."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: False)
+        ext_auth_client.set_cookie("session", "invalid-session-token")
+        r = ext_auth_client.get("/")
+        assert r.status_code == 401
+
+    def test_session_cookie_synthesizes_bearer_header(self, ext_auth_client, monkeypatch):
+        """The session cookie value should be forwarded as a Bearer token to the external validator."""
+        import app as app_module
+
+        captured = {}
+
+        def capturing_check(auth):
+            captured["auth"] = auth
+            return True
+
+        monkeypatch.setattr(app_module, "_check_external_auth", capturing_check)
+        ext_auth_client.set_cookie("session", "my-session-value")
+        r = ext_auth_client.get("/")
+        assert r.status_code == 200
+        assert captured.get("auth") == "Bearer my-session-value"
+
+    def test_no_bearer_no_cookie_returns_401_with_bearer_challenge(self, ext_auth_client):
+        """Requests with neither Authorization header nor session cookie should get 401 + Bearer challenge."""
+        r = ext_auth_client.get("/")
+        assert r.status_code == 401
+        assert r.headers.get("WWW-Authenticate") == 'Bearer realm="SOBS"'
