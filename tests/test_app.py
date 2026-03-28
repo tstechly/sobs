@@ -6,10 +6,10 @@ Run with:  pytest tests/
 import base64
 import json
 import os
-import sqlite3
 import tempfile
 import time
 
+import duckdb
 import pytest
 
 # Point to a temp DB before importing the app
@@ -69,6 +69,7 @@ class TestDbBootstrap:
     def test_first_dashboard_and_rum_request_bootstrap_schema(self, monkeypatch, tmp_path):
         db_path = tmp_path / "fresh-sobs.db"
         monkeypatch.setattr(sobs_app, "DB_PATH", str(db_path))
+        sobs_app.init_db()
 
         with app.test_client() as c:
             dashboard = c.get("/")
@@ -85,11 +86,11 @@ class TestDbBootstrap:
             )
             assert rum.status_code == 200
 
-        with sqlite3.connect(str(db_path)) as db:
+        with duckdb.connect(str(db_path)) as db:
             tables = {
                 row[0]
                 for row in db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('logs', 'rum_events')"
+                    "SELECT table_name FROM information_schema.tables WHERE table_name IN ('logs', 'rum_events')"
                 ).fetchall()
             }
         assert {"logs", "rum_events"}.issubset(tables)
@@ -227,9 +228,7 @@ class TestOtlpProtobufIngest:
             trace_id=bytes.fromhex("aabbccdd11223344aabbccdd11223344"),
             span_id=bytes.fromhex("1122334455667788"),
         )
-        resource = Resource(
-            attributes=[KeyValue(key="service.name", value=AnyValue(string_value=service))]
-        )
+        resource = Resource(attributes=[KeyValue(key="service.name", value=AnyValue(string_value=service))])
         msg = ExportLogsServiceRequest(
             resource_logs=[ResourceLogs(resource=resource, scope_logs=[ScopeLogs(log_records=[record])])]
         )
@@ -251,9 +250,7 @@ class TestOtlpProtobufIngest:
             status=Status(code=status_code),
             attributes=[KeyValue(key="http.method", value=AnyValue(string_value="GET"))],
         )
-        resource = Resource(
-            attributes=[KeyValue(key="service.name", value=AnyValue(string_value=service))]
-        )
+        resource = Resource(attributes=[KeyValue(key="service.name", value=AnyValue(string_value=service))])
         msg = ExportTraceServiceRequest(
             resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[span])])]
         )
@@ -271,8 +268,10 @@ class TestOtlpProtobufIngest:
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
         # Verify the row exists in the database
-        conn = sqlite3.connect(sobs_app.DB_PATH)
-        row = conn.execute("SELECT service FROM logs WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-db-svc",)).fetchone()
+        conn = duckdb.connect(sobs_app.DB_PATH)
+        row = conn.execute(
+            "SELECT service FROM logs WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-db-svc",)
+        ).fetchone()
         conn.close()
         assert row is not None, "Log row not found in DB"
         assert row[0] == "proto-db-svc"
@@ -289,8 +288,10 @@ class TestOtlpProtobufIngest:
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
         # Verify the row exists in the database
-        conn = sqlite3.connect(sobs_app.DB_PATH)
-        row = conn.execute("SELECT name, service FROM spans WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-trace-db-svc",)).fetchone()
+        conn = duckdb.connect(sobs_app.DB_PATH)
+        row = conn.execute(
+            "SELECT name, service FROM spans WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-trace-db-svc",)
+        ).fetchone()
         conn.close()
         assert row is not None, "Span row not found in DB"
         assert row[0] == "my-span"
@@ -316,9 +317,7 @@ class TestOtlpProtobufIngest:
                 KeyValue(key="exception.message", value=AnyValue(string_value="proto bad input")),
             ],
         )
-        resource = Resource(
-            attributes=[KeyValue(key="service.name", value=AnyValue(string_value="proto-err-svc"))]
-        )
+        resource = Resource(attributes=[KeyValue(key="service.name", value=AnyValue(string_value="proto-err-svc"))])
         msg = ExportTraceServiceRequest(
             resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[span])])]
         )
@@ -326,8 +325,10 @@ class TestOtlpProtobufIngest:
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
         # Verify an errors row was created
-        conn = sqlite3.connect(sobs_app.DB_PATH)
-        row = conn.execute("SELECT service, err_type FROM errors WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-err-svc",)).fetchone()
+        conn = duckdb.connect(sobs_app.DB_PATH)
+        row = conn.execute(
+            "SELECT service, err_type FROM errors WHERE service=? ORDER BY rowid DESC LIMIT 1", ("proto-err-svc",)
+        ).fetchone()
         conn.close()
         assert row is not None, "Error row not found in DB"
         assert row[1] == "ValueError"
@@ -350,7 +351,11 @@ class TestOtlpProtobufIngest:
                 {
                     "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "json-svc"}}]},
                     "scopeLogs": [
-                        {"logRecords": [{"timeUnixNano": ts_ns, "severityText": "INFO", "body": {"stringValue": "json ok"}}]}
+                        {
+                            "logRecords": [
+                                {"timeUnixNano": ts_ns, "severityText": "INFO", "body": {"stringValue": "json ok"}}
+                            ]
+                        }
                     ],
                 }
             ]
@@ -358,6 +363,8 @@ class TestOtlpProtobufIngest:
         r = client.post("/v1/logs", json=payload)
         assert r.status_code == 200
         assert json.loads(r.data)["accepted"] == 1
+
+
 class TestErrorsIngest:
     def test_ingest_error(self, client):
         r = client.post(

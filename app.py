@@ -10,13 +10,14 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
 import urllib.error
 import urllib.request
 import zlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
 
+import duckdb
 from flask import (
     Flask,
     g,
@@ -25,6 +26,7 @@ from flask import (
     request,
     send_from_directory,
 )
+from google.protobuf.json_format import ParseDict
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
@@ -96,7 +98,7 @@ class BasePathMiddleware:
 app.wsgi_app = BasePathMiddleware(app.wsgi_app)  # type: ignore[method-assign]
 
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-DB_PATH = os.path.join(DATA_DIR, "sobs.db")
+DB_PATH = os.path.join(DATA_DIR, "sobs.duckdb")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
 BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
 BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
@@ -111,8 +113,14 @@ log = logging.getLogger("sobs")
 # Database helpers
 # ---------------------------------------------------------------------------
 SCHEMA = """
+CREATE SEQUENCE IF NOT EXISTS logs_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS errors_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS spans_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS rum_events_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS ai_events_id_seq START 1;
+
 CREATE TABLE IF NOT EXISTS logs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          BIGINT PRIMARY KEY DEFAULT nextval('logs_id_seq'),
     ts          TEXT    NOT NULL,
     level       TEXT    NOT NULL DEFAULT 'INFO',
     service     TEXT    NOT NULL DEFAULT '',
@@ -126,7 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_level   ON logs(level);
 CREATE INDEX IF NOT EXISTS idx_logs_service ON logs(service);
 
 CREATE TABLE IF NOT EXISTS errors (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          BIGINT PRIMARY KEY DEFAULT nextval('errors_id_seq'),
     ts          TEXT    NOT NULL,
     service     TEXT    NOT NULL DEFAULT '',
     err_type    TEXT    NOT NULL DEFAULT '',
@@ -141,7 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_errors_ts      ON errors(ts);
 CREATE INDEX IF NOT EXISTS idx_errors_service ON errors(service);
 
 CREATE TABLE IF NOT EXISTS spans (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              BIGINT PRIMARY KEY DEFAULT nextval('spans_id_seq'),
     ts              TEXT    NOT NULL,
     trace_id        TEXT    NOT NULL DEFAULT '',
     span_id         TEXT    NOT NULL DEFAULT '',
@@ -157,7 +165,7 @@ CREATE INDEX IF NOT EXISTS idx_spans_trace_id ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_service  ON spans(service);
 
 CREATE TABLE IF NOT EXISTS rum_events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          BIGINT PRIMARY KEY DEFAULT nextval('rum_events_id_seq'),
     ts          TEXT    NOT NULL,
     session_id  TEXT    NOT NULL DEFAULT '',
     event_type  TEXT    NOT NULL DEFAULT '',
@@ -169,7 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_rum_session    ON rum_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_rum_event_type ON rum_events(event_type);
 
 CREATE TABLE IF NOT EXISTS ai_events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id          BIGINT PRIMARY KEY DEFAULT nextval('ai_events_id_seq'),
     ts          TEXT    NOT NULL,
     service     TEXT    NOT NULL DEFAULT '',
     provider    TEXT    NOT NULL DEFAULT '',
@@ -187,12 +195,60 @@ CREATE INDEX IF NOT EXISTS idx_ai_service ON ai_events(service);
 """
 
 
+class RowCompat(dict):
+    """DuckDB row wrapper supporting both key and index access."""
+
+    def __init__(self, columns, values):
+        super().__init__(zip(columns, values))
+        self._values = tuple(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+class CursorCompat:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self._columns = [desc[0] for desc in (cursor.description or [])]
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        return RowCompat(self._columns, row)
+
+    def fetchall(self):
+        return [RowCompat(self._columns, row) for row in self._cursor.fetchall()]
+
+
+class DuckDbCompatConnection:
+    """Small compatibility layer so existing query code can stay largely unchanged."""
+
+    def __init__(self, path: str):
+        self._conn = duckdb.connect(path)
+
+    def execute(self, query: str, params=None):
+        if params is None:
+            params = []
+        return CursorCompat(self._conn.execute(query, params))
+
+    def executescript(self, script: str):
+        statements = [stmt.strip() for stmt in script.split(";") if stmt.strip()]
+        for statement in statements:
+            self._conn.execute(statement)
+
+    def commit(self):
+        return None
+
+    def close(self):
+        self._conn.close()
+
+
 def get_db():
     if "db" not in g:
-        conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        conn = DuckDbCompatConnection(DB_PATH)
         g.db = conn
     return g.db
 
@@ -215,8 +271,8 @@ def ensure_db_schema():
     """Create schema if the active DB is empty or tables are missing."""
     db = get_db()
     try:
-        has_logs_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='logs'").fetchone()
-    except sqlite3.OperationalError:
+        has_logs_table = db.execute("SELECT 1 FROM information_schema.tables WHERE table_name='logs'").fetchone()
+    except Exception:
         has_logs_table = None
 
     if has_logs_table is None:
@@ -350,12 +406,6 @@ def require_basic_auth(f):
     return decorated
 
 
-@app.before_request
-def ensure_schema_before_request():
-    # Fallback guard for runtimes where DB files appear after startup.
-    ensure_db_schema()
-
-
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
@@ -407,101 +457,224 @@ def _attr_list_to_dict(attr_list: list) -> dict:
     return out
 
 
-def _proto_any_value_to_json_dict(val) -> dict:
-    """Convert an OTLP AnyValue proto object to JSON-equivalent value dict."""
+def _proto_any_value_to_python(val):
+    """Convert OTLP AnyValue proto object to a plain Python value."""
     kind = val.WhichOneof("value")
     if kind == "string_value":
-        return {"stringValue": val.string_value}
+        return val.string_value
     if kind == "int_value":
-        return {"intValue": val.int_value}
+        return val.int_value
     if kind == "double_value":
-        return {"doubleValue": val.double_value}
+        return val.double_value
     if kind == "bool_value":
-        return {"boolValue": val.bool_value}
+        return val.bool_value
     if kind == "bytes_value":
-        return {"bytesValue": val.bytes_value}
+        return base64.b64encode(bytes(val.bytes_value)).decode("ascii")
     if kind == "array_value":
-        return {"stringValue": json.dumps([_proto_any_value_to_json_dict(v) for v in val.array_value.values])}
+        return [_proto_any_value_to_python(v) for v in val.array_value.values]
     if kind == "kvlist_value":
-        return {"stringValue": json.dumps({kv.key: _proto_any_value_to_json_dict(kv.value) for kv in val.kvlist_value.values})}
-    return {}
+        return {kv.key: _proto_any_value_to_python(kv.value) for kv in val.kvlist_value.values}
+    return None
 
 
-def _proto_kvlist_to_attr_list(attributes) -> list:
-    """Convert OTLP proto KeyValue iterable to JSON-equivalent attribute list."""
-    return [{"key": kv.key, "value": _proto_any_value_to_json_dict(kv.value)} for kv in attributes]
+def _proto_kvlist_to_dict(attributes) -> dict:
+    return {kv.key: _proto_any_value_to_python(kv.value) for kv in attributes}
 
 
-def _proto_resource_to_dict(resource) -> dict:
-    return {"attributes": _proto_kvlist_to_attr_list(resource.attributes)}
+@dataclass
+class LogEvent:
+    ts: str
+    level: str
+    service: str
+    body: str
+    attrs: dict
+    trace_id: str
+    span_id: str
 
 
-def _proto_logs_to_payload_dict(msg: ExportLogsServiceRequest) -> dict:
-    """Convert ExportLogsServiceRequest proto to the same dict structure as OTLP/JSON."""
-    result: dict = {"resourceLogs": []}
+@dataclass
+class SpanEvent:
+    ts: str
+    trace_id: str
+    span_id: str
+    parent_span_id: str
+    name: str
+    service: str
+    duration_ms: float
+    status: str
+    attrs: dict
+
+
+@dataclass
+class ErrorEvent:
+    ts: str
+    service: str
+    err_type: str
+    message: str
+    stack: str
+    attrs: dict
+    trace_id: str
+    span_id: str
+
+
+@dataclass
+class MetricEvent:
+    ts: str
+    service: str
+    name: str
+    attrs: dict
+
+
+def _proto_logs_to_events(msg: ExportLogsServiceRequest) -> list[LogEvent]:
+    events: list[LogEvent] = []
     for resource_log in msg.resource_logs:
-        scope_logs = []
+        resource_attrs = _proto_kvlist_to_dict(resource_log.resource.attributes)
+        service = str(resource_attrs.get("service.name", ""))
         for scope_log in resource_log.scope_logs:
-            log_records = []
             for record in scope_log.log_records:
-                log_records.append(
-                    {
-                        "timeUnixNano": str(record.time_unix_nano),
-                        "severityText": record.severity_text or "INFO",
-                        "body": _proto_any_value_to_json_dict(record.body),
-                        "attributes": _proto_kvlist_to_attr_list(record.attributes),
-                        "traceId": record.trace_id.hex() if record.trace_id else "",
-                        "spanId": record.span_id.hex() if record.span_id else "",
-                    }
+                record_attrs = _proto_kvlist_to_dict(record.attributes)
+                merged_attrs = {**resource_attrs, **record_attrs}
+                body_val = _proto_any_value_to_python(record.body)
+                body_str = body_val if isinstance(body_val, str) else json.dumps(body_val, ensure_ascii=False)
+                events.append(
+                    LogEvent(
+                        ts=_ns_to_iso(int(record.time_unix_nano or 0)),
+                        level=(record.severity_text or "INFO").upper(),
+                        service=service,
+                        body=body_str,
+                        attrs=merged_attrs,
+                        trace_id=record.trace_id.hex() if record.trace_id else "",
+                        span_id=record.span_id.hex() if record.span_id else "",
+                    )
                 )
-            scope_logs.append({"logRecords": log_records})
-        result["resourceLogs"].append(
-            {"resource": _proto_resource_to_dict(resource_log.resource), "scopeLogs": scope_logs}
-        )
-    return result
+    return events
 
 
-def _proto_traces_to_payload_dict(msg: ExportTraceServiceRequest) -> dict:
-    """Convert ExportTraceServiceRequest proto to the same dict structure as OTLP/JSON."""
-    result: dict = {"resourceSpans": []}
+def _proto_traces_to_events(msg: ExportTraceServiceRequest) -> tuple[list[SpanEvent], list[ErrorEvent]]:
+    span_events: list[SpanEvent] = []
+    error_events: list[ErrorEvent] = []
     for resource_span in msg.resource_spans:
-        scope_spans = []
+        resource_attrs = _proto_kvlist_to_dict(resource_span.resource.attributes)
+        service = str(resource_attrs.get("service.name", ""))
         for scope_span in resource_span.scope_spans:
-            spans = []
             for span in scope_span.spans:
-                spans.append(
-                    {
-                        "traceId": span.trace_id.hex() if span.trace_id else "",
-                        "spanId": span.span_id.hex() if span.span_id else "",
-                        "parentSpanId": span.parent_span_id.hex() if span.parent_span_id else "",
-                        "name": span.name,
-                        "startTimeUnixNano": str(span.start_time_unix_nano),
-                        "endTimeUnixNano": str(span.end_time_unix_nano),
-                        "status": {"code": span.status.code},
-                        "attributes": _proto_kvlist_to_attr_list(span.attributes),
-                    }
+                start_ns = int(span.start_time_unix_nano or 0)
+                end_ns = int(span.end_time_unix_nano or 0)
+                duration_ms = (end_ns - start_ns) / 1_000_000 if end_ns > start_ns else 0
+                status = "OK" if span.status.code == 1 else ("ERROR" if span.status.code == 2 else "UNSET")
+                span_attrs = _proto_kvlist_to_dict(span.attributes)
+                merged_attrs = {**resource_attrs, **span_attrs}
+                span_event = SpanEvent(
+                    ts=_ns_to_iso(start_ns),
+                    trace_id=span.trace_id.hex() if span.trace_id else "",
+                    span_id=span.span_id.hex() if span.span_id else "",
+                    parent_span_id=span.parent_span_id.hex() if span.parent_span_id else "",
+                    name=span.name,
+                    service=service,
+                    duration_ms=duration_ms,
+                    status=status,
+                    attrs=merged_attrs,
                 )
-            scope_spans.append({"spans": spans})
-        result["resourceSpans"].append(
-            {"resource": _proto_resource_to_dict(resource_span.resource), "scopeSpans": scope_spans}
-        )
-    return result
+                span_events.append(span_event)
+                if "ERROR" in status.upper():
+                    error_events.append(
+                        ErrorEvent(
+                            ts=span_event.ts,
+                            service=service,
+                            err_type=str(span_attrs.get("exception.type", "SpanError")),
+                            message=str(
+                                span_attrs.get("exception.message", span_attrs.get("error.message", span.name))
+                            ),
+                            stack=str(span_attrs.get("exception.stacktrace", "")),
+                            attrs=merged_attrs,
+                            trace_id=span_event.trace_id,
+                            span_id=span_event.span_id,
+                        )
+                    )
+    return span_events, error_events
 
 
-def _proto_metrics_to_payload_dict(msg: ExportMetricsServiceRequest) -> dict:
-    """Convert ExportMetricsServiceRequest proto to the same dict structure as OTLP/JSON."""
-    result: dict = {"resourceMetrics": []}
+def _proto_metrics_to_events(msg: ExportMetricsServiceRequest) -> list[MetricEvent]:
+    events: list[MetricEvent] = []
     for resource_metric in msg.resource_metrics:
-        scope_metrics = []
+        resource_attrs = _proto_kvlist_to_dict(resource_metric.resource.attributes)
+        service = str(resource_attrs.get("service.name", "metrics"))
         for scope_metric in resource_metric.scope_metrics:
-            metrics = []
             for metric in scope_metric.metrics:
-                metrics.append({"name": metric.name})
-            scope_metrics.append({"metrics": metrics})
-        result["resourceMetrics"].append(
-            {"resource": _proto_resource_to_dict(resource_metric.resource), "scopeMetrics": scope_metrics}
+                events.append(
+                    MetricEvent(
+                        ts=_now_iso(),
+                        service=service,
+                        name=metric.name,
+                        attrs={**resource_attrs, "metric": metric.name},
+                    )
+                )
+    return events
+
+
+def _insert_log_events(db, events: list[LogEvent]) -> int:
+    for event in events:
+        db.execute(
+            "INSERT INTO logs(ts, level, service, body, attrs, trace_id, span_id) VALUES(?,?,?,?,?,?,?)",
+            (
+                event.ts,
+                event.level,
+                event.service,
+                compress(event.body),
+                compress_json(event.attrs),
+                event.trace_id,
+                event.span_id,
+            ),
         )
-    return result
+    return len(events)
+
+
+def _insert_span_events(db, span_events: list[SpanEvent]) -> int:
+    for event in span_events:
+        db.execute(
+            "INSERT INTO spans(ts, trace_id, span_id, parent_span_id, name, service, duration_ms, status, attrs) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                event.ts,
+                event.trace_id,
+                event.span_id,
+                event.parent_span_id,
+                event.name,
+                event.service,
+                event.duration_ms,
+                event.status,
+                compress_json(event.attrs),
+            ),
+        )
+    return len(span_events)
+
+
+def _insert_error_events(db, error_events: list[ErrorEvent]):
+    for event in error_events:
+        db.execute(
+            "INSERT INTO errors"
+            "(ts, service, err_type, message, stack, attrs, trace_id, span_id)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (
+                event.ts,
+                event.service,
+                event.err_type,
+                event.message,
+                compress(event.stack) if event.stack else None,
+                compress_json(event.attrs),
+                event.trace_id,
+                event.span_id,
+            ),
+        )
+
+
+def _insert_metric_events(db, events: list[MetricEvent]) -> int:
+    for event in events:
+        db.execute(
+            "INSERT INTO logs(ts, level, service, body, attrs, trace_id, span_id) VALUES(?,?,?,?,?,?,?)",
+            (event.ts, "METRIC", event.service, compress(f"METRIC {event.name}"), compress_json(event.attrs), "", ""),
+        )
+    return len(events)
 
 
 _PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
@@ -511,33 +684,33 @@ def _parse_otlp_request(proto_class):
     """
     Parse an OTLP HTTP request body.
 
-    Returns ``(payload_dict, error_response)`` where ``error_response`` is
+    Returns ``(proto_message, error_response)`` where ``error_response`` is
     ``None`` on success or a ``(flask_response, status_code)`` tuple on failure.
 
-    - ``Content-Type: application/x-protobuf`` → deserialise with *proto_class*
-      and convert to a JSON-equivalent dict so the downstream processing code
-      can be shared between both wire formats.
-    - Any other content-type (including ``application/json``) → fall back to
-      the existing ``request.get_json`` path.
+    - ``Content-Type: application/x-protobuf`` → deserialise with *proto_class*.
+    - Any other content-type (including ``application/json``) → parse JSON and
+      map into the same protobuf class via protobuf JSON mapping.
     """
-    content_type = request.content_type or ""
-    if _PROTOBUF_CONTENT_TYPE in content_type:
+    mimetype = (request.mimetype or "").lower()
+    msg = proto_class()
+    if mimetype == _PROTOBUF_CONTENT_TYPE:
         app.logger.debug("OTLP ingest: parse_path=protobuf endpoint=%s", request.path)
         try:
-            proto_converters = {
-                ExportLogsServiceRequest: _proto_logs_to_payload_dict,
-                ExportTraceServiceRequest: _proto_traces_to_payload_dict,
-                ExportMetricsServiceRequest: _proto_metrics_to_payload_dict,
-            }
-            msg = proto_class()
             msg.ParseFromString(request.data)
-            payload = proto_converters[proto_class](msg)
         except Exception as exc:
             app.logger.warning("OTLP protobuf parse error [%s]: %s", request.path, exc)
             return None, (jsonify({"error": "failed to parse protobuf body"}), 400)
-        return payload, None
+        return msg, None
     app.logger.debug("OTLP ingest: parse_path=json endpoint=%s", request.path)
-    return request.get_json(force=True, silent=True) or {}, None
+    payload = request.get_json(force=True, silent=True)
+    if payload is None:
+        payload = {}
+    try:
+        ParseDict(payload, msg)
+    except Exception as exc:
+        app.logger.warning("OTLP json parse error [%s]: %s", request.path, exc)
+        return None, (jsonify({"error": "failed to parse json body"}), 400)
+    return msg, None
 
 
 # ---------------------------------------------------------------------------
@@ -546,29 +719,11 @@ def _parse_otlp_request(proto_class):
 @app.route("/v1/logs", methods=["POST"])
 @require_api_key
 def ingest_logs():
-    payload, err = _parse_otlp_request(ExportLogsServiceRequest)
+    msg, err = _parse_otlp_request(ExportLogsServiceRequest)
     if err:
         return err
     db = get_db()
-    count = 0
-    for resource_log in payload.get("resourceLogs", []):
-        resource_attrs = _attr_list_to_dict(resource_log.get("resource", {}).get("attributes", []))
-        service = resource_attrs.get("service.name", "")
-        for scope_log in resource_log.get("scopeLogs", []):
-            for record in scope_log.get("logRecords", []):
-                ts = _ns_to_iso(int(record.get("timeUnixNano", 0)))
-                level = record.get("severityText", "INFO").upper()
-                body_val = record.get("body", {})
-                body_str = body_val.get("stringValue", str(body_val)) if isinstance(body_val, dict) else str(body_val)
-                record_attrs = _attr_list_to_dict(record.get("attributes", []))
-                merged_attrs = {**resource_attrs, **record_attrs}
-                trace_id = _hex(record.get("traceId", ""))
-                span_id = _hex(record.get("spanId", ""))
-                db.execute(
-                    "INSERT INTO logs(ts, level, service, body, attrs, trace_id, span_id) VALUES(?,?,?,?,?,?,?)",
-                    (ts, level, service, compress(body_str), compress_json(merged_attrs), trace_id, span_id),
-                )
-                count += 1
+    count = _insert_log_events(db, _proto_logs_to_events(msg))
     db.commit()
     return jsonify({"accepted": count}), 200
 
@@ -579,64 +734,13 @@ def ingest_logs():
 @app.route("/v1/traces", methods=["POST"])
 @require_api_key
 def ingest_traces():
-    payload, err = _parse_otlp_request(ExportTraceServiceRequest)
+    msg, err = _parse_otlp_request(ExportTraceServiceRequest)
     if err:
         return err
     db = get_db()
-    count = 0
-    for resource_span in payload.get("resourceSpans", []):
-        resource_attrs = _attr_list_to_dict(resource_span.get("resource", {}).get("attributes", []))
-        service = resource_attrs.get("service.name", "")
-        for scope_span in resource_span.get("scopeSpans", []):
-            for span in scope_span.get("spans", []):
-                ts = _ns_to_iso(int(span.get("startTimeUnixNano", 0)))
-                trace_id = _hex(span.get("traceId", ""))
-                span_id = _hex(span.get("spanId", ""))
-                parent_id = _hex(span.get("parentSpanId", ""))
-                name = span.get("name", "")
-                start_ns = int(span.get("startTimeUnixNano", 0))
-                end_ns = int(span.get("endTimeUnixNano", 0))
-                duration_ms = (end_ns - start_ns) / 1_000_000 if end_ns > start_ns else 0
-                status = span.get("status", {}).get("code", "STATUS_CODE_OK")
-                if isinstance(status, int):
-                    status = "OK" if status == 1 else ("ERROR" if status == 2 else "UNSET")
-                span_attrs = _attr_list_to_dict(span.get("attributes", []))
-                merged_attrs = {**resource_attrs, **span_attrs}
-                db.execute(
-                    "INSERT INTO spans(ts, trace_id, span_id, parent_span_id, name, service, duration_ms, status, attrs) "  # noqa: E501
-                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        ts,
-                        trace_id,
-                        span_id,
-                        parent_id,
-                        name,
-                        service,
-                        duration_ms,
-                        str(status),
-                        compress_json(merged_attrs),
-                    ),
-                )
-                count += 1
-                # Detect errors from span status
-                if "ERROR" in str(status).upper():
-                    err_msg = span_attrs.get("exception.message", span_attrs.get("error.message", name))
-                    err_type = span_attrs.get("exception.type", "SpanError")
-                    stack = span_attrs.get("exception.stacktrace", "")
-                    db.execute(
-                        "INSERT INTO errors(ts, service, err_type, message, stack, attrs, trace_id, span_id) "
-                        "VALUES(?,?,?,?,?,?,?,?)",
-                        (
-                            ts,
-                            service,
-                            err_type,
-                            err_msg,
-                            compress(stack) if stack else None,
-                            compress_json(merged_attrs),
-                            trace_id,
-                            span_id,
-                        ),
-                    )
+    span_events, error_events = _proto_traces_to_events(msg)
+    count = _insert_span_events(db, span_events)
+    _insert_error_events(db, error_events)
     db.commit()
     return jsonify({"accepted": count}), 200
 
@@ -647,24 +751,11 @@ def ingest_traces():
 @app.route("/v1/metrics", methods=["POST"])
 @require_api_key
 def ingest_metrics():
-    payload, err = _parse_otlp_request(ExportMetricsServiceRequest)
+    msg, err = _parse_otlp_request(ExportMetricsServiceRequest)
     if err:
         return err
     db = get_db()
-    count = 0
-    for resource_metric in payload.get("resourceMetrics", []):
-        resource_attrs = _attr_list_to_dict(resource_metric.get("resource", {}).get("attributes", []))
-        service = resource_attrs.get("service.name", "metrics")
-        for scope_metric in resource_metric.get("scopeMetrics", []):
-            for metric in scope_metric.get("metrics", []):
-                name = metric.get("name", "")
-                ts = _now_iso()
-                body = f"METRIC {name}"
-                db.execute(
-                    "INSERT INTO logs(ts, level, service, body, attrs, trace_id, span_id) VALUES(?,?,?,?,?,?,?)",
-                    (ts, "METRIC", service, compress(body), compress_json({**resource_attrs, "metric": name}), "", ""),
-                )
-                count += 1
+    count = _insert_metric_events(db, _proto_metrics_to_events(msg))
     db.commit()
     return jsonify({"accepted": count}), 200
 
@@ -1232,7 +1323,9 @@ if __name__ == "__main__":
             def load(self):
                 return self.application
 
-        workers = int(os.environ.get("GUNICORN_WORKERS", 2))
+        # DuckDB uses a file lock that does not allow concurrent write-capable
+        # access from multiple Gunicorn worker processes.
+        workers = int(os.environ.get("GUNICORN_WORKERS", 1))
         threads = int(os.environ.get("GUNICORN_THREADS", 4))
         _StandaloneApplication(
             app,
