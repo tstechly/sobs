@@ -18,6 +18,7 @@ import os
 import tempfile
 import threading
 import time
+from typing import Any
 
 import pytest
 import requests
@@ -128,7 +129,7 @@ def _span(
     span_id: str,
     parent_span_id: str = "",
     status_code: int = 1,
-    attrs: list = None,
+    attrs: list[Any] | None = None,
 ) -> dict:
     start_ns = int(time.time() * 1_000_000_000)
     s: dict = {

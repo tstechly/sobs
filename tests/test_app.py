@@ -15,8 +15,8 @@ import pytest
 # Point to a temp DB before importing the app
 os.environ["SOBS_DATA_DIR"] = tempfile.mkdtemp()
 
-from app import app, compress, compress_json, decompress, decompress_json, init_db  # noqa: E402
 import app as sobs_app  # noqa: E402
+from app import app, compress, compress_json, decompress, decompress_json, init_db  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
