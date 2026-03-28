@@ -130,6 +130,8 @@ pip install flask pytest
 pytest tests/
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and quality checks.
+
 ## Git Pre-Commit Hook (Python)
 
 This repository includes a version-controlled Git pre-commit hook at `.githooks/pre-commit`.
