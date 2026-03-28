@@ -27,7 +27,7 @@ docker-compose up -d
 
 # Python (dev)
 pip install flask gunicorn
-FLASK_DEBUG=1 python app.py
+python app.py
 ```
 
 Open `http://localhost:4317` in your browser.
@@ -84,6 +84,9 @@ bash examples/curl_examples.sh
 | `/v1/errors`   | POST   | Direct error submission            |
 | `/v1/ai`       | POST   | AI/LLM call transparency           |
 | `/health`      | GET    | Health check                       |
+| `/health/db`   | GET    | DB readiness check (touches chDB) |
+
+Ingest writes are queued and flushed by a single background DB writer thread. In normal runtime this keeps API latency low under load.
 
 ## Configuration
 
@@ -96,9 +99,10 @@ bash examples/curl_examples.sh
 | `SOBS_EXTERNAL_AUTH_URL`    | _(empty)_      | Optional external Bearer validator for the Web UI |
 | `SOBS_BASE_PATH`            | _(empty)_      | Optional URL prefix (for example `/sobs`) for UI/API routing and generated links |
 | `PORT`                      | `4317`         | Listen port                                      |
-| `FLASK_DEBUG`               | `0`            | Enable Flask debug mode (uses dev server when set to `1`) |
-| `GUNICORN_WORKERS`          | `2`            | Number of gunicorn worker processes (production mode)     |
-| `GUNICORN_THREADS`          | `4`            | Number of threads per gunicorn worker (production mode)   |
+| `SOBS_THREADED`             | `1`            | Run Flask server with threading enabled (`1`/`0`) |
+| `SOBS_WRITE_QUEUE_MAX`      | `5000`         | Max buffered write operations before ingest returns `503` |
+| `SOBS_WRITE_BATCH_MAX`      | `200`          | Max writes processed per DB batch |
+| `SOBS_WRITE_BATCH_WAIT_MS`  | `20`           | Max milliseconds to wait for filling a write batch |
 
 Authentication details and setup examples are documented in [AUTHENTICATION.md](AUTHENTICATION.md).
 

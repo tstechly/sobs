@@ -6,6 +6,7 @@ Run with:  pytest tests/
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 
@@ -63,6 +64,116 @@ class TestHealth:
         data = json.loads(r.data)
         assert data["status"] == "ok"
 
+    def test_health_db_ok(self, client):
+        r = client.get("/health/db")
+        assert r.status_code == 200
+        data = json.loads(r.data)
+        assert data["status"] == "ok"
+        assert data["db"] == "ok"
+        assert isinstance(data["write_queue_depth"], int)
+
+    def test_health_db_returns_503_when_db_fails(self, client, monkeypatch):
+        class _BrokenDb:
+            def execute(self, *_args, **_kwargs):
+                raise RuntimeError("db timeout")
+
+        monkeypatch.setattr(sobs_app, "ensure_db_schema", lambda: None)
+        monkeypatch.setattr(sobs_app, "get_db", lambda: _BrokenDb())
+
+        r = client.get("/health/db")
+        assert r.status_code == 503
+        data = json.loads(r.data)
+        assert data["status"] == "degraded"
+        assert data["db"] == "error"
+        assert "db timeout" in data["error"]
+        assert isinstance(data["write_queue_depth"], int)
+
+
+class TestWriteQueue:
+    def test_ingest_returns_503_when_write_queue_full(self, client, monkeypatch):
+        def _raise_queue_full(_op, wait=False):
+            raise sobs_app.WriteQueueFullError("write queue is full")
+
+        monkeypatch.setattr(sobs_app, "_queue_write", _raise_queue_full)
+        r = client.post("/v1/errors", json={"service": "q-full", "message": "drop me"})
+        assert r.status_code == 503
+        data = json.loads(r.data)
+        assert "write queue is full" in data["error"]
+
+    def test_ingest_returns_500_when_writer_op_fails(self, client, monkeypatch):
+        def _raise_write_failure(*_args, **_kwargs):
+            raise RuntimeError("write failed")
+
+        monkeypatch.setattr(sobs_app, "_insert_rows_json_each_row", _raise_write_failure)
+        r = client.post("/v1/errors", json={"service": "q-fail", "message": "boom"})
+        assert r.status_code == 500
+        data = json.loads(r.data)
+        assert "write failed" in data["error"]
+
+    def test_non_testing_mode_uses_async_queue_and_persists(self, monkeypatch):
+        # In non-testing mode ingest should enqueue writes and return immediately.
+        monkeypatch.setitem(app.config, "TESTING", False)
+        marker = f"queued-{time.time_ns()}"
+        with app.test_client() as c:
+            r = c.post("/v1/errors", json={"service": "q-async", "message": marker})
+            assert r.status_code == 200
+
+        deadline = time.time() + 2.0
+        found = False
+        while time.time() < deadline:
+            cnt = (
+                sobs_app.get_db()
+                .execute("SELECT COUNT(*) FROM otel_logs WHERE EventName='exception' AND Body=?", (marker,))
+                .fetchone()[0]
+            )
+            if cnt and int(cnt) > 0:
+                found = True
+                break
+            time.sleep(0.02)
+        assert found, "queued write was not persisted within timeout"
+
+    def test_health_db_remains_available_during_ingest_burst(self, monkeypatch):
+        monkeypatch.setitem(app.config, "TESTING", False)
+        marker = f"burst-{time.time_ns()}"
+
+        with app.test_client() as c:
+            for i in range(60):
+                r = c.post(
+                    "/v1/errors",
+                    json={
+                        "service": "q-burst",
+                        "type": "BurstError",
+                        "message": f"{marker}-{i}",
+                    },
+                )
+                assert r.status_code == 200
+
+                # Probe DB readiness repeatedly while writes are flowing.
+                if i % 5 == 0:
+                    hr = c.get("/health/db")
+                    assert hr.status_code == 200
+                    hdata = json.loads(hr.data)
+                    assert hdata["db"] == "ok"
+                    assert isinstance(hdata["write_queue_depth"], int)
+
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                cnt = (
+                    sobs_app.get_db()
+                    .execute("SELECT COUNT(*) FROM otel_logs WHERE EventName='exception' AND ServiceName='q-burst'")
+                    .fetchone()[0]
+                )
+                if int(cnt) >= 60:
+                    break
+                time.sleep(0.02)
+
+            final_health = c.get("/health/db")
+            assert final_health.status_code == 200
+            final_data = json.loads(final_health.data)
+            assert final_data["db"] == "ok"
+
+        assert int(cnt) >= 60
+
 
 class TestDbBootstrap:
     def test_first_dashboard_and_rum_request_bootstrap_schema(self, client):
@@ -84,10 +195,13 @@ class TestDbBootstrap:
         tables = {
             row[0]
             for row in sobs_app.get_db()
-            .execute("SELECT name FROM system.tables" " WHERE database='default' AND name IN ('logs', 'rum_events')")
+            .execute(
+                "SELECT name FROM system.tables"
+                " WHERE database='default' AND name IN ('otel_logs', 'hyperdx_sessions')"
+            )
             .fetchall()
         }
-        assert {"logs", "rum_events"}.issubset(tables)
+        assert {"otel_logs", "hyperdx_sessions"}.issubset(tables)
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +378,10 @@ class TestOtlpProtobufIngest:
         # Verify the row exists in the database
         row = (
             sobs_app.get_db()
-            .execute("SELECT service FROM logs WHERE service=? ORDER BY ts DESC LIMIT 1", ("proto-db-svc",))
+            .execute(
+                "SELECT ServiceName FROM otel_logs WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+                ("proto-db-svc",),
+            )
             .fetchone()
         )
         assert row is not None, "Log row not found in DB"
@@ -285,7 +402,7 @@ class TestOtlpProtobufIngest:
         row = (
             sobs_app.get_db()
             .execute(
-                "SELECT name, service FROM spans WHERE service=? ORDER BY ts DESC LIMIT 1",
+                "SELECT SpanName, ServiceName FROM otel_traces " "WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
                 ("proto-trace-db-svc",),
             )
             .fetchone()
@@ -325,7 +442,10 @@ class TestOtlpProtobufIngest:
         row = (
             sobs_app.get_db()
             .execute(
-                "SELECT service, err_type FROM errors WHERE service=? ORDER BY ts DESC LIMIT 1",
+                "SELECT ServiceName, LogAttributes['exception.type'] "
+                "FROM otel_logs "
+                "WHERE ServiceName=? AND EventName='exception' "
+                "ORDER BY Timestamp DESC LIMIT 1",
                 ("proto-err-svc",),
             )
             .fetchone()
@@ -396,8 +516,10 @@ class TestErrorsIngest:
         # Resolve it (get the ID from the errors page)
         r = client.get("/errors?service=resolve-svc&resolved=0")
         assert r.status_code == 200
-        # Resolve via POST (use ID 1 if we can find it from the page)
-        r2 = client.post("/errors/1/resolve")
+        html = r.data.decode("utf-8")
+        m = re.search(r"/errors/([0-9a-f]{32})/resolve", html)
+        assert m, "Could not find resolve URL in errors page"
+        r2 = client.post(f"/errors/{m.group(1)}/resolve")
         assert r2.status_code == 200
 
 
@@ -682,6 +804,11 @@ class TestBasicAuth:
     def test_health_endpoint_unaffected(self, authed_client):
         """/health should remain accessible regardless of Basic Auth config."""
         r = authed_client.get("/health")
+        assert r.status_code == 200
+
+    def test_health_db_endpoint_unaffected(self, authed_client):
+        """/health/db should remain accessible regardless of Basic Auth config."""
+        r = authed_client.get("/health/db")
         assert r.status_code == 200
 
     def test_partial_basic_auth_config_is_error(self, monkeypatch):
