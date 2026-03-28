@@ -6,6 +6,7 @@ Run with:  pytest tests/
 import base64
 import json
 import os
+import sqlite3
 import tempfile
 import time
 
@@ -15,6 +16,7 @@ import pytest
 os.environ["SOBS_DATA_DIR"] = tempfile.mkdtemp()
 
 from app import app, compress, compress_json, decompress, decompress_json, init_db  # noqa: E402
+import app as sobs_app  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -61,6 +63,36 @@ class TestHealth:
         assert r.status_code == 200
         data = json.loads(r.data)
         assert data["status"] == "ok"
+
+
+class TestDbBootstrap:
+    def test_first_dashboard_and_rum_request_bootstrap_schema(self, monkeypatch, tmp_path):
+        db_path = tmp_path / "fresh-sobs.db"
+        monkeypatch.setattr(sobs_app, "DB_PATH", str(db_path))
+
+        with app.test_client() as c:
+            dashboard = c.get("/")
+            assert dashboard.status_code == 200
+
+            rum = c.post(
+                "/v1/rum",
+                json={
+                    "session_id": "first-session",
+                    "event_type": "pageview",
+                    "url": "/",
+                    "data": {"boot": True},
+                },
+            )
+            assert rum.status_code == 200
+
+        with sqlite3.connect(str(db_path)) as db:
+            tables = {
+                row[0]
+                for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('logs', 'rum_events')"
+                ).fetchall()
+            }
+        assert {"logs", "rum_events"}.issubset(tables)
 
 
 # ---------------------------------------------------------------------------

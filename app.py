@@ -147,6 +147,25 @@ def init_db():
         db.commit()
 
 
+def ensure_db_schema():
+    """Create schema if the active DB is empty or tables are missing."""
+    db = get_db()
+    try:
+        has_logs_table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='logs'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        has_logs_table = None
+
+    if has_logs_table is None:
+        db.executescript(SCHEMA)
+        db.commit()
+
+
+# Initialize schema at import time so WSGI/sidecar startups are covered.
+init_db()
+
+
 # ---------------------------------------------------------------------------
 # Compression helpers
 # ---------------------------------------------------------------------------
@@ -267,6 +286,12 @@ def require_basic_auth(f):
         )
 
     return decorated
+
+
+@app.before_request
+def ensure_schema_before_request():
+    # Fallback guard for runtimes where DB files appear after startup.
+    ensure_db_schema()
 
 
 # ---------------------------------------------------------------------------
