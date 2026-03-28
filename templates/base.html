@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}SOBS{% endblock %} — Simple Observe</title>
-  <link rel="stylesheet" href="/static/bootstrap.min.css">
-  <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='bootstrap-icons.min.css') }}">
   <style>
     body { font-size: .9rem; }
     .nav-link.active { font-weight: 600; }
@@ -33,38 +33,38 @@
 <div class="d-flex">
   <!-- Sidebar -->
   <nav class="sidebar d-flex flex-column p-3" style="width:220px;flex-shrink:0;">
-    <a href="/" class="text-decoration-none mb-4 d-flex align-items-center gap-2">
+    <a href="{{ url_for('dashboard') }}" class="text-decoration-none mb-4 d-flex align-items-center gap-2">
       <span style="font-size:1.4rem;">🔭</span>
       <span class="fw-bold fs-5 text-white">SOBS</span>
     </a>
     <ul class="nav flex-column gap-1">
       <li class="nav-item">
-        <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}">
+        <a href="{{ url_for('dashboard') }}" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}">
           <i class="bi bi-speedometer2"></i> Dashboard
         </a>
       </li>
       <li class="nav-item">
-        <a href="/logs" class="nav-link {% if request.path == '/logs' %}active{% endif %}">
+        <a href="{{ url_for('view_logs') }}" class="nav-link {% if request.endpoint == 'view_logs' %}active{% endif %}">
           <i class="bi bi-journal-text"></i> Logs
         </a>
       </li>
       <li class="nav-item">
-        <a href="/errors" class="nav-link {% if request.path == '/errors' %}active{% endif %}">
+        <a href="{{ url_for('view_errors') }}" class="nav-link {% if request.endpoint == 'view_errors' %}active{% endif %}">
           <i class="bi bi-bug"></i> Errors
         </a>
       </li>
       <li class="nav-item">
-        <a href="/traces" class="nav-link {% if request.path == '/traces' %}active{% endif %}">
+        <a href="{{ url_for('view_traces') }}" class="nav-link {% if request.endpoint == 'view_traces' %}active{% endif %}">
           <i class="bi bi-diagram-3"></i> Traces
         </a>
       </li>
       <li class="nav-item">
-        <a href="/rum" class="nav-link {% if request.path == '/rum' %}active{% endif %}">
+        <a href="{{ url_for('view_rum') }}" class="nav-link {% if request.endpoint == 'view_rum' %}active{% endif %}">
           <i class="bi bi-globe"></i> RUM
         </a>
       </li>
       <li class="nav-item">
-        <a href="/ai" class="nav-link {% if request.path == '/ai' %}active{% endif %}">
+        <a href="{{ url_for('view_ai') }}" class="nav-link {% if request.endpoint == 'view_ai' %}active{% endif %}">
           <i class="bi bi-cpu"></i> AI
         </a>
       </li>
@@ -88,7 +88,7 @@
   </div>
 </div>
 
-<script src="/static/bootstrap.bundle.min.js"></script>
+<script src="{{ url_for('static', filename='bootstrap.bundle.min.js') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

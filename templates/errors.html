@@ -29,7 +29,7 @@
       </div>
       <div class="col-md-2 d-flex gap-1">
         <button type="submit" class="btn btn-primary btn-sm">Filter</button>
-        <a href="/errors" class="btn btn-outline-secondary btn-sm">Reset</a>
+        <a href="{{ url_for('view_errors') }}" class="btn btn-outline-secondary btn-sm">Reset</a>
       </div>
     </form>
   </div>
@@ -60,12 +60,12 @@
         {% endif %}
         <div class="d-flex gap-2 mt-2">
           {% if err.trace_id %}
-          <a href="/traces?trace_id={{ err.trace_id }}" class="btn btn-sm btn-outline-info">
+          <a href="{{ url_for('view_traces', trace_id=err.trace_id) }}" class="btn btn-sm btn-outline-info">
             <i class="bi bi-diagram-3 me-1"></i>Trace
           </a>
           {% endif %}
           {% if not err.resolved %}
-          <button class="btn btn-sm btn-outline-success resolve-btn" data-id="{{ err.id }}">
+          <button class="btn btn-sm btn-outline-success resolve-btn" data-resolve-url="{{ url_for('resolve_error', error_id=err.id) }}">
             <i class="bi bi-check2 me-1"></i>Resolve
           </button>
           {% endif %}
@@ -84,12 +84,12 @@
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="?service={{ service }}&resolved={{ resolved }}&limit={{ limit }}&offset={{ prev_offset }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_errors', service=service, resolved=resolved, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="?service={{ service }}&resolved={{ resolved }}&limit={{ limit }}&offset={{ next_offset }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_errors', service=service, resolved=resolved, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
@@ -105,8 +105,7 @@
 <script>
 document.querySelectorAll('.resolve-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
-    const id = btn.dataset.id;
-    const res = await fetch(`/errors/${id}/resolve`, {method: 'POST'});
+    const res = await fetch(btn.dataset.resolveUrl, {method: 'POST'});
     if (res.ok) {
       btn.closest('.accordion-item').querySelectorAll('.badge').forEach(b => {
         if (b.classList.contains('bg-danger')) { b.classList.replace('bg-danger', 'bg-success'); b.textContent = 'Resolved'; }

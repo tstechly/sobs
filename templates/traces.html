@@ -26,7 +26,7 @@
       </div>
       <div class="col-md-2 d-flex gap-1">
         <button type="submit" class="btn btn-primary btn-sm">Filter</button>
-        <a href="/traces" class="btn btn-outline-secondary btn-sm">Reset</a>
+        <a href="{{ url_for('view_traces') }}" class="btn btn-outline-secondary btn-sm">Reset</a>
       </div>
     </form>
   </div>
@@ -70,7 +70,7 @@
         <td class="small text-secondary">{{ span.http_method }}</td>
         <td class="small">{% if span.http_status %}<span class="badge {% if span.http_status|string >= '500' %}bg-danger{% elif span.http_status|string >= '400' %}bg-warning text-dark{% else %}bg-success{% endif %}">{{ span.http_status }}</span>{% endif %}</td>
         <td>
-          <a href="/traces?trace_id={{ span.trace_id }}" class="trace-link text-truncate d-inline-block" style="max-width:120px;" title="{{ span.trace_id }}">
+          <a href="{{ url_for('view_traces', trace_id=span.trace_id) }}" class="trace-link text-truncate d-inline-block" style="max-width:120px;" title="{{ span.trace_id }}">
             {{ span.trace_id[:12] if span.trace_id else '—' }}{% if span.trace_id %}…{% endif %}
           </a>
         </td>
@@ -88,12 +88,12 @@
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="?service={{ service }}&trace_id={{ trace_id }}&limit={{ limit }}&offset={{ prev_offset }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_traces', service=service, trace_id=trace_id, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="?service={{ service }}&trace_id={{ trace_id }}&limit={{ limit }}&offset={{ next_offset }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_traces', service=service, trace_id=trace_id, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
