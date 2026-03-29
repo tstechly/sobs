@@ -710,8 +710,7 @@ def _extract_messages_text(messages_str: str) -> str:
                     if isinstance(content, list):
                         # Content blocks (e.g. OpenAI vision API)
                         content = " ".join(
-                            part.get("text", "") if isinstance(part, dict) else str(part)
-                            for part in content
+                            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
                         )
                     if content:
                         parts.append(f"[{role}] {content}" if role else str(content))
@@ -1339,8 +1338,8 @@ async def ingest_ai():
     payload = await request.get_json(force=True, silent=True) or {}
     ts = payload.get("timestamp", _now_iso())
     model = str(payload.get("model", ""))
-    # Canonicalize operation: default to "chat" for chat completions
-    operation = str(payload.get("operation", "chat")) or "chat"
+    # Canonicalize operation: default to "chat", normalise case/whitespace
+    operation = (str(payload.get("operation", "")) or "chat").lower().strip()
     duration_ms = float(payload.get("duration_ms", 0) or 0)
     provider = str(payload.get("provider", ""))
     service = str(payload.get("service", ""))
@@ -1355,14 +1354,10 @@ async def ingest_ai():
     # Standard OTel GenAI content attributes (primary)
     if payload.get("input_messages") is not None:
         raw = payload["input_messages"]
-        span_attrs["gen_ai.input.messages"] = (
-            raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-        )
+        span_attrs["gen_ai.input.messages"] = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     if payload.get("output_messages") is not None:
         raw = payload["output_messages"]
-        span_attrs["gen_ai.output.messages"] = (
-            raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
-        )
+        span_attrs["gen_ai.output.messages"] = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     # Legacy sobs fields (kept for backward-compat / UI fallback)
     if payload.get("prompt"):
         span_attrs["sobs.gen_ai.prompt"] = str(payload["prompt"])
@@ -1520,7 +1515,8 @@ async def dashboard():
         "spans": db.execute("SELECT COUNT(*) FROM otel_traces").fetchone()[0],
         "rum": db.execute("SELECT COUNT(*) FROM hyperdx_sessions").fetchone()[0],
         "ai": db.execute(
-            "SELECT COUNT(*) FROM otel_traces WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
+            "SELECT COUNT(*) FROM otel_traces "
+            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
         ).fetchone()[0],
         "services": [
             r[0]
@@ -2031,7 +2027,8 @@ async def view_ai():
         row[0]
         for row in db.execute(
             "SELECT DISTINCT ServiceName FROM otel_traces "
-            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') AND ServiceName!='' ORDER BY ServiceName"
+            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
+            "AND ServiceName!='' ORDER BY ServiceName"
         ).fetchall()
     ]
     models = [

@@ -818,6 +818,28 @@ class TestAIIngest:
         )
         assert r.status_code == 200
 
+    async def test_ingest_ai_operation_canonicalised_to_lowercase(self, client):
+        """operation value should be lower-cased and stripped before storage."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/ai",
+                json={
+                    "service": "svc",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "operation": "  Chat  ",
+                },
+            )
+            assert r.status_code == 200
+            event = q.get_nowait()
+            assert event["operation"] == "chat"
+        finally:
+            app_module._sse_subscribers.discard(q)
+
     async def test_ingest_ai_broadcasts_sse_event(self, client):
         """POST /v1/ai should broadcast a source=ai SSE event."""
         import app as app_module
@@ -1567,9 +1589,7 @@ class TestSSETail:
                 json={
                     "resourceSpans": [
                         {
-                            "resource": {
-                                "attributes": [{"key": "service.name", "value": {"stringValue": "llm-svc"}}]
-                            },
+                            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "llm-svc"}}]},
                             "scopeSpans": [
                                 {
                                     "spans": [

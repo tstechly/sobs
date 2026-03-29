@@ -232,7 +232,7 @@ function startLiveTail() {
   var status = document.getElementById('liveTailStatus');
   status.className = 'badge bg-warning text-dark';
   status.textContent = 'Connecting…';
-  _liveTailEvt = new EventSource('/tail?source=ai');
+  _liveTailEvt = new EventSource('{{ url_for("tail_stream") }}?source=ai');
   _liveTailEvt.onopen = function() {
     status.className = 'badge bg-success';
     status.textContent = 'Live';
