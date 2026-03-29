@@ -863,6 +863,55 @@ class TestUIPages:
         r = await client.get("/logs?limit=10&offset=0")
         assert r.status_code == 200
 
+    async def test_logs_sort_by_level(self, client):
+        r = await client.get("/logs?sort_by=SeverityText&sort_dir=asc")
+        assert r.status_code == 200
+
+    async def test_logs_sort_by_service_desc(self, client):
+        r = await client.get("/logs?sort_by=ServiceName&sort_dir=desc")
+        assert r.status_code == 200
+
+    async def test_logs_invalid_sort_ignored(self, client):
+        """An unknown sort_by value should fall back to Timestamp without error."""
+        r = await client.get("/logs?sort_by=INVALID_COL&sort_dir=desc")
+        assert r.status_code == 200
+
+    async def test_errors_sort_by_service(self, client):
+        r = await client.get("/errors?sort_by=ServiceName&sort_dir=asc")
+        assert r.status_code == 200
+
+    async def test_errors_page_size(self, client):
+        r = await client.get("/errors?limit=25&offset=0")
+        assert r.status_code == 200
+
+    async def test_traces_sort_by_duration(self, client):
+        r = await client.get("/traces?sort_by=Duration&sort_dir=desc")
+        assert r.status_code == 200
+
+    async def test_traces_sort_by_name(self, client):
+        r = await client.get("/traces?sort_by=SpanName&sort_dir=asc")
+        assert r.status_code == 200
+
+    async def test_traces_page_size(self, client):
+        r = await client.get("/traces?limit=50&offset=0")
+        assert r.status_code == 200
+
+    async def test_rum_sort_by_type(self, client):
+        r = await client.get("/rum?sort_by=EventName&sort_dir=asc")
+        assert r.status_code == 200
+
+    async def test_rum_page_size(self, client):
+        r = await client.get("/rum?limit=25&offset=0")
+        assert r.status_code == 200
+
+    async def test_ai_sort_by_duration(self, client):
+        r = await client.get("/ai?sort_by=Duration&sort_dir=desc")
+        assert r.status_code == 200
+
+    async def test_ai_page_size(self, client):
+        r = await client.get("/ai?limit=25&offset=0")
+        assert r.status_code == 200
+
     async def test_sql_error_handled(self, client):
         """Bad SQL should return an error message, not a 500."""
         r = await client.get("/logs?sql=INVALID+SQL+))))")

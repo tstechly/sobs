@@ -73,10 +73,25 @@
 <div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
   <table class="table table-sm table-hover align-middle">
     <thead>
+      {% set ts_next_dir = 'asc' if (sort_by == 'Timestamp' and sort_dir == 'desc') else 'desc' %}
+      {% set level_next_dir = 'asc' if (sort_by == 'SeverityText' and sort_dir == 'desc') else 'desc' %}
+      {% set svc_next_dir = 'asc' if (sort_by == 'ServiceName' and sort_dir == 'desc') else 'desc' %}
       <tr>
-        <th style="width:155px;">Timestamp</th>
-        <th style="width:90px;">Level</th>
-        <th style="width:100px;">Service</th>
+        <th style="width:155px;">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+            Timestamp {% if sort_by == 'Timestamp' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
+          </a>
+        </th>
+        <th style="width:90px;">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='SeverityText', sort_dir=level_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+            Level {% if sort_by == 'SeverityText' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
+          </a>
+        </th>
+        <th style="width:100px;">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+            Service {% if sort_by == 'ServiceName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
+          </a>
+        </th>
         <th>Message</th>
         <th style="width:120px;">Trace</th>
       </tr>
@@ -108,16 +123,23 @@
 {% set prev_offset = [offset - limit, 0] | max %}
 {% set next_offset = offset + limit %}
 <nav class="d-flex justify-content-between align-items-center">
-  <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
+  <div class="d-flex align-items-center gap-2">
+    <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
+    <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
+      {% for n in [10, 25, 50, 100, 200] %}
+      <option value="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+  </div>
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, limit=limit, offset=prev_offset) }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, limit=limit, offset=next_offset) }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
