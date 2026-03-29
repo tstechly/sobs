@@ -693,6 +693,27 @@ class TestErrorsIngest:
         r2 = await client.post(f"/errors/{m.group(1)}/resolve")
         assert r2.status_code == 200
 
+    async def test_errors_page_has_ai_help_button(self, client):
+        """Each error on the errors page should include the AI Help clipboard button."""
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "ai-help-svc",
+                "type": "AITestError",
+                "message": "error for ai help test",
+                "stack": "AITestError: error for ai help test\n  at test.py:1",
+            },
+        )
+        r = await client.get("/errors?service=ai-help-svc")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "ai-help-btn" in body
+        assert "AI Help" in body
+        assert "bi-robot" in body  # bootstrap icon
+        assert "data-err-type" in body  # data attributes for stable JS extraction
+        assert "data-err-message" in body
+        assert "data-err-service" in body
+
 
 # ---------------------------------------------------------------------------
 # RUM ingest

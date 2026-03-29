@@ -83,7 +83,7 @@
     <div id="err{{ err.id }}" class="accordion-collapse collapse {% if loop.first %}show{% endif %}">
       <div class="accordion-body py-2">
         {% if err.stack %}
-        <pre class="stack-trace text-danger-emphasis bg-dark rounded p-2">{{ err.stack }}</pre>
+        <pre id="stack-{{ err.id }}" class="stack-trace text-danger-emphasis bg-dark rounded p-2">{{ err.stack }}</pre>
         {% endif %}
         <div class="d-flex gap-2 mt-2">
           {% if err.trace_id %}
@@ -96,6 +96,15 @@
             <i class="bi bi-check2 me-1"></i>Resolve
           </button>
           {% endif %}
+          <button class="btn btn-sm btn-outline-warning ai-help-btn"
+                  data-err-type="{{ err.err_type }}"
+                  data-err-message="{{ err.message }}"
+                  data-err-service="{{ err.service or '—' }}"
+                  data-err-ts="{{ err.ts[:19] }}"
+                  data-err-id="{{ err.id }}"
+                  title="Copy error details for AI investigation">
+            <i class="bi bi-robot me-1"></i>AI Help
+          </button>
         </div>
       </div>
     </div>
@@ -145,6 +154,60 @@ document.querySelectorAll('.resolve-btn').forEach(btn => {
         if (b.classList.contains('bg-danger')) { b.classList.replace('bg-danger', 'bg-success'); b.textContent = 'Resolved'; }
       });
       btn.remove();
+    }
+  });
+});
+
+// AI Help: copy error details as markdown to clipboard (no network request)
+document.querySelectorAll('.ai-help-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const normalizeText = value => String(value || '').replace(/\r\n?/g, '\n').trim();
+    const toSingleLine = value => normalizeText(value).replace(/\n+/g, ' ');
+    const escapeInlineMd = value => toSingleLine(value).replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+    const fenceFor = value => {
+      const content = normalizeText(value);
+      const runs = content.match(/`+/g) || [];
+      let longestRun = 0;
+      runs.forEach(run => {
+        if (run.length > longestRun) {
+          longestRun = run.length;
+        }
+      });
+      return '`'.repeat(Math.max(3, longestRun + 1));
+    };
+
+    const errType = escapeInlineMd(btn.dataset.errType);
+    const message = escapeInlineMd(btn.dataset.errMessage);
+    const service = escapeInlineMd(btn.dataset.errService);
+    const ts = escapeInlineMd(btn.dataset.errTs);
+    const stackEl = document.getElementById('stack-' + btn.dataset.errId);
+    const stack = stackEl ? normalizeText(stackEl.innerText) : '';
+
+    const lines = [
+      '## Error Investigation Request',
+      '',
+      '**Service:** ' + service,
+      '**Timestamp:** ' + ts,
+      '**Error Type:** `' + errType + '`',
+      '**Message:** ' + message,
+    ];
+    if (stack) {
+      const fence = fenceFor(stack);
+      lines.push('', '**Stack Trace:**', fence, stack, fence);
+    }
+    lines.push('', '---', 'Please analyze this issue and suggest possible causes and next steps.');
+
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      const origHtml = btn.innerHTML;
+      btn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied!';
+      btn.classList.replace('btn-outline-warning', 'btn-warning');
+      setTimeout(() => {
+        btn.innerHTML = origHtml;
+        btn.classList.replace('btn-warning', 'btn-outline-warning');
+      }, 2000);
+    } catch (e) {
+      alert('Could not copy to clipboard: ' + e.message);
     }
   });
 });
