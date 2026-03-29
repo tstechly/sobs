@@ -18,6 +18,7 @@ import secrets
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass
@@ -135,6 +136,9 @@ API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
 BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
 BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
 EXTERNAL_AUTH_URL = os.environ.get("SOBS_EXTERNAL_AUTH_URL", "")  # empty = disabled
+CHDB_CONFIG_FILE_ENV = "SOBS_CLICKHOUSE_CONFIG_FILE"
+CHDB_EXPECT_DISK_ENV = "SOBS_CHDB_EXPECT_DISK"
+CHDB_EXPECT_POLICY_ENV = "SOBS_CHDB_EXPECT_STORAGE_POLICY"
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -232,12 +236,39 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 """
 
 
-def _validate_unsupported_storage_configuration() -> None:
-    if os.environ.get("SOBS_CHDB_ENCRYPTION_KEY", "").strip():
+def _build_chdb_connect_target(path: str) -> str:
+    """Build chDB connect target, optionally adding startup args via query params."""
+    config_file = os.environ.get(CHDB_CONFIG_FILE_ENV, "").strip()
+    if not config_file:
+        return path
+    if not os.path.isabs(config_file):
+        raise RuntimeError(f"{CHDB_CONFIG_FILE_ENV} must be an absolute path to a mounted ClickHouse config.xml")
+    encoded = urllib.parse.quote(config_file, safe="/")
+    return f"file:{path}?config-file={encoded}"
+
+
+def _validate_chdb_startup_configuration(conn: "ChDbConnection") -> None:
+    expected_disk = os.environ.get(CHDB_EXPECT_DISK_ENV, "").strip()
+    expected_policy = os.environ.get(CHDB_EXPECT_POLICY_ENV, "").strip()
+    if not expected_disk and not expected_policy:
+        return
+
+    disks = conn.execute("SELECT name FROM system.disks").fetchall()
+    policies = conn.execute("SELECT DISTINCT policy_name FROM system.storage_policies").fetchall()
+
+    disk_names = {str(row[0]) for row in disks}
+    policy_names = {str(row[0]) for row in policies}
+    missing = []
+    if expected_disk and expected_disk not in disk_names:
+        missing.append(f"disk '{expected_disk}'")
+    if expected_policy and expected_policy not in policy_names:
+        missing.append(f"storage policy '{expected_policy}'")
+    if missing:
         raise RuntimeError(
-            "Embedded chDB does not support ClickHouse storage_configuration/custom_local_disks_base_directory "
-            "for encrypted disks via the Python API. Keep schema compression enabled, but use an external "
-            "ClickHouse server if you need encrypted-disk storage."
+            "chDB started but expected storage configuration was not applied; "
+            f"missing {', '.join(missing)}. "
+            "This usually means the config-file startup argument was ignored or invalid. "
+            f"Current disks={sorted(disk_names)} policies={sorted(policy_names)}"
         )
 
 
@@ -277,9 +308,15 @@ class ChDbConnection:
     """Thread-safe global chDB connection wrapper."""
 
     def __init__(self, path: str):
-        _validate_unsupported_storage_configuration()
-        self._conn = chdb_driver.connect(path)
+        connect_target = _build_chdb_connect_target(path)
+        log.info("chDB connect target: %s", connect_target)
+        self._conn = chdb_driver.connect(connect_target)
         self._lock = threading.Lock()
+        try:
+            _validate_chdb_startup_configuration(self)
+        except Exception:
+            self._conn.close()
+            raise
 
     def execute(self, query: str, params=None):
         with self._lock:

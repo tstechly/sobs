@@ -8,6 +8,9 @@ import base64
 import json
 import os
 import re
+import secrets
+import subprocess
+import sys
 import tempfile
 import time
 
@@ -176,12 +179,171 @@ class TestWriteQueue:
         assert int(cnt) >= 60
 
 
-class TestStorageConfigurationGuard:
-    async def test_embedded_chdb_rejects_encrypted_disk_config(self, monkeypatch):
-        monkeypatch.setenv("SOBS_CHDB_ENCRYPTION_KEY", "1234567812345678")
+class TestStorageConfiguration:
+    @staticmethod
+    def _write_encrypted_config(base_dir: str, key_hex: str) -> str:
+        plain_dir = os.path.join(base_dir, "plain")
+        encrypted_dir = os.path.join(base_dir, "encrypted")
+        os.makedirs(plain_dir, exist_ok=True)
+        os.makedirs(encrypted_dir, exist_ok=True)
 
-        with pytest.raises(RuntimeError, match="Embedded chDB does not support ClickHouse storage_configuration"):
-            sobs_app._validate_unsupported_storage_configuration()
+        config_path = os.path.join(base_dir, "config.xml")
+        config_xml = f"""<clickhouse>
+  <custom_local_disks_base_directory>{base_dir}</custom_local_disks_base_directory>
+  <storage_configuration>
+    <disks>
+      <plain>
+        <type>local</type>
+        <path>{plain_dir}/</path>
+      </plain>
+      <encrypted_disk>
+        <type>encrypted</type>
+        <disk>plain</disk>
+        <path>{encrypted_dir}/</path>
+        <algorithm>AES_128_CTR</algorithm>
+        <key_hex>{key_hex}</key_hex>
+      </encrypted_disk>
+    </disks>
+    <policies>
+      <encrypted_only>
+        <volumes>
+          <main>
+            <disk>encrypted_disk</disk>
+          </main>
+        </volumes>
+      </encrypted_only>
+    </policies>
+  </storage_configuration>
+</clickhouse>
+"""
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(config_xml)
+        return config_path
+
+    @staticmethod
+    def _run_probe_script(script: str, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+
+    async def test_chdb_startup_succeeds_without_external_config(self, monkeypatch):
+        monkeypatch.delenv(sobs_app.CHDB_CONFIG_FILE_ENV, raising=False)
+        monkeypatch.delenv(sobs_app.CHDB_EXPECT_DISK_ENV, raising=False)
+        monkeypatch.delenv(sobs_app.CHDB_EXPECT_POLICY_ENV, raising=False)
+
+        data_dir = tempfile.mkdtemp(prefix="sobs-chdb-plain-")
+        script = """
+import app as sobs_app
+
+conn = sobs_app.ChDbConnection(sobs_app.DB_PATH)
+try:
+    row = conn.execute('SELECT 1 AS ok').fetchone()
+    print(f"ok={row['ok']}")
+finally:
+    conn.close()
+"""
+        result = self._run_probe_script(script, {"SOBS_DATA_DIR": data_dir})
+        assert result.returncode == 0, result.stderr
+        assert "ok=1" in result.stdout
+        assert "chDB connect target:" in result.stderr
+
+    async def test_chdb_external_config_encrypted_disk_policy_active(self):
+        base_dir = tempfile.mkdtemp(prefix="sobs-chdb-encrypted-")
+        encryption_key = secrets.token_hex(16)
+        config_path = self._write_encrypted_config(base_dir, encryption_key)
+
+        script = """
+import app as sobs_app
+
+conn = sobs_app.ChDbConnection(sobs_app.DB_PATH)
+try:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS encryption_probe "
+        "(id UInt64, payload String) "
+        "ENGINE=MergeTree "
+        "ORDER BY id "
+        "SETTINGS storage_policy='encrypted_only'"
+    )
+    conn.execute("INSERT INTO encryption_probe VALUES (1, 'ok')")
+    row = conn.execute("SELECT payload FROM encryption_probe WHERE id=1").fetchone()
+    print(f"payload={row['payload']}")
+
+    disk = conn.execute(
+        "SELECT is_encrypted FROM system.disks WHERE name='encrypted_disk'"
+    ).fetchone()
+    print(f"encrypted_disk={disk['is_encrypted'] if disk else 'missing'}")
+
+    policy = conn.execute(
+        "SELECT disks FROM system.storage_policies WHERE policy_name='encrypted_only'"
+    ).fetchone()
+    print(f"policy_disks={policy['disks'] if policy else 'missing'}")
+
+    table = conn.execute(
+        "SELECT storage_policy FROM system.tables "
+        "WHERE database='default' AND name='encryption_probe'"
+    ).fetchone()
+    print(f"table_policy={table['storage_policy'] if table else 'missing'}")
+finally:
+    conn.close()
+"""
+
+        result = self._run_probe_script(
+            script,
+            {
+                "SOBS_DATA_DIR": base_dir,
+                sobs_app.CHDB_CONFIG_FILE_ENV: config_path,
+                sobs_app.CHDB_EXPECT_DISK_ENV: "encrypted_disk",
+                sobs_app.CHDB_EXPECT_POLICY_ENV: "encrypted_only",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "payload=ok" in result.stdout
+        assert "encrypted_disk=1" in result.stdout
+        assert "encrypted_disk" in result.stdout
+        assert "table_policy=encrypted_only" in result.stdout
+        assert "chDB connect target:" in result.stderr
+        assert "config-file=" in result.stderr
+
+    async def test_chdb_config_must_be_absolute_path(self, monkeypatch):
+        monkeypatch.setenv(sobs_app.CHDB_CONFIG_FILE_ENV, "relative/config.xml")
+        with pytest.raises(RuntimeError, match="must be an absolute path"):
+            sobs_app._build_chdb_connect_target("/tmp/example.chdb")
+
+    async def test_chdb_fails_clearly_when_expected_policy_is_missing(self):
+        data_dir = tempfile.mkdtemp(prefix="sobs-chdb-ignored-")
+        missing_cfg = os.path.join(tempfile.mkdtemp(prefix="sobs-missing-cfg-"), "missing.xml")
+
+        script = """
+import app as sobs_app
+
+try:
+    sobs_app.ChDbConnection(sobs_app.DB_PATH)
+except RuntimeError as exc:
+    print(str(exc))
+    raise
+"""
+
+        result = self._run_probe_script(
+            script,
+            {
+                "SOBS_DATA_DIR": data_dir,
+                sobs_app.CHDB_CONFIG_FILE_ENV: missing_cfg,
+                sobs_app.CHDB_EXPECT_DISK_ENV: "encrypted_disk",
+                sobs_app.CHDB_EXPECT_POLICY_ENV: "encrypted_only",
+            },
+        )
+
+        assert result.returncode != 0
+        assert "expected storage configuration was not applied" in result.stderr or (
+            "expected storage configuration was not applied" in result.stdout
+        )
 
 
 class TestDbBootstrap:
