@@ -47,6 +47,12 @@
       </div>
       <div class="card-body p-2">
         <div id="chart-{{ chart.id }}" style="height:300px;width:100%;"></div>
+        <div class="d-flex justify-content-between align-items-center gap-2 mt-2">
+          <div id="chart-hint-{{ chart.id }}" class="small text-secondary"></div>
+          <a id="chart-source-btn-{{ chart.id }}" class="btn btn-sm btn-outline-info d-none" href="#">
+            <i class="bi bi-box-arrow-up-right me-1"></i>Open Source View
+          </a>
+        </div>
         <details class="mt-2">
           <summary class="text-secondary small" style="cursor:pointer;">SQL Query</summary>
           <pre class="small mt-1 p-2 bg-dark rounded text-secondary" style="max-height:120px;overflow:auto;">{{ chart.query }}</pre>
@@ -78,32 +84,42 @@
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label">Title <span class="text-danger">*</span></label>
-            <input type="text" name="title" class="form-control" placeholder="e.g. Logs per Hour" required>
+            <input type="text" name="title" class="form-control" placeholder="e.g. Request Latency" required>
           </div>
           <div class="mb-3">
-            <label class="form-label">Chart Type</label>
-            <select name="chart_type" class="form-select">
-              {% for ct in chart_types %}
-              <option value="{{ ct }}" {% if ct == 'bar' %}selected{% endif %}>{{ ct | capitalize }}</option>
+            <label class="form-label">Chart Template</label>
+            <select name="template_id" class="form-select" id="templateSelect">
+              {% for t in templates %}
+              <option value="{{ t.id }}" title="{{ t.description }}">
+                <i class="{{ t.icon }}"></i> {{ t.name }}
+              </option>
               {% endfor %}
             </select>
+            <div class="form-text" id="templateDesc"></div>
+            <div class="form-text mt-1" id="columnHint"></div>
+          </div>
+          <div class="mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <label class="form-label mb-0">Example SQL</label>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="useExampleBtn">
+                <i class="bi bi-arrow-down-square me-1"></i>Use Example
+              </button>
+            </div>
+            <pre id="templateExampleSql" class="small mt-1 p-2 bg-dark rounded text-secondary" style="max-height:160px;overflow:auto;white-space:pre-wrap;"></pre>
           </div>
           <div class="mb-3">
             <label class="form-label">
               ClickHouse SQL Query <span class="text-danger">*</span>
               <small class="text-secondary ms-1">(SELECT only · max 1000 rows)</small>
             </label>
-            <textarea name="query" class="form-control font-monospace" rows="5"
-                      placeholder="SELECT toStartOfHour(Timestamp) AS hour, COUNT(*) AS cnt FROM otel_logs GROUP BY hour ORDER BY hour"
+            <textarea id="queryInput" name="query" class="form-control font-monospace" rows="6"
+                      placeholder="SELECT toStartOfMinute(Timestamp) AS time, avg(Duration) AS value, quantile(0.95)(Duration) AS p95, quantile(0.99)(Duration) AS p99 FROM otel_traces GROUP BY time ORDER BY time"
                       required></textarea>
-            <div class="form-text">
-              First column is used as the X-axis (or labels for pie charts); remaining columns are series values.
-            </div>
           </div>
           <div class="mb-3" id="queryPreviewArea" style="display:none;">
             <label class="form-label">Query Preview</label>
             <div id="queryPreviewMsg" class="text-secondary small mb-2"></div>
-            <div id="queryPreviewChart" style="height:200px;"></div>
+            <div id="queryPreviewChart" style="height:250px;"></div>
           </div>
           <div class="d-flex gap-2">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="previewBtn">
@@ -128,83 +144,146 @@
   'use strict';
 
   var CHART_DATA = {{ charts | tojson }};
-  var queryUrl = {{ url_for('execute_chart_query') | tojson }};
+  var TEMPLATES = {{ templates | tojson }};
+  var queryRenderUrl = {{ url_for('render_chart') | tojson }};
+  var templatesMap = {};
+  TEMPLATES.forEach(function (t) { templatesMap[t.id] = t; });
+  var sourceUrls = {
+    logs: {{ url_for('view_logs') | tojson }},
+    traces: {{ url_for('view_traces') | tojson }},
+    errors: {{ url_for('view_errors') | tojson }}
+  };
 
-  /* ── helpers ── */
-  function buildOption(chartType, columns, rows) {
-    if (!columns.length || !rows.length) {
-      return { title: { text: 'No data', left: 'center', top: 'center', textStyle: { color: '#6c757d' } } };
+  function axisData(option, axisName) {
+    var axis = option[axisName];
+    if (!axis) return [];
+    if (Array.isArray(axis)) {
+      return axis[0] && Array.isArray(axis[0].data) ? axis[0].data : [];
     }
-    var labels = rows.map(function (r) { return String(r[0]); });
-    var series = [];
-    for (var ci = 1; ci < columns.length; ci++) {
-      var colName = columns[ci];
-      var values = rows.map(function (r) { return r[ci]; });
-      if (chartType === 'pie') {
-        series.push({
-          type: 'pie',
-          name: colName,
-          data: labels.map(function (l, i) { return { name: l, value: values[i] }; }),
-          radius: '65%'
-        });
+    return Array.isArray(axis.data) ? axis.data : [];
+  }
+
+  function buildDrilldownUrl(drilldown, chartInstance, params) {
+    if (!drilldown || !sourceUrls[drilldown.target]) return null;
+
+    var url = new URL(sourceUrls[drilldown.target], window.location.origin);
+    var option = chartInstance.getOption();
+    var pointDrilldown = params && params.data && params.data.drilldown ? params.data.drilldown : null;
+
+    if (pointDrilldown) {
+      Object.keys(pointDrilldown).forEach(function (key) {
+        if (pointDrilldown[key] !== undefined && pointDrilldown[key] !== null && pointDrilldown[key] !== '') {
+          url.searchParams.set(key, String(pointDrilldown[key]));
+        }
+      });
+    }
+
+    function categoryValue(axisName, index) {
+      var data = axisData(option, axisName);
+      return data && data[index] !== undefined ? data[index] : '';
+    }
+
+    if (drilldown.time_axis && !url.searchParams.get('from_ts') && params) {
+      var fromValue = '';
+      if (params.componentSubType === 'heatmap' && Array.isArray(params.value)) {
+        fromValue = drilldown.time_axis === 'x' ? categoryValue('xAxis', params.value[0]) : categoryValue('yAxis', params.value[1]);
       } else {
-        var seriesType = chartType === 'area' ? 'line' : chartType;
-        var entry = { type: seriesType, name: colName, data: values };
-        if (chartType === 'area') { entry.areaStyle = {}; }
-        series.push(entry);
+        fromValue = params.name || '';
+      }
+      if (fromValue) {
+        url.searchParams.set('from_ts', String(fromValue));
+        if (drilldown.bucket_seconds) {
+          url.searchParams.set('window_s', String(drilldown.bucket_seconds));
+        }
       }
     }
 
-    var isDark = true;
-    var textColor = '#adb5bd';
-    var lineColor = '#2d3035';
-
-    var option = {
-      backgroundColor: 'transparent',
-      textStyle: { color: textColor },
-      tooltip: { trigger: chartType === 'pie' ? 'item' : 'axis' },
-      legend: { textStyle: { color: textColor }, top: 'bottom' },
-      series: series
-    };
-
-    if (chartType !== 'pie') {
-      option.xAxis = {
-        type: 'category',
-        data: labels,
-        axisLine: { lineStyle: { color: lineColor } },
-        axisLabel: { color: textColor, rotate: labels.length > 10 ? 30 : 0 },
-        splitLine: { lineStyle: { color: lineColor } }
-      };
-      option.yAxis = {
-        type: 'value',
-        axisLine: { lineStyle: { color: lineColor } },
-        axisLabel: { color: textColor },
-        splitLine: { lineStyle: { color: lineColor } }
-      };
-      option.grid = { left: '3%', right: '4%', bottom: '15%', containLabel: true };
+    if (!url.searchParams.get('service') && drilldown.service_axis && params && params.componentSubType === 'heatmap' && Array.isArray(params.value)) {
+      var serviceValue = drilldown.service_axis === 'x' ? categoryValue('xAxis', params.value[0]) : categoryValue('yAxis', params.value[1]);
+      if (serviceValue) {
+        url.searchParams.set('service', String(serviceValue));
+      }
     }
-    return option;
+
+    if (drilldown.extra) {
+      Object.keys(drilldown.extra).forEach(function (key) {
+        url.searchParams.set(key, String(drilldown.extra[key]));
+      });
+    }
+
+    return url.toString();
   }
 
+  function buildTemplateExample(t) {
+    if (!t) return '';
+    var parts = [];
+    if (t.query_shape) {
+      parts.push('Expected query shape: ' + t.query_shape);
+    }
+    if (t.drilldown) {
+      parts.push('Drilldown: ' + (t.drilldown.label || 'open source data') + '.');
+    }
+    return parts.join(' ');
+  }
+
+  /* ── Render existing charts ── */
   function renderChart(chartCfg) {
     var el = document.getElementById('chart-' + chartCfg.id);
+    var hintEl = document.getElementById('chart-hint-' + chartCfg.id);
+    var sourceBtn = document.getElementById('chart-source-btn-' + chartCfg.id);
     if (!el) return;
     var ec = echarts.init(el, 'dark');
     ec.showLoading({ text: 'Loading…', color: '#0d6efd', textColor: '#adb5bd', maskColor: 'rgba(0,0,0,0.3)' });
 
-    fetch(queryUrl, {
+    // Use /api/dashboards/render to get full eCharts option with template
+    fetch(queryRenderUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: chartCfg.query })
+      body: JSON.stringify({ query: chartCfg.query, template_id: chartCfg.chart_type })
     })
       .then(function (r) { return r.json(); })
       .then(function (data) {
         ec.hideLoading();
         if (data.error) {
           ec.setOption({ title: { text: 'Error: ' + data.error, left: 'center', top: 'center', textStyle: { color: '#dc3545', fontSize: 12 } } });
+          if (hintEl) { hintEl.textContent = ''; }
           return;
         }
-        ec.setOption(buildOption(chartCfg.chart_type, data.columns, data.rows));
+        ec.setOption(data.option);
+
+        var template = templatesMap[chartCfg.chart_type];
+        var drilldown = template && template.drilldown;
+        if (drilldown) {
+          var baseSourceUrl = buildDrilldownUrl(drilldown, ec);
+          el.style.cursor = 'pointer';
+          if (hintEl) {
+            hintEl.textContent = 'Click chart data to ' + (drilldown.label || 'open source data') + '.';
+          }
+          if (sourceBtn && baseSourceUrl) {
+            sourceBtn.href = baseSourceUrl;
+            sourceBtn.classList.remove('d-none');
+            sourceBtn.title = drilldown.label || 'Open source data';
+          }
+          ec.on('click', function (params) {
+            var targetUrl = buildDrilldownUrl(drilldown, ec, params);
+            if (targetUrl && sourceBtn) {
+              sourceBtn.href = targetUrl;
+              sourceBtn.classList.remove('d-none');
+            }
+            if (targetUrl) {
+              window.location.assign(targetUrl);
+            }
+          });
+        } else {
+          el.style.cursor = 'default';
+          if (hintEl) {
+            hintEl.textContent = '';
+          }
+          if (sourceBtn) {
+            sourceBtn.classList.add('d-none');
+            sourceBtn.removeAttribute('href');
+          }
+        }
       })
       .catch(function (err) {
         ec.hideLoading();
@@ -214,27 +293,67 @@
     window.addEventListener('resize', function () { ec.resize(); });
   }
 
-  /* ── render all dashboard charts ── */
   CHART_DATA.forEach(renderChart);
 
-  /* ── preview inside modal ── */
+  /* ── Template selector: update description ── */
+  var templateSelect = document.getElementById('templateSelect');
+  var templateDesc = document.getElementById('templateDesc');
+  var columnHint = document.getElementById('columnHint');
+  var templateExampleSql = document.getElementById('templateExampleSql');
+  var useExampleBtn = document.getElementById('useExampleBtn');
+  var queryInput = document.getElementById('queryInput');
+
+  function updateTemplateInfo() {
+    var t = templatesMap[templateSelect.value];
+    if (!t) {
+      templateDesc.textContent = '';
+      columnHint.textContent = '';
+      templateExampleSql.textContent = '';
+      return;
+    }
+
+    templateDesc.textContent = t.description || '';
+    columnHint.textContent = buildTemplateExample(t);
+    templateExampleSql.textContent = t.sample_sql || '';
+    useExampleBtn.disabled = !t.sample_sql;
+  }
+  updateTemplateInfo();
+  templateSelect.addEventListener('change', updateTemplateInfo);
+  if (useExampleBtn) {
+    useExampleBtn.addEventListener('click', function () {
+      var t = templatesMap[templateSelect.value];
+      if (t && t.sample_sql && queryInput) {
+        queryInput.value = t.sample_sql;
+        queryInput.focus();
+      }
+    });
+  }
+
+  /* ── Preview in modal ── */
   var previewBtn = document.getElementById('previewBtn');
   var previewChartInst = null;
   if (previewBtn) {
     previewBtn.addEventListener('click', function () {
       var modal = document.getElementById('addChartModal');
       var query = modal.querySelector('[name="query"]').value.trim();
-      var chartType = modal.querySelector('[name="chart_type"]').value;
+      var templateId = modal.querySelector('[name="template_id"]').value;
       var area = document.getElementById('queryPreviewArea');
       var msg = document.getElementById('queryPreviewMsg');
+
+      if (!query) {
+        msg.textContent = 'Please enter a query';
+        area.style.display = 'block';
+        return;
+      }
+
       area.style.display = 'block';
-      msg.textContent = 'Running query…';
+      msg.textContent = 'Rendering…';
       if (previewChartInst) { previewChartInst.dispose(); previewChartInst = null; }
 
-      fetch(queryUrl, {
+      fetch(queryRenderUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: query })
+        body: JSON.stringify({ query: query, template_id: templateId })
       })
         .then(function (r) { return r.json(); })
         .then(function (data) {
@@ -242,10 +361,10 @@
             msg.textContent = 'Error: ' + data.error;
             return;
           }
-          msg.textContent = data.rows.length + ' row(s) returned';
+          msg.textContent = 'Preview ready';
           var el = document.getElementById('queryPreviewChart');
           previewChartInst = echarts.init(el, 'dark');
-          previewChartInst.setOption(buildOption(chartType, data.columns, data.rows));
+          previewChartInst.setOption(data.option);
         })
         .catch(function (err) {
           msg.textContent = 'Network error: ' + err;

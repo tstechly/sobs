@@ -923,6 +923,106 @@ class TestUIPages:
         r = await client.get("/traces")
         assert r.status_code == 200
 
+    async def test_logs_time_window_filter(self, client):
+        base_payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "tw-logs"}}]},
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": str(1704067200 * 1_000_000_000),
+                                    "severityText": "INFO",
+                                    "body": {"stringValue": "too-early-log"},
+                                },
+                                {
+                                    "timeUnixNano": str(1704067800 * 1_000_000_000),
+                                    "severityText": "INFO",
+                                    "body": {"stringValue": "in-window-log"},
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/logs", json=base_payload)
+
+        r = await client.get("/logs?service=tw-logs&from_ts=2024-01-01T00:05:00Z&to_ts=2024-01-01T00:15:00Z")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "in-window-log" in body
+        assert "too-early-log" not in body
+
+    async def test_errors_time_window_filter(self, client):
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "tw-errors",
+                "type": "RuntimeError",
+                "message": "too-early-error",
+                "timestamp": "2024-01-01T00:00:00Z",
+            },
+        )
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "tw-errors",
+                "type": "RuntimeError",
+                "message": "in-window-error",
+                "timestamp": "2024-01-01T00:10:00Z",
+            },
+        )
+
+        r = await client.get("/errors?service=tw-errors&from_ts=2024-01-01T00:05:00Z&to_ts=2024-01-01T00:15:00Z")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "in-window-error" in body
+        assert "too-early-error" not in body
+
+    async def test_traces_time_window_filter(self, client):
+        trace_payload = {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "tw-traces"}}]},
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": "11111111111111111111111111111111",
+                                    "spanId": "aaaaaaaaaaaaaaaa",
+                                    "parentSpanId": "",
+                                    "name": "too-early-span",
+                                    "startTimeUnixNano": str(1704067200 * 1_000_000_000),
+                                    "endTimeUnixNano": str(1704067205 * 1_000_000_000),
+                                    "status": {"code": 1},
+                                    "attributes": [],
+                                },
+                                {
+                                    "traceId": "22222222222222222222222222222222",
+                                    "spanId": "bbbbbbbbbbbbbbbb",
+                                    "parentSpanId": "",
+                                    "name": "in-window-span",
+                                    "startTimeUnixNano": str(1704067800 * 1_000_000_000),
+                                    "endTimeUnixNano": str(1704067805 * 1_000_000_000),
+                                    "status": {"code": 1},
+                                    "attributes": [],
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/traces", json=trace_payload)
+
+        r = await client.get("/traces?service=tw-traces&from_ts=2024-01-01T00:05:00Z&to_ts=2024-01-01T00:15:00Z")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "in-window-span" in body
+        assert "too-early-span" not in body
+
     async def test_rum_page(self, client):
         r = await client.get("/rum")
         assert r.status_code == 200
@@ -2088,9 +2188,9 @@ class TestCustomDashboards:
         r2 = await client.post(
             f"/dashboards/{dashboard_id}/charts",
             form={
-                "title": "Log Count",
-                "chart_type": "bar",
-                "query": "SELECT 'now' AS ts, COUNT(*) AS cnt FROM otel_logs",
+                "title": "Latency Bands",
+                "template_id": "time_series_percentiles",
+                "query": ("SELECT toDateTime('2024-01-01 00:00:00') AS time, " "1 AS value, 2 AS p95, 3 AS p99"),
             },
             follow_redirects=False,
         )
@@ -2100,7 +2200,24 @@ class TestCustomDashboards:
         r3 = await client.get(f"/dashboards/{dashboard_id}")
         assert r3.status_code == 200
         body = await r3.get_data(as_text=True)
-        assert "Log Count" in body
+        assert "Latency Bands" in body
+        assert "Open Source View" in body
+
+    async def test_dashboard_view_includes_template_guidance(self, client):
+        r = await client.post(
+            "/dashboards",
+            form={"name": "Template Guidance", "description": ""},
+            follow_redirects=False,
+        )
+        location = r.headers.get("Location", "")
+
+        r2 = await client.get(location)
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "Example SQL" in body
+        assert "Use Example" in body
+        assert "quantile(0.95)(Duration) AS p95" in body
+        assert "Columns: time, value, p95, p99" in body
 
     async def test_remove_chart_from_dashboard(self, client):
         # Create dashboard and add chart
@@ -2113,13 +2230,14 @@ class TestCustomDashboards:
         dashboard_id = location.rstrip("/").split("/")[-1]
         await client.post(
             f"/dashboards/{dashboard_id}/charts",
-            form={"title": "Temp Chart", "chart_type": "line", "query": "SELECT 1 AS x"},
+            form={"title": "Temp Chart", "template_id": "gauge_kpi", "query": "SELECT 1 AS value"},
             follow_redirects=False,
         )
 
         # Get chart list to find chart id
-        from app import get_db, _get_charts  # noqa: PLC0415
-        import app as sobs_app  # noqa: PLC0415
+        # import app as sobs_app  # noqa: PLC0415
+        from app import _get_charts, get_db  # noqa: PLC0415
+
         charts = _get_charts(get_db(), dashboard_id)
         assert len(charts) >= 1
         chart_id = charts[0]["id"]
@@ -2186,6 +2304,61 @@ class TestCustomDashboards:
         data = await r.get_json()
         assert len(data["rows"]) <= 1000
 
+    async def test_chart_query_api_returns_sanitized_db_error(self, client):
+        r = await client.post(
+            "/api/dashboards/query",
+            json={"query": "SELECT 'x' >= 500 AS bad"},
+        )
+        assert r.status_code == 400
+        data = await r.get_json()
+        assert "error" in data
+        assert "Traceback" not in data["error"]
+        assert "/Users/" not in data["error"]
+        assert "Check casts and column types" in data["error"]
+
+    async def test_chart_render_api_returns_sanitized_db_error(self, client):
+        r = await client.post(
+            "/api/dashboards/render",
+            json={"query": "SELECT 'x' >= 500 AS value", "template_id": "gauge_kpi"},
+        )
+        assert r.status_code == 400
+        data = await r.get_json()
+        assert "error" in data
+        assert "Traceback" not in data["error"]
+        assert "/Users/" not in data["error"]
+        assert "Check casts and column types" in data["error"]
+
+    async def test_chart_render_api_attaches_time_series_drilldown_metadata(self, client):
+        r = await client.post(
+            "/api/dashboards/render",
+            json={
+                "template_id": "time_series_percentiles",
+                "query": ("SELECT toDateTime('2024-01-01 00:00:00') AS time, " "1 AS value, 2 AS p95, 3 AS p99"),
+            },
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        first_point = data["option"]["series"][0]["data"][0]
+        assert first_point["drilldown"]["from_ts"] == "2024-01-01T00:00:00Z"
+        assert first_point["drilldown"]["window_s"] == 60
+
+    async def test_chart_render_api_attaches_heatmap_drilldown_metadata(self, client):
+        r = await client.post(
+            "/api/dashboards/render",
+            json={
+                "template_id": "heatmap",
+                "query": (
+                    "SELECT 'checkout' AS x_category, " "toDateTime('2024-01-01 00:05:00') AS y_category, 42 AS value"
+                ),
+            },
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        first_cell = data["option"]["series"][0]["data"][0]
+        assert first_cell["drilldown"]["service"] == "checkout"
+        assert first_cell["drilldown"]["from_ts"] == "2024-01-01T00:05:00Z"
+        assert first_cell["drilldown"]["window_s"] == 300
+
     async def test_add_chart_rejects_non_select_query(self, client):
         r = await client.post(
             "/dashboards",
@@ -2199,7 +2372,7 @@ class TestCustomDashboards:
             f"/dashboards/{dashboard_id}/charts",
             form={
                 "title": "Bad Query",
-                "chart_type": "bar",
+                "template_id": "gauge_kpi",
                 "query": "DROP TABLE otel_logs",
             },
             follow_redirects=False,
@@ -2208,7 +2381,8 @@ class TestCustomDashboards:
         assert r2.status_code in (302, 303)
 
         # Confirm no chart was added
-        from app import get_db, _get_charts  # noqa: PLC0415
+        from app import _get_charts, get_db  # noqa: PLC0415
+
         charts = _get_charts(get_db(), dashboard_id)
         assert not any(c["title"] == "Bad Query" for c in charts)
 

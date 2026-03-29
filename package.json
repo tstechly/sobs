@@ -2,6 +2,6 @@
   "dependencies": {
     "bootstrap": "^5.3.8",
     "bootstrap-icons": "^1.13.1",
-    "echarts": "^5.5.1"
+    "echarts": "^6.0.0"
   }
 }
