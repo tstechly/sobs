@@ -1,15 +1,35 @@
 {% extends "base.html" %}
 {% block title %}Logs{% endblock %}
 {% block content %}
+{% set live = request.args.get('live', '') %}
+<style>
+  @keyframes liveRowFlash {
+    0% { background-color: rgba(13, 202, 240, 0.38); }
+    100% { background-color: transparent; }
+  }
+  .live-row-new > td {
+    animation: liveRowFlash 1.8s ease-out;
+  }
+</style>
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-journal-text me-2 text-info"></i>Logs</h4>
-  <span class="text-secondary small">{{ total }} total records</span>
+  <div class="d-flex align-items-center gap-2">
+    <span id="liveModeStatus" class="badge text-bg-secondary">Live off</span>
+    <button id="liveModeToggle" type="button" class="btn btn-sm btn-outline-success">
+      <i class="bi bi-broadcast-pin me-1"></i>Live mode
+    </button>
+    <button id="liveNewCountBtn" type="button" class="btn btn-sm btn-outline-info d-none">
+      0 new
+    </button>
+    <span class="text-secondary small">{{ total }} total records</span>
+  </div>
 </div>
 
 <!-- Search / Filter bar -->
 <div class="card border-secondary mb-3">
   <div class="card-body">
     <form method="get" class="row g-2 align-items-end">
+      <input type="hidden" name="live" id="liveModeInput" value="{{ '1' if live == '1' else '' }}">
       <div class="col-md-4">
         <label class="form-label small text-secondary">Grep pattern</label>
         <input type="text" name="q" class="form-control form-control-sm" placeholder="regex search…" value="{{ q }}">
@@ -50,8 +70,7 @@
   </div>
 </div>
 
-{% if logs %}
-<div class="table-responsive">
+<div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
   <table class="table table-sm table-hover align-middle">
     <thead>
       <tr>
@@ -62,7 +81,7 @@
         <th style="width:120px;">Trace</th>
       </tr>
     </thead>
-    <tbody>
+    <tbody id="logsTableBody">
       {% for log in logs %}
       <tr>
         <td class="text-secondary small font-monospace">{{ log.ts[:23] }}</td>
@@ -74,6 +93,8 @@
           <a href="{{ url_for('view_traces', trace_id=log.trace_id) }}" class="trace-link text-truncate d-inline-block" style="max-width:110px;" title="{{ log.trace_id }}">
             {{ log.trace_id[:12] }}…
           </a>
+          {% else %}
+          <span class="text-secondary">—</span>
           {% endif %}
         </td>
       </tr>
@@ -82,6 +103,7 @@
   </table>
 </div>
 
+{% if logs %}
 <!-- Pagination -->
 {% set prev_offset = [offset - limit, 0] | max %}
 {% set next_offset = offset + limit %}
@@ -90,20 +112,312 @@
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, limit=limit, offset=prev_offset) }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, limit=limit, offset=next_offset) }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
 </nav>
-{% else %}
-<div class="text-center py-5 text-secondary">
+{% endif %}
+
+{% if not logs %}
+<div id="logsEmptyState" class="text-center py-5 text-secondary">
   <i class="bi bi-journal-x" style="font-size:2rem;"></i>
   <p class="mt-2">No logs found{% if q %} matching <code>{{ q }}</code>{% endif %}</p>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const toggleBtn = document.getElementById("liveModeToggle");
+  const liveInput = document.getElementById("liveModeInput");
+  const newCountBtn = document.getElementById("liveNewCountBtn");
+  const statusBadge = document.getElementById("liveModeStatus");
+  const tableContainer = document.getElementById("logsTableContainer");
+  const tableBody = document.getElementById("logsTableBody");
+  const emptyState = document.getElementById("logsEmptyState");
+
+  if (!toggleBtn || !statusBadge) {
+    return;
+  }
+
+  const activeFilters = {
+    q: {{ q|tojson }},
+    level: {{ level|tojson }},
+    service: {{ service|tojson }},
+    sql: {{ sql_where|tojson }}
+  };
+  const liveRequested = {{ (live == '1')|tojson }};
+
+  const MAX_LIVE_ROWS = 200;
+  const tracesUrlBase = {{ url_for('view_traces')|tojson }};
+  let liveSource = null;
+  let pendingEvents = [];
+
+  function updateLiveParam(enabled) {
+    const url = new URL(window.location.href);
+    if (enabled) {
+      url.searchParams.set("live", "1");
+      if (liveInput) {
+        liveInput.value = "1";
+      }
+    } else {
+      url.searchParams.delete("live");
+      if (liveInput) {
+        liveInput.value = "";
+      }
+    }
+    window.history.replaceState({}, "", url.toString());
+  }
+
+  function isPausedByScroll() {
+    return window.scrollY > 120;
+  }
+
+  function updateNewCountUI() {
+    if (!newCountBtn) {
+      return;
+    }
+    const count = pendingEvents.length;
+    if (count > 0) {
+      newCountBtn.textContent = `${count} new`;
+      newCountBtn.classList.remove("d-none");
+      return;
+    }
+    newCountBtn.classList.add("d-none");
+  }
+
+  function setStatus(state, text) {
+    statusBadge.className = "badge";
+    if (state === "on") {
+      statusBadge.classList.add("text-bg-success");
+    } else if (state === "error") {
+      statusBadge.classList.add("text-bg-danger");
+    } else {
+      statusBadge.classList.add("text-bg-secondary");
+    }
+    statusBadge.textContent = text;
+  }
+
+  function setButton(on) {
+    if (on) {
+      toggleBtn.classList.remove("btn-outline-success");
+      toggleBtn.classList.add("btn-success");
+      toggleBtn.innerHTML = '<i class="bi bi-pause-circle me-1"></i>Stop live';
+    } else {
+      toggleBtn.classList.remove("btn-success");
+      toggleBtn.classList.add("btn-outline-success");
+      toggleBtn.innerHTML = '<i class="bi bi-broadcast-pin me-1"></i>Live mode';
+    }
+  }
+
+  function formatTs(ts) {
+    if (!ts) {
+      return "";
+    }
+    return String(ts).slice(0, 23);
+  }
+
+  function passesFilters(event) {
+    if (activeFilters.level && String(event.level || "").toUpperCase() !== activeFilters.level) {
+      return false;
+    }
+    if (activeFilters.service && String(event.service || "") !== activeFilters.service) {
+      return false;
+    }
+    if (activeFilters.q) {
+      try {
+        const pat = new RegExp(activeFilters.q, "i");
+        if (!pat.test(String(event.body || ""))) {
+          return false;
+        }
+      } catch (_err) {
+        // Invalid regex in query should not break live updates; skip query filtering.
+      }
+    }
+    return true;
+  }
+
+  function createTraceCell(traceId) {
+    const td = document.createElement("td");
+    if (!traceId) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "text-secondary";
+      placeholder.textContent = "—";
+      td.appendChild(placeholder);
+      return td;
+    }
+    const a = document.createElement("a");
+    a.href = `${tracesUrlBase}?trace_id=${encodeURIComponent(traceId)}`;
+    a.className = "trace-link text-truncate d-inline-block";
+    a.style.maxWidth = "110px";
+    a.title = traceId;
+    a.textContent = `${traceId.slice(0, 12)}…`;
+    td.appendChild(a);
+    return td;
+  }
+
+  function prependRow(event) {
+    if (!tableBody) {
+      return;
+    }
+    const tr = document.createElement("tr");
+    tr.classList.add("live-row-new");
+
+    const ts = document.createElement("td");
+    ts.className = "text-secondary small font-monospace";
+    ts.textContent = formatTs(event.ts);
+
+    const level = document.createElement("td");
+    const levelBadge = document.createElement("span");
+    levelBadge.className = `badge badge-level-${String(event.level || "INFO").toUpperCase()}`;
+    levelBadge.textContent = String(event.level || "INFO").toUpperCase();
+    level.appendChild(levelBadge);
+
+    const service = document.createElement("td");
+    const serviceBadge = document.createElement("span");
+    serviceBadge.className = "badge bg-secondary";
+    serviceBadge.textContent = event.service || "—";
+    service.appendChild(serviceBadge);
+
+    const body = document.createElement("td");
+    body.className = "log-body";
+    body.textContent = event.body || "";
+
+    tr.appendChild(ts);
+    tr.appendChild(level);
+    tr.appendChild(service);
+    tr.appendChild(body);
+    tr.appendChild(createTraceCell(event.trace_id || ""));
+
+    tableBody.insertBefore(tr, tableBody.firstChild);
+    while (tableBody.children.length > MAX_LIVE_ROWS) {
+      tableBody.removeChild(tableBody.lastChild);
+    }
+
+    if (emptyState) {
+      emptyState.classList.add("d-none");
+    }
+    if (tableContainer) {
+      tableContainer.classList.remove("d-none");
+    }
+  }
+
+  function flushPendingEvents() {
+    if (!pendingEvents.length) {
+      updateNewCountUI();
+      return;
+    }
+    // Keep ordering intuitive: oldest pending first so newest ends up on top after prepends.
+    for (let i = pendingEvents.length - 1; i >= 0; i -= 1) {
+      prependRow(pendingEvents[i]);
+    }
+    pendingEvents = [];
+    updateNewCountUI();
+  }
+
+  function handleIncoming(event) {
+    if (!passesFilters(event)) {
+      return;
+    }
+    if (isPausedByScroll()) {
+      pendingEvents.unshift(event);
+      if (pendingEvents.length > MAX_LIVE_ROWS) {
+        pendingEvents.pop();
+      }
+      setStatus("on", "Live paused");
+      updateNewCountUI();
+      return;
+    }
+    prependRow(event);
+  }
+
+  function startLive() {
+    if (liveSource) {
+      return;
+    }
+    if (activeFilters.sql) {
+      setStatus("error", "Live disabled in SQL mode");
+      return;
+    }
+    const params = new URLSearchParams({ source: "logs" });
+    if (activeFilters.service) {
+      params.set("service", activeFilters.service);
+    }
+    liveSource = new EventSource(`/tail?${params.toString()}`);
+    setButton(true);
+    setStatus("on", "Live on");
+    updateLiveParam(true);
+
+    liveSource.onmessage = (evt) => {
+      try {
+        const payload = JSON.parse(evt.data);
+        handleIncoming(payload);
+      } catch (_err) {
+        setStatus("error", "Live parse error");
+      }
+    };
+
+    liveSource.onerror = () => {
+      setStatus("error", "Live reconnecting");
+    };
+  }
+
+  function stopLive() {
+    if (!liveSource) {
+      return;
+    }
+    liveSource.close();
+    liveSource = null;
+    setButton(false);
+    setStatus("off", "Live off");
+    updateLiveParam(false);
+  }
+
+  toggleBtn.addEventListener("click", () => {
+    if (liveSource) {
+      stopLive();
+      return;
+    }
+    startLive();
+  });
+
+  window.addEventListener("beforeunload", () => {
+    stopLive();
+  });
+
+  window.addEventListener("scroll", () => {
+    if (!liveSource) {
+      return;
+    }
+    if (isPausedByScroll()) {
+      setStatus("on", pendingEvents.length ? "Live paused" : "Live on");
+      return;
+    }
+    setStatus("on", "Live on");
+    flushPendingEvents();
+  });
+
+  if (newCountBtn) {
+    newCountBtn.addEventListener("click", () => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      flushPendingEvents();
+    });
+  }
+
+  if (activeFilters.sql) {
+    toggleBtn.disabled = true;
+    toggleBtn.title = "Live mode is unavailable when SQL WHERE is in use.";
+    setStatus("off", "Live unavailable");
+  } else if (liveRequested) {
+    startLive();
+  }
+})();
+</script>
 {% endblock %}

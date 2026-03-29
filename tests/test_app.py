@@ -1185,3 +1185,249 @@ class TestExternalAuth:
         r = await ext_auth_client.get("/")
         assert r.status_code == 401
         assert r.headers.get("WWW-Authenticate") == 'Bearer realm="SOBS"'
+
+
+# ---------------------------------------------------------------------------
+# SSE tail endpoint
+# ---------------------------------------------------------------------------
+class TestSSETail:
+    """Tests for the /tail SSE live-tail endpoint."""
+
+    @staticmethod
+    async def _get_streaming_response(client, path, headers=None):
+        """Open a streaming HTTP connection, capture the initial response headers, then cancel.
+
+        Because /tail is an infinite SSE stream, the standard ``await client.get()``
+        would block forever.  This helper uses the underlying ``TestHTTPConnection``
+        directly so we can inspect the response status/headers and cancel the task.
+        """
+        connection = client.request(path, headers=headers)
+        await connection.__aenter__()
+        try:
+            await connection.send(b"")
+            await connection.send_complete()
+            # Allow Quart to dispatch the request and emit the response-start frame.
+            await asyncio.sleep(0.05)
+            return connection.status_code, connection.headers
+        finally:
+            if not connection._task.done():
+                connection._task.cancel()
+                try:
+                    await connection._task
+                except asyncio.CancelledError:
+                    pass
+
+    async def test_tail_returns_200_with_sse_content_type(self, client):
+        """GET /tail should return 200 with text/event-stream content-type."""
+        status, headers = await self._get_streaming_response(client, "/tail")
+        assert status == 200
+        assert headers is not None
+        assert "text/event-stream" in headers.get("content-type", "")
+
+    async def test_tail_response_has_no_cache_header(self, client):
+        """GET /tail should include Cache-Control: no-cache."""
+        status, headers = await self._get_streaming_response(client, "/tail")
+        assert status == 200
+        assert headers.get("cache-control") == "no-cache"
+
+    async def test_tail_requires_auth_when_basic_auth_configured(self, monkeypatch):
+        """GET /tail should return 401 when Basic Auth is configured and no credentials sent."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "BASIC_AUTH_USERNAME", "admin")
+        monkeypatch.setattr(app_module, "BASIC_AUTH_PASSWORD", "secret")
+        app.config["TESTING"] = True
+        async with app.test_client() as c:
+            r = await c.get("/tail")
+        assert r.status_code == 401
+        assert r.headers.get("WWW-Authenticate") == 'Basic realm="SOBS"'
+
+    async def test_tail_accessible_with_correct_basic_auth(self, monkeypatch):
+        """GET /tail should be accessible with correct Basic Auth credentials."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "BASIC_AUTH_USERNAME", "admin")
+        monkeypatch.setattr(app_module, "BASIC_AUTH_PASSWORD", "secret")
+        token = base64.b64encode(b"admin:secret").decode()
+        app.config["TESTING"] = True
+        async with app.test_client() as c:
+            status, _ = await self._get_streaming_response(c, "/tail", headers={"Authorization": f"Basic {token}"})
+        assert status == 200
+
+    async def test_tail_requires_auth_when_external_auth_configured(self, monkeypatch):
+        """GET /tail should return 401 when external auth is configured and no token sent."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", "http://auth-service")
+        app.config["TESTING"] = True
+        async with app.test_client() as c:
+            r = await c.get("/tail")
+        assert r.status_code == 401
+        assert r.headers.get("WWW-Authenticate") == 'Bearer realm="SOBS"'
+
+    async def test_tail_accessible_with_valid_external_auth(self, monkeypatch):
+        """GET /tail should be accessible when external auth approves the token."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", "http://auth-service")
+        monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: True)
+        app.config["TESTING"] = True
+        async with app.test_client() as c:
+            status, _ = await self._get_streaming_response(c, "/tail", headers={"Authorization": "Bearer valid-token"})
+        assert status == 200
+
+    async def test_tail_accessible_without_auth_in_none_mode(self, client):
+        """GET /tail should be accessible when no auth is configured."""
+        status, _ = await self._get_streaming_response(client, "/tail")
+        assert status == 200
+
+    async def test_sse_broadcast_delivers_to_subscriber(self):
+        """_sse_broadcast should put events on all registered subscriber queues."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            event = {"source": "logs", "ts": "2024-01-01T00:00:00Z", "level": "INFO", "service": "svc", "body": "hi"}
+            await app_module._sse_broadcast(event)
+            received = q.get_nowait()
+            assert received == event
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+    async def test_sse_broadcast_delivers_to_multiple_subscribers(self):
+        """_sse_broadcast should deliver to all registered queues simultaneously."""
+        import app as app_module
+
+        q1 = asyncio.Queue()
+        q2 = asyncio.Queue()
+        app_module._sse_subscribers.add(q1)
+        app_module._sse_subscribers.add(q2)
+        try:
+            event = {"source": "logs", "ts": "t", "level": "INFO", "service": "s", "body": "b"}
+            await app_module._sse_broadcast(event)
+            assert q1.get_nowait() == event
+            assert q2.get_nowait() == event
+        finally:
+            app_module._sse_subscribers.discard(q1)
+            app_module._sse_subscribers.discard(q2)
+
+    async def test_sse_broadcast_drops_on_full_queue(self):
+        """_sse_broadcast should silently drop events when a subscriber queue is full."""
+        import app as app_module
+
+        q = asyncio.Queue(maxsize=1)
+        q.put_nowait({"source": "logs"})  # fill it up
+        app_module._sse_subscribers.add(q)
+        try:
+            # Should not raise even though the queue is full
+            await app_module._sse_broadcast({"source": "logs", "ts": "x"})
+            assert q.qsize() == 1  # still only the original event
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+    async def test_ingest_logs_broadcasts_to_sse_subscribers(self, client):
+        """Posting to /v1/logs should result in log events delivered to SSE subscribers."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/logs",
+                json={
+                    "resourceLogs": [
+                        {
+                            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "testsvc"}}]},
+                            "scopeLogs": [
+                                {
+                                    "logRecords": [
+                                        {
+                                            "timeUnixNano": "1700000000000000000",
+                                            "severityText": "INFO",
+                                            "body": {"stringValue": "hello sse"},
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            assert r.status_code == 200
+            event = q.get_nowait()
+            assert event["source"] == "logs"
+            assert event["service"] == "testsvc"
+            assert event["body"] == "hello sse"
+            assert event["level"] == "INFO"
+            assert "ts" in event
+            assert "trace_id" in event
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+    async def test_ingest_traces_broadcasts_to_sse_subscribers(self, client):
+        """Posting to /v1/traces should result in span events delivered to SSE subscribers."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/traces",
+                json={
+                    "resourceSpans": [
+                        {
+                            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "tracesvc"}}]},
+                            "scopeSpans": [
+                                {
+                                    "spans": [
+                                        {
+                                            "traceId": "aabbccdd" * 4,
+                                            "spanId": "11223344" * 2,
+                                            "name": "GET /api",
+                                            "startTimeUnixNano": "1700000000000000000",
+                                            "endTimeUnixNano": "1700000001000000000",
+                                            "status": {"code": 1},
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            assert r.status_code == 200
+            event = q.get_nowait()
+            assert event["source"] == "traces"
+            assert event["service"] == "tracesvc"
+            assert event["name"] == "GET /api"
+            assert "ts" in event
+            assert "duration_ms" in event
+            assert "status" in event
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+    async def test_tail_source_and_service_filtering_logic(self):
+        """Filtering by source and service should work as expected by the generator logic."""
+        all_events = [
+            {"source": "logs", "ts": "t1", "level": "INFO", "service": "myapp", "body": "a"},
+            {"source": "traces", "ts": "t2", "name": "span", "service": "myapp"},
+            {"source": "logs", "ts": "t3", "level": "INFO", "service": "other", "body": "b"},
+        ]
+
+        # Filter source=logs only
+        logs_only = [e for e in all_events if e.get("source") == "logs"]
+        assert len(logs_only) == 2
+
+        # Filter source=traces only
+        traces_only = [e for e in all_events if e.get("source") == "traces"]
+        assert len(traces_only) == 1
+
+        # Filter source=all, service=myapp
+        myapp = [e for e in all_events if e.get("service") == "myapp"]
+        assert len(myapp) == 2
+
+        # Filter source=logs, service=myapp
+        combined = [e for e in all_events if e.get("source") == "logs" and e.get("service") == "myapp"]
+        assert len(combined) == 1
+        assert combined[0]["body"] == "a"

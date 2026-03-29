@@ -35,6 +35,7 @@ from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportM
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from quart import (
     Quart,
+    Response,
     jsonify,
     render_template,
     request,
@@ -468,6 +469,22 @@ def _queue_write(op: Callable[[ChDbConnection], None], wait: bool = False) -> No
 
 def _write_queue_depth() -> int:
     return _write_queue.qsize() if _write_queue is not None else 0
+
+
+# ---------------------------------------------------------------------------
+# SSE tail pub/sub
+# ---------------------------------------------------------------------------
+_sse_subscribers: set[asyncio.Queue] = set()
+_SSE_QUEUE_MAXSIZE = int(os.environ.get("SOBS_SSE_QUEUE_MAX", 200))
+
+
+async def _sse_broadcast(event: dict) -> None:
+    """Deliver an event to every active SSE subscriber (non-blocking, drops on full)."""
+    for q in list(_sse_subscribers):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1082,6 +1099,17 @@ async def ingest_logs():
     except Exception as exc:
         app.logger.exception("log ingest write failed")
         return jsonify({"error": str(exc)}), 500
+    for event in events:
+        await _sse_broadcast(
+            {
+                "source": "logs",
+                "ts": event.ts,
+                "level": event.level,
+                "service": event.service,
+                "body": event.body,
+                "trace_id": event.trace_id,
+            }
+        )
     count = len(events)
     return jsonify({"accepted": count}), 200
 
@@ -1109,6 +1137,19 @@ async def ingest_traces():
     except Exception as exc:
         app.logger.exception("trace ingest write failed")
         return jsonify({"error": str(exc)}), 500
+    for event in span_events:
+        await _sse_broadcast(
+            {
+                "source": "traces",
+                "ts": event.ts,
+                "trace_id": event.trace_id,
+                "span_id": event.span_id,
+                "name": event.name,
+                "service": event.service,
+                "duration_ms": event.duration_ms,
+                "status": event.status,
+            }
+        )
     count = len(span_events)
     return jsonify({"accepted": count}), 200
 
@@ -1895,6 +1936,56 @@ async def view_ai():
 async def rum_js():
     return await send_from_directory(
         os.path.join(os.path.dirname(__file__), "static"), "rum.js", mimetype="application/javascript"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SSE live tail  GET /tail
+# ---------------------------------------------------------------------------
+@app.route("/tail")
+@require_basic_auth
+async def tail_stream():
+    """Live-tail logs and traces as a Server-Sent Events stream.
+
+    Query parameters:
+    - ``source``: ``logs``, ``traces``, or ``all`` (default: ``all``)
+    - ``service``: optional service name filter (exact match)
+
+    SSE event format::
+
+        data: {"source": "logs", "ts": "...", "level": "INFO", "service": "...", "body": "..."}
+
+    Example usage::
+
+        curl -N http://localhost:4317/tail
+        curl -N "http://localhost:4317/tail?source=logs&service=myapp"
+    """
+    source = request.args.get("source", "all").strip().lower()
+    service_filter = request.args.get("service", "").strip()
+
+    async def _generate():
+        q: asyncio.Queue = asyncio.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
+        _sse_subscribers.add(q)
+        try:
+            yield "retry: 5000\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if source != "all" and event.get("source") != source:
+                    continue
+                if service_filter and event.get("service") != service_filter:
+                    continue
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            _sse_subscribers.discard(q)
+
+    return Response(
+        _generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

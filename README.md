@@ -13,6 +13,8 @@
 - 🐛 **Error tracking** – with stack traces and one-click resolve
 - 🤖 **AI transparency** – record LLM prompts, responses and token usage
 - 🔍 **Search** – grep (regex) and SQL WHERE clause filtering on logs
+- 📡 **Live tail** – SSE endpoint (`/tail`) for real-time streaming of logs and traces
+- ⚡ **Live logs mode** – optional in-page streaming on Logs with pause-on-scroll and queued event counter
 - 🎨 **Bootstrap 5 dark UI** – served locally, no CDN required
 - 🐳 **Docker ready** – Dockerfile + docker-compose + Kubernetes manifests
 
@@ -160,6 +162,85 @@ Ingest API endpoints (`/v1/*`) use the separate `SOBS_API_KEY` mechanism.
 
 For reverse proxies, SOBS also honors `X-Forwarded-Prefix` for URL generation and prefixed routing.
 
+## Live Tail (SSE)
+
+SOBS exposes a Server-Sent Events endpoint at `/tail` for real-time streaming of logs and traces as they arrive.
+
+### Usage
+
+```bash
+# Stream all events (logs + traces)
+curl -N http://localhost:4317/tail
+
+# Stream logs only
+curl -N "http://localhost:4317/tail?source=logs"
+
+# Stream traces only
+curl -N "http://localhost:4317/tail?source=traces"
+
+# Filter by service
+curl -N "http://localhost:4317/tail?service=myapp"
+
+# Combine source and service filter
+curl -N "http://localhost:4317/tail?source=logs&service=myapp"
+```
+
+### Query parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `source`  | `all`   | Event source to stream: `logs`, `traces`, or `all` |
+| `service` | _(empty)_ | Optional exact service name filter |
+
+### Event format
+
+Each SSE event is a JSON object on a single `data:` line:
+
+**Log event:**
+```json
+{"source": "logs", "ts": "2024-01-15T10:30:00.000+00:00", "level": "INFO", "service": "my-service", "body": "Request processed", "trace_id": "abc123"}
+```
+
+**Trace event:**
+```json
+{"source": "traces", "ts": "2024-01-15T10:30:00.000+00:00", "trace_id": "abc123", "span_id": "def456", "name": "GET /api/users", "service": "my-service", "duration_ms": 12.5, "status": "OK"}
+```
+
+The stream sends a `retry: 5000` directive on connect and a `: keepalive` comment every 15 seconds to keep the connection alive through proxies.
+
+### Authentication
+
+`/tail` uses the same Web UI auth mode as all other UI routes. Supply credentials the same way you would for the Web UI:
+
+```bash
+# Basic auth
+curl -N http://localhost:4317/tail \
+  -H "Authorization: Basic $(printf 'admin:secret' | base64)"
+
+# Bearer token (external auth)
+curl -N http://localhost:4317/tail \
+  -H "Authorization: Bearer eyJhbGciOi..."
+```
+
+### Browser / JavaScript
+
+```javascript
+const source = new EventSource('/tail?source=logs');
+source.onmessage = (e) => {
+  const event = JSON.parse(e.data);
+  console.log(event.ts, event.level, event.service, event.body);
+};
+```
+
+### Logs page Live mode
+
+The Logs page includes a **Live mode** toggle (top-right) that consumes `/tail?source=logs` and appends new rows in real time.
+
+- New rows are prepended at the top and briefly highlighted.
+- If you scroll down, Live mode pauses rendering to avoid jumpy UX.
+- While paused, a `N new` button appears; click it (or scroll back to top) to flush queued events.
+- SQL WHERE mode disables Live mode to avoid mixed client/server filtering behavior.
+
 ## Kubernetes
 
 Deploy as a standalone pod:
@@ -192,6 +273,24 @@ pytest tests/
 # Or target a custom endpoint
 ./scripts/benchmark.sh http://127.0.0.1:44318
 ```
+
+## Traffic Pump (including realistic mode)
+
+Use `scripts/load_pump.py` directly when you want to drive specific event rates.
+
+```bash
+# High-throughput load mode (default)
+python scripts/load_pump.py --base http://127.0.0.1:4317 --total 420 --workers 28
+
+# Realistic paced mode for UI demos
+python scripts/load_pump.py --base http://127.0.0.1:4317 --mode realistic --rps 3 --jitter-ms 250 --total 180 --workers 8
+```
+
+Parameters:
+
+- `--mode load|realistic`
+- `--rps` target requests/sec in realistic mode
+- `--jitter-ms` random +/- milliseconds around the realistic interval
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and quality checks.
 

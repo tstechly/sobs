@@ -204,6 +204,7 @@ cython_debug/
 # SOBS specific
 node_modules/
 data/
+file:/tmp/
 
 # Integration test screenshots (uploaded as CI artifacts)
 tests/screenshots/
