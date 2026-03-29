@@ -109,7 +109,7 @@ Ingest writes are queued and flushed by a single background DB writer thread.
 
 This model favors client latency under burst traffic. It does not guarantee synchronous commit-per-request in normal runtime.
 
-Fresh chDB databases are created with schema compression tuned using ZSTD plus selective Delta/T64 codecs. Embedded chDB via the Python API does not currently expose ClickHouse `storage_configuration`/encrypted-disk setup reliably, so encrypted-disk storage should be handled by an external ClickHouse server if required.
+Fresh chDB databases are created with schema compression tuned using ZSTD plus selective Delta/T64 codecs. For encrypted local-disk testing in the container image, set `SOBS_CHDB_ENCRYPTION_KEY` and SOBS will render an internal ClickHouse config at startup and pass it to chDB automatically.
 
 Use `/health/db` for readiness checks in orchestrated deployments when you need the probe to exercise DB availability as well as process liveness.
 
@@ -128,8 +128,25 @@ Use `/health/db` for readiness checks in orchestrated deployments when you need 
 | `SOBS_WRITE_QUEUE_MAX`      | `5000`         | Max buffered write operations before ingest returns `503` |
 | `SOBS_WRITE_BATCH_MAX`      | `200`          | Max writes processed per DB batch |
 | `SOBS_WRITE_BATCH_WAIT_MS`  | `20`           | Max milliseconds to wait for filling a write batch |
+| `SOBS_CHDB_ENCRYPTION_KEY`  | _(empty)_      | Hex key for runtime-generated encrypted disk config in container startup |
+| `SOBS_CHDB_BASE_DISK_PATH`  | `/data/chdb-disks/plain` | Base local disk path for runtime-generated storage configuration |
+| `SOBS_CHDB_ENCRYPTED_DISK_PATH` | `/data/chdb-disks/encrypted` | Encrypted disk path for runtime-generated storage configuration |
+| `SOBS_CHDB_ENCRYPTED_DISK_NAME` | `encrypted_disk` | Disk name emitted into runtime-generated ClickHouse config |
+| `SOBS_CHDB_STORAGE_POLICY_NAME` | `encrypted_only` | Storage policy name emitted into runtime-generated ClickHouse config |
+| `SOBS_CHDB_CONFIG_RENDER_PATH` | `/tmp/sobs-clickhouse-config.xml` | Absolute path where startup renders internal ClickHouse config |
+| `SOBS_CLICKHOUSE_CONFIG_FILE` | _(empty)_    | Absolute mounted ClickHouse `config.xml` passed to embedded chDB as `config-file` startup arg |
+| `SOBS_CHDB_EXPECT_DISK`     | _(empty)_       | Optional startup assertion: required disk name in `system.disks` |
+| `SOBS_CHDB_EXPECT_STORAGE_POLICY` | _(empty)_ | Optional startup assertion: required policy name in `system.storage_policies` |
 | `HYPERCORN_WORKERS`         | `1`            | Hypercorn worker process count (forced to 1 for embedded chDB safety) |
 | `HYPERCORN_BIND`            | `0.0.0.0:$PORT` | Hypercorn bind address override |
+
+When `SOBS_CHDB_ENCRYPTION_KEY` is set in the container image runtime:
+
+- The entrypoint renders a ClickHouse `config.xml` inside the container.
+- `SOBS_CLICKHOUSE_CONFIG_FILE` is exported to the rendered absolute path.
+- Default startup assertions are set (`SOBS_CHDB_EXPECT_DISK` and `SOBS_CHDB_EXPECT_STORAGE_POLICY`) unless already provided.
+
+This keeps encryption keys injected at runtime through environment/secret management, without baking secrets into the image.
 
 Authentication details and setup examples are documented in [AUTHENTICATION.md](AUTHENTICATION.md).
 

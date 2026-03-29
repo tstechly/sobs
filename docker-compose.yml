@@ -12,6 +12,11 @@ services:
     environment:
       # Optional API key – leave empty to disable auth
       - SOBS_API_KEY=
+      # Optional encrypted disk setup generated inside container at startup
+      # - SOBS_CHDB_ENCRYPTION_KEY=00112233445566778899aabbccddeeff
+      # - SOBS_CHDB_BASE_DISK_PATH=/data/chdb-disks/plain
+      # - SOBS_CHDB_ENCRYPTED_DISK_PATH=/data/chdb-disks/encrypted
+      # - SOBS_CHDB_STORAGE_POLICY_NAME=encrypted_only
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4317/health')"]
