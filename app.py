@@ -2417,7 +2417,15 @@ async def delete_dashboard(dashboard_id: str):
     _insert_rows_json_each_row(
         db,
         "sobs_dashboards",
-        [{"Id": dashboard_id, "Name": dashboard["name"], "Description": dashboard["description"], "IsDeleted": 1, "Version": version}],
+        [
+            {
+                "Id": dashboard_id,
+                "Name": dashboard["name"],
+                "Description": dashboard["description"],
+                "IsDeleted": 1,
+                "Version": version,
+            }
+        ],
     )
     # Soft-delete all charts in this dashboard
     charts = _get_charts(db, dashboard_id)
