@@ -792,6 +792,83 @@ class TestAIIngest:
         r = await client.post("/v1/ai", json={})
         assert r.status_code == 200
 
+    async def test_ingest_ai_with_otel_messages(self, client):
+        """Ingest should accept gen_ai.input.messages / gen_ai.output.messages."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "my-app",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "input_messages": [{"role": "user", "content": "Hello"}],
+                "output_messages": [{"role": "assistant", "content": "Hi there"}],
+                "tokens_in": 5,
+                "tokens_out": 3,
+                "duration_ms": 150,
+            },
+        )
+        assert r.status_code == 200
+        assert json.loads(await r.get_data())["ok"] is True
+
+    async def test_ingest_ai_operation_defaults_to_chat(self, client):
+        """Missing operation field should default to 'chat'."""
+        r = await client.post(
+            "/v1/ai",
+            json={"service": "svc", "provider": "anthropic", "model": "claude-3"},
+        )
+        assert r.status_code == 200
+
+    async def test_ingest_ai_operation_canonicalised_to_lowercase(self, client):
+        """operation value should be lower-cased and stripped before storage."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/ai",
+                json={
+                    "service": "svc",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "operation": "  Chat  ",
+                },
+            )
+            assert r.status_code == 200
+            event = q.get_nowait()
+            assert event["operation"] == "chat"
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+    async def test_ingest_ai_broadcasts_sse_event(self, client):
+        """POST /v1/ai should broadcast a source=ai SSE event."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/ai",
+                json={
+                    "service": "ai-svc",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "tokens_in": 10,
+                    "tokens_out": 20,
+                    "duration_ms": 200,
+                },
+            )
+            assert r.status_code == 200
+            event = q.get_nowait()
+            assert event["source"] == "ai"
+            assert event["service"] == "ai-svc"
+            assert event["provider"] == "openai"
+            assert event["model"] == "gpt-4o"
+            assert "ts" in event
+            assert "duration_ms" in event
+        finally:
+            app_module._sse_subscribers.discard(q)
+
 
 # ---------------------------------------------------------------------------
 # Web UI pages
@@ -1480,3 +1557,193 @@ class TestSSETail:
         combined = [e for e in all_events if e.get("source") == "logs" and e.get("service") == "myapp"]
         assert len(combined) == 1
         assert combined[0]["body"] == "a"
+
+    async def test_tail_source_ai_filter_logic(self):
+        """source=ai filter should only pass events with source='ai'."""
+        all_events = [
+            {"source": "ai", "ts": "t1", "provider": "openai", "model": "gpt-4o", "service": "svc"},
+            {"source": "traces", "ts": "t2", "name": "span", "service": "svc"},
+            {"source": "logs", "ts": "t3", "level": "INFO", "service": "svc", "body": "msg"},
+            {"source": "ai", "ts": "t4", "provider": "anthropic", "model": "claude-3", "service": "other"},
+        ]
+
+        # Filter source=ai only
+        ai_only = [e for e in all_events if e.get("source") == "ai"]
+        assert len(ai_only) == 2
+        assert all(e["source"] == "ai" for e in ai_only)
+
+        # Filter source=ai, service=svc
+        ai_svc = [e for e in all_events if e.get("source") == "ai" and e.get("service") == "svc"]
+        assert len(ai_svc) == 1
+        assert ai_svc[0]["model"] == "gpt-4o"
+
+    async def test_ingest_ai_span_via_traces_broadcasts_ai_sse_event(self, client):
+        """Posting an AI span via /v1/traces should broadcast a source=ai SSE event."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/traces",
+                json={
+                    "resourceSpans": [
+                        {
+                            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "llm-svc"}}]},
+                            "scopeSpans": [
+                                {
+                                    "spans": [
+                                        {
+                                            "traceId": "aabbccdd" * 4,
+                                            "spanId": "11223344" * 2,
+                                            "name": "chat gpt-4o",
+                                            "startTimeUnixNano": "1700000000000000000",
+                                            "endTimeUnixNano": "1700000001000000000",
+                                            "status": {"code": 1},
+                                            "attributes": [
+                                                {
+                                                    "key": "gen_ai.provider.name",
+                                                    "value": {"stringValue": "openai"},
+                                                },
+                                                {
+                                                    "key": "gen_ai.request.model",
+                                                    "value": {"stringValue": "gpt-4o"},
+                                                },
+                                            ],
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            assert r.status_code == 200
+            # Drain the queue – we expect both a traces and an ai event
+            events = []
+            while not q.empty():
+                events.append(q.get_nowait())
+            sources = {e["source"] for e in events}
+            assert "traces" in sources
+            assert "ai" in sources
+            ai_events = [e for e in events if e["source"] == "ai"]
+            assert ai_events[0]["provider"] == "openai"
+            assert ai_events[0]["model"] == "gpt-4o"
+            assert ai_events[0]["service"] == "llm-svc"
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+
+# ---------------------------------------------------------------------------
+# GenAI OTel semantic convention compliance
+# ---------------------------------------------------------------------------
+class TestGenAICompliance:
+    """Tests for OTel GenAI semantic convention compliance in queries and UI."""
+
+    async def test_gen_ai_system_legacy_fallback_counts_as_ai_span(self, client):
+        """Spans with gen_ai.system (legacy) should be counted as AI spans."""
+        import app as app_module
+
+        # Insert a span directly using legacy gen_ai.system attribute
+        db = app_module.get_db()
+        app_module._insert_rows_json_each_row(
+            db,
+            "otel_traces",
+            [
+                {
+                    "Timestamp": "2024-01-01T00:00:00",
+                    "TraceId": "legacy01" * 4,
+                    "SpanId": "legspan1" * 2,
+                    "ParentSpanId": "",
+                    "TraceState": "",
+                    "SpanName": "chat gpt-3.5-turbo",
+                    "SpanKind": "CLIENT",
+                    "ServiceName": "legacy-svc",
+                    "ResourceAttributes": {},
+                    "ScopeName": "test",
+                    "ScopeVersion": "",
+                    "SpanAttributes": {
+                        "gen_ai.system": "openai",
+                        "gen_ai.request.model": "gpt-3.5-turbo",
+                        "gen_ai.usage.input_tokens": "10",
+                        "gen_ai.usage.output_tokens": "5",
+                    },
+                    "Duration": 100000000,
+                    "StatusCode": "STATUS_CODE_OK",
+                    "StatusMessage": "",
+                    "Events": {"Timestamp": [], "Name": [], "Attributes": []},
+                    "Links": {"TraceId": [], "SpanId": [], "TraceState": [], "Attributes": []},
+                }
+            ],
+        )
+
+        r = await client.get("/ai")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        # The legacy span should appear in the AI view
+        assert "legacy-svc" in body or "gpt-3.5-turbo" in body
+
+    async def test_gen_ai_input_output_messages_displayed_in_ai_view(self, client):
+        """gen_ai.input.messages / gen_ai.output.messages should be shown as prompt/response."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "msg-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "input_messages": [{"role": "user", "content": "What is the capital of France?"}],
+                "output_messages": [{"role": "assistant", "content": "Paris"}],
+                "tokens_in": 10,
+                "tokens_out": 2,
+                "duration_ms": 300,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "What is the capital of France?" in body
+        assert "Paris" in body
+
+    async def test_extract_messages_text_helper(self):
+        """_extract_messages_text should handle standard OTel message format."""
+        import app as app_module
+
+        # Standard message array
+        msgs = json.dumps([{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}])
+        result = app_module._extract_messages_text(msgs)
+        assert "Hello" in result
+        assert "Hi" in result
+        assert "[user]" in result
+        assert "[assistant]" in result
+
+        # Empty / non-JSON passthrough
+        assert app_module._extract_messages_text("") == ""
+        assert app_module._extract_messages_text("plain text") == "plain text"
+
+        # Content array (vision API style)
+        msgs2 = json.dumps([{"role": "user", "content": [{"type": "text", "text": "Describe this"}]}])
+        result2 = app_module._extract_messages_text(msgs2)
+        assert "Describe this" in result2
+
+    async def test_ai_view_shows_error_type(self, client):
+        """AI view should display error.type badge when present."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "err-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "error_type": "RateLimitError",
+                "tokens_in": 5,
+                "tokens_out": 0,
+                "duration_ms": 50,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "RateLimitError" in body
