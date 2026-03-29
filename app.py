@@ -654,6 +654,21 @@ def _parse_offset() -> int:
         return 0
 
 
+def _parse_sort(allowed: dict, default_col: str = "Timestamp") -> tuple:
+    """Parse and validate ``sort_by`` / ``sort_dir`` query params.
+
+    *allowed* maps URL param values to SQL column names.
+    Returns ``(sort_by, sql_col, sort_dir)`` where ``sort_dir`` is ``'asc'`` or ``'desc'``.
+    """
+    sort_by = request.args.get("sort_by", default_col)
+    sort_dir = request.args.get("sort_dir", "desc").lower()
+    if sort_by not in allowed:
+        sort_by = default_col
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = "desc"
+    return sort_by, allowed[sort_by], sort_dir
+
+
 def _hex(b) -> str:
     """Convert bytes or hex string to hex string."""
     if isinstance(b, (bytes, bytearray)):
@@ -1499,6 +1514,11 @@ async def view_logs():
     sql_where = request.args.get("sql", "").strip()
     limit = _parse_limit(200)
     offset = _parse_offset()
+    sort_by, sort_col, sort_dir = _parse_sort(
+        {"Timestamp": "Timestamp", "SeverityText": "SeverityText", "ServiceName": "ServiceName"},
+        "Timestamp",
+    )
+    order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
 
     rows = []
     total = 0
@@ -1516,7 +1536,7 @@ async def view_logs():
             safe_sql = re.sub(r"\bbody\b", "Body", safe_sql, flags=re.IGNORECASE)
             query = (
                 f"SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId FROM otel_logs "
-                f"WHERE {safe_sql} ORDER BY Timestamp DESC LIMIT ? OFFSET ?"
+                f"WHERE {safe_sql} {order_clause} LIMIT ? OFFSET ?"
             )
             rows = db.execute(query, (limit, offset)).fetchall()
             total = db.execute(f"SELECT COUNT(*) FROM otel_logs WHERE {safe_sql}").fetchone()[0]
@@ -1536,7 +1556,7 @@ async def view_logs():
         total = db.execute(f"SELECT COUNT(*) FROM otel_logs {where}", params).fetchone()[0]
         rows = db.execute(
             f"SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId FROM otel_logs {where} "
-            "ORDER BY Timestamp DESC LIMIT ? OFFSET ?",
+            f"{order_clause} LIMIT ? OFFSET ?",
             params + [limit, offset],
         ).fetchall()
 
@@ -1580,6 +1600,8 @@ async def view_logs():
         services=services,
         levels=levels,
         error_msg=error_msg,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 
@@ -1594,6 +1616,11 @@ async def view_errors():
     resolved = request.args.get("resolved", "0").strip()
     limit = _parse_limit(100)
     offset = _parse_offset()
+    sort_by, sort_col, sort_dir = _parse_sort(
+        {"Timestamp": "Timestamp", "ServiceName": "ServiceName"},
+        "Timestamp",
+    )
+    order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
     resolved_ids = _get_resolved_error_ids(db)
     where_parts = []
     where_params = []
@@ -1604,7 +1631,7 @@ async def view_errors():
     source_sql = (
         "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
         f"FROM ({ERROR_SOURCES_SQL}) {where_sql} "
-        "ORDER BY Timestamp DESC LIMIT ? OFFSET ?"
+        f"{order_clause} LIMIT ? OFFSET ?"
     )
 
     if resolved not in ("0", "1"):
@@ -1655,6 +1682,8 @@ async def view_errors():
         service=service,
         resolved=resolved,
         services=services,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 
@@ -1684,6 +1713,16 @@ async def view_traces():
     trace_id = request.args.get("trace_id", "").strip()
     limit = _parse_limit(100)
     offset = _parse_offset()
+    sort_by, sort_col, sort_dir = _parse_sort(
+        {
+            "Timestamp": "Timestamp",
+            "SpanName": "SpanName",
+            "ServiceName": "ServiceName",
+            "Duration": "Duration",
+        },
+        "Timestamp",
+    )
+    order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
 
     conditions = []
     params = []
@@ -1698,7 +1737,7 @@ async def view_traces():
     total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
     rows = db.execute(
         f"SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode, SpanAttributes "
-        f"FROM otel_traces {where} ORDER BY Timestamp DESC LIMIT ? OFFSET ?",
+        f"FROM otel_traces {where} {order_clause} LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
 
@@ -1737,6 +1776,8 @@ async def view_traces():
         service=service,
         trace_id=trace_id,
         services=services,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 
@@ -1750,6 +1791,11 @@ async def view_rum():
     event_type = request.args.get("type", "").strip()
     limit = _parse_limit(200)
     offset = _parse_offset()
+    sort_by, sort_col, sort_dir = _parse_sort(
+        {"Timestamp": "Timestamp", "EventName": "EventName"},
+        "Timestamp",
+    )
+    order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
 
     conditions = []
     params = []
@@ -1761,7 +1807,7 @@ async def view_rum():
     total = db.execute(f"SELECT COUNT(*) FROM hyperdx_sessions {where}", params).fetchone()[0]
     rows = db.execute(
         f"SELECT Timestamp, EventName, Body, LogAttributes FROM hyperdx_sessions {where} "
-        "ORDER BY Timestamp DESC LIMIT ? OFFSET ?",
+        f"{order_clause} LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
 
@@ -1826,6 +1872,8 @@ async def view_rum():
         event_type=event_type,
         event_types=event_types,
         vitals_summary=vitals_summary,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 
@@ -1840,6 +1888,11 @@ async def view_ai():
     model = request.args.get("model", "").strip()
     limit = _parse_limit(50)
     offset = _parse_offset()
+    sort_by, sort_col, sort_dir = _parse_sort(
+        {"Timestamp": "Timestamp", "Duration": "Duration", "ServiceName": "ServiceName"},
+        "Timestamp",
+    )
+    order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
 
     conditions = []
     params = []
@@ -1855,7 +1908,7 @@ async def view_ai():
     total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
     rows = db.execute(
         f"SELECT Timestamp, ServiceName, TraceId, Duration, SpanAttributes "
-        f"FROM otel_traces {where} ORDER BY Timestamp DESC LIMIT ? OFFSET ?",
+        f"FROM otel_traces {where} {order_clause} LIMIT ? OFFSET ?",
         params + [limit, offset],
     ).fetchall()
 
@@ -1926,6 +1979,8 @@ async def view_ai():
         total_tokens_in=totals["ti"] or 0,
         total_tokens_out=totals["to_"] or 0,
         total_calls=totals["cnt"] or 0,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
 

@@ -73,10 +73,25 @@
 <div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
   <table class="table table-sm table-hover align-middle">
     <thead>
+      {% set ts_next_dir = 'asc' if (sort_by == 'Timestamp' and sort_dir == 'desc') else 'desc' %}
+      {% set level_next_dir = 'asc' if (sort_by == 'SeverityText' and sort_dir == 'desc') else 'desc' %}
+      {% set svc_next_dir = 'asc' if (sort_by == 'ServiceName' and sort_dir == 'desc') else 'desc' %}
       <tr>
-        <th style="width:155px;">Timestamp</th>
-        <th style="width:90px;">Level</th>
-        <th style="width:100px;">Service</th>
+        <th style="width:155px;">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+            Timestamp {% if sort_by == 'Timestamp' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
+          </a>
+        </th>
+        <th style="width:90px;">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='SeverityText', sort_dir=level_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+            Level {% if sort_by == 'SeverityText' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
+          </a>
+        </th>
+        <th style="width:100px;">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+            Service {% if sort_by == 'ServiceName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
+          </a>
+        </th>
         <th>Message</th>
         <th style="width:120px;">Trace</th>
       </tr>
@@ -108,16 +123,23 @@
 {% set prev_offset = [offset - limit, 0] | max %}
 {% set next_offset = offset + limit %}
 <nav class="d-flex justify-content-between align-items-center">
-  <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
+  <div class="d-flex align-items-center gap-2">
+    <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
+    <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
+      {% for n in [10, 25, 50, 100, 200] %}
+      <option value="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+  </div>
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, limit=limit, offset=prev_offset) }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, limit=limit, offset=next_offset) }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
@@ -152,6 +174,10 @@
     level: {{ level|tojson }},
     service: {{ service|tojson }},
     sql: {{ sql_where|tojson }}
+  };
+  const activeSort = {
+    by: {{ sort_by|tojson }},
+    dir: {{ sort_dir|tojson }}
   };
   const liveRequested = {{ (live == '1')|tojson }};
 
@@ -203,6 +229,17 @@
       statusBadge.classList.add("text-bg-secondary");
     }
     statusBadge.textContent = text;
+  }
+
+  function sortDescription() {
+    const labelMap = {
+      Timestamp: "timestamp",
+      SeverityText: "level",
+      ServiceName: "service"
+    };
+    const by = labelMap[activeSort.by] || "timestamp";
+    const dir = activeSort.dir === "asc" ? "ascending" : "descending";
+    return `${by} ${dir}`;
   }
 
   function setButton(on) {
@@ -296,7 +333,7 @@
     tr.appendChild(body);
     tr.appendChild(createTraceCell(event.trace_id || ""));
 
-    tableBody.insertBefore(tr, tableBody.firstChild);
+    insertRowBySort(tr, event);
     while (tableBody.children.length > MAX_LIVE_ROWS) {
       tableBody.removeChild(tableBody.lastChild);
     }
@@ -307,6 +344,68 @@
     if (tableContainer) {
       tableContainer.classList.remove("d-none");
     }
+  }
+
+  function readRowData(tr) {
+    const cells = tr.children;
+    return {
+      ts: (cells[0] && cells[0].textContent ? cells[0].textContent : "").trim(),
+      level: (cells[1] && cells[1].textContent ? cells[1].textContent : "").trim().toUpperCase(),
+      service: (cells[2] && cells[2].textContent ? cells[2].textContent : "").trim()
+    };
+  }
+
+  function compareText(a, b) {
+    return String(a || "").localeCompare(String(b || ""));
+  }
+
+  function compareTimestampDesc(aTs, bTs) {
+    return compareText(bTs, aTs);
+  }
+
+  function compareByActiveSort(a, b) {
+    let primary = 0;
+    if (activeSort.by === "SeverityText") {
+      primary = compareText(String(a.level || "").toUpperCase(), String(b.level || "").toUpperCase());
+    } else if (activeSort.by === "ServiceName") {
+      primary = compareText(a.service, b.service);
+    } else {
+      primary = compareText(a.ts, b.ts);
+    }
+
+    if (activeSort.dir === "desc") {
+      primary *= -1;
+    }
+
+    if (primary !== 0) {
+      return primary;
+    }
+
+    // Keep equal keys intuitive: newer logs first.
+    return compareTimestampDesc(a.ts, b.ts);
+  }
+
+  function insertRowBySort(newRow, event) {
+    if (!tableBody || !tableBody.children.length) {
+      tableBody.insertBefore(newRow, tableBody.firstChild);
+      return;
+    }
+
+    const incoming = {
+      ts: formatTs(event.ts),
+      level: String(event.level || "").toUpperCase(),
+      service: String(event.service || "")
+    };
+
+    for (const existing of tableBody.children) {
+      const existingData = readRowData(existing);
+      if (compareByActiveSort(incoming, existingData) < 0) {
+        tableBody.insertBefore(newRow, existing);
+        return;
+      }
+    }
+
+    tableBody.appendChild(newRow);
   }
 
   function flushPendingEvents() {
@@ -352,7 +451,7 @@
     }
     liveSource = new EventSource(`/tail?${params.toString()}`);
     setButton(true);
-    setStatus("on", "Live on");
+    setStatus("on", `Live on (${sortDescription()})`);
     updateLiveParam(true);
 
     liveSource.onmessage = (evt) => {
@@ -397,10 +496,10 @@
       return;
     }
     if (isPausedByScroll()) {
-      setStatus("on", pendingEvents.length ? "Live paused" : "Live on");
+      setStatus("on", pendingEvents.length ? "Live paused" : `Live on (${sortDescription()})`);
       return;
     }
-    setStatus("on", "Live on");
+    setStatus("on", `Live on (${sortDescription()})`);
     flushPendingEvents();
   });
 
