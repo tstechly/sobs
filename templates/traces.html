@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Traces{% endblock %}
 {% block content %}
+{% set from_ts = from_ts or request.args.get('from_ts', '') %}
+{% set to_ts = to_ts or request.args.get('to_ts', '') %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-diagram-3 me-2 text-warning"></i>Traces</h4>
   <span class="text-secondary small">{{ total }} spans</span>
@@ -24,11 +26,22 @@
         <input type="text" name="trace_id" class="form-control form-control-sm font-monospace"
                placeholder="Paste trace ID…" value="{{ trace_id }}">
       </div>
+      <div class="col-md-2">
+        <label class="form-label small text-secondary">From</label>
+        <input type="text" name="from_ts" class="form-control form-control-sm font-monospace" placeholder="2026-03-29T12:00:00Z" value="{{ from_ts }}">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label small text-secondary">To</label>
+        <input type="text" name="to_ts" class="form-control form-control-sm font-monospace" placeholder="2026-03-29T12:05:00Z" value="{{ to_ts }}">
+      </div>
       <div class="col-md-2 d-flex gap-1">
         <button type="submit" class="btn btn-primary btn-sm">Filter</button>
         <a href="{{ url_for('view_traces') }}" class="btn btn-outline-secondary btn-sm">Reset</a>
       </div>
     </form>
+    {% if error_msg %}
+    <div class="alert alert-danger mt-2 mb-0 py-1 small">{{ error_msg }}</div>
+    {% endif %}
   </div>
 </div>
 
@@ -42,22 +55,22 @@
       {% set dur_next_dir = 'asc' if (sort_by == 'Duration' and sort_dir == 'desc') else 'desc' %}
       <tr>
         <th style="width:155px;">
-          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Timestamp {% if sort_by == 'Timestamp' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th>
-          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by='SpanName', sort_dir=name_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by='SpanName', sort_dir=name_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Name {% if sort_by == 'SpanName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:110px;">
-          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Service {% if sort_by == 'ServiceName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:80px;">
-          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by='Duration', sort_dir=dur_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by='Duration', sort_dir=dur_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Duration {% if sort_by == 'Duration' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
@@ -90,7 +103,7 @@
         <td class="small text-secondary">{{ span.http_method }}</td>
         <td class="small">{% if span.http_status %}<span class="badge {% if span.http_status|string >= '500' %}bg-danger{% elif span.http_status|string >= '400' %}bg-warning text-dark{% else %}bg-success{% endif %}">{{ span.http_status }}</span>{% endif %}</td>
         <td>
-          <a href="{{ url_for('view_traces', trace_id=span.trace_id) }}" class="trace-link text-truncate d-inline-block" style="max-width:120px;" title="{{ span.trace_id }}">
+          <a href="{{ url_for('view_traces', trace_id=span.trace_id, from_ts=from_ts, to_ts=to_ts) }}" class="trace-link text-truncate d-inline-block" style="max-width:120px;" title="{{ span.trace_id }}">
             {{ span.trace_id[:12] if span.trace_id else '—' }}{% if span.trace_id %}…{% endif %}
           </a>
         </td>
@@ -108,19 +121,19 @@
     <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + spans | length, total] | min }} of {{ total }}</small>
     <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
       {% for n in [10, 25, 50, 100, 200] %}
-      <option value="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
+      <option value="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
       {% endfor %}
     </select>
   </div>
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_traces', service=service, trace_id=trace_id, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_traces', service=service, trace_id=trace_id, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>

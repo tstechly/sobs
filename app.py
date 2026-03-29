@@ -20,10 +20,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Callable
 
@@ -37,10 +38,13 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 from quart import (
     Quart,
     Response,
+    flash,
     jsonify,
+    redirect,
     render_template,
     request,
     send_from_directory,
+    url_for,
 )
 
 # ---------------------------------------------------------------------------
@@ -235,6 +239,30 @@ CREATE TABLE IF NOT EXISTS sobs_error_resolutions (
 ) ENGINE = MergeTree()
 ORDER BY (ErrorId, ResolvedAt)
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+CREATE TABLE IF NOT EXISTS sobs_dashboards (
+    Id String CODEC(ZSTD(1)),
+    Name String CODEC(ZSTD(1)),
+    Description String CODEC(ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY Id
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS sobs_chart_configs (
+    Id String CODEC(ZSTD(1)),
+    DashboardId String CODEC(ZSTD(1)),
+    Title String CODEC(ZSTD(1)),
+    ChartType LowCardinality(String) CODEC(ZSTD(1)),
+    Query String CODEC(ZSTD(1)),
+    OptionsJson String CODEC(ZSTD(1)),
+    Position UInt16 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (DashboardId, Id)
+SETTINGS index_granularity = 8192;
 """
 
 
@@ -668,6 +696,42 @@ def _parse_sort(allowed: dict, default_col: str = "Timestamp") -> tuple:
     if sort_dir not in ("asc", "desc"):
         sort_dir = "desc"
     return sort_by, allowed[sort_by], sort_dir
+
+
+def _parse_time_window_args() -> tuple[str, str, str]:
+    """Parse ``from_ts``/``to_ts`` query params and optional ``window_s``."""
+    from_ts_raw = request.args.get("from_ts", "").strip()
+    to_ts_raw = request.args.get("to_ts", "").strip()
+    window_s_raw = request.args.get("window_s", "").strip()
+
+    try:
+        from_ts = _normalize_ch_timestamp(from_ts_raw) if from_ts_raw else ""
+        to_ts = _normalize_ch_timestamp(to_ts_raw) if to_ts_raw else ""
+        if from_ts and not to_ts and window_s_raw:
+            window_s = max(1, int(window_s_raw))
+            from_dt = datetime.fromisoformat(from_ts)
+            to_ts = _normalize_ch_timestamp(from_dt + timedelta(seconds=window_s))
+        if from_ts and to_ts:
+            from_dt = datetime.fromisoformat(from_ts)
+            to_dt = datetime.fromisoformat(to_ts)
+            if to_dt <= from_dt:
+                return "", "", "Invalid time window: to_ts must be later than from_ts"
+        return from_ts, to_ts, ""
+    except (TypeError, ValueError):
+        return "", "", "Invalid time value. Use ISO-8601, e.g. 2026-03-29T12:00:00Z"
+
+
+def _time_window_conditions(column: str, from_ts: str, to_ts: str) -> tuple[list[str], list[str]]:
+    """Build time-window WHERE fragments for ClickHouse DateTime64 columns."""
+    conditions: list[str] = []
+    params: list[str] = []
+    if from_ts:
+        conditions.append(f"{column} >= parseDateTime64BestEffort(?, 9)")
+        params.append(from_ts)
+    if to_ts:
+        conditions.append(f"{column} < parseDateTime64BestEffort(?, 9)")
+        params.append(to_ts)
+    return conditions, params
 
 
 def _hex(b) -> str:
@@ -1723,6 +1787,7 @@ async def view_logs():
     q = request.args.get("q", "").strip()
     level = request.args.get("level", "").strip().upper()
     service = request.args.get("service", "").strip()
+    from_ts, to_ts, time_error = _parse_time_window_args()
     sql_where = request.args.get("sql", "").strip()
     run_advanced_analysis = request.args.get("analyze", "").strip() == "1"
     limit = _parse_limit(200)
@@ -1746,6 +1811,9 @@ async def view_logs():
     where = ""
     params: list = []
 
+    if time_error:
+        error_msg = time_error
+
     if q:
         try:
             re.compile(q, re.IGNORECASE)
@@ -1765,6 +1833,10 @@ async def view_logs():
             safe_sql = re.sub(r"\bts\b", "Timestamp", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bbody\b", "Body", safe_sql, flags=re.IGNORECASE)
             where = f"WHERE {safe_sql}"
+            time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
+            if time_conditions:
+                where = f"{where} AND " + " AND ".join(time_conditions)
+                params.extend(time_params)
         except Exception as exc:
             error_msg = f"SQL error: {exc}"
     else:
@@ -1776,6 +1848,9 @@ async def view_logs():
         if service:
             conditions.append("ServiceName=?")
             params.append(service)
+        time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
+        conditions.extend(time_conditions)
+        params.extend(time_params)
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     if not error_msg:
@@ -1864,6 +1939,8 @@ async def view_logs():
         level=level,
         service=service,
         sql_where=sql_where,
+        from_ts=from_ts,
+        to_ts=to_ts,
         services=services,
         levels=levels,
         error_msg=error_msg,
@@ -1887,6 +1964,7 @@ async def view_logs():
 async def view_errors():
     db = get_db()
     service = request.args.get("service", "").strip()
+    from_ts, to_ts, time_error = _parse_time_window_args()
     resolved = request.args.get("resolved", "0").strip()
     limit = _parse_limit(100)
     offset = _parse_offset()
@@ -1901,6 +1979,9 @@ async def view_errors():
     if service:
         where_parts.append("ServiceName=?")
         where_params.append(service)
+    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
+    where_parts.extend(time_conditions)
+    where_params.extend(time_params)
     where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
     source_sql = (
         "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
@@ -1954,6 +2035,9 @@ async def view_errors():
         limit=limit,
         offset=offset,
         service=service,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        error_msg=time_error,
         resolved=resolved,
         services=services,
         sort_by=sort_by,
@@ -1985,6 +2069,7 @@ async def view_traces():
     db = get_db()
     service = request.args.get("service", "").strip()
     trace_id = request.args.get("trace_id", "").strip()
+    from_ts, to_ts, time_error = _parse_time_window_args()
     limit = _parse_limit(100)
     offset = _parse_offset()
     sort_by, sort_col, sort_dir = _parse_sort(
@@ -2006,6 +2091,9 @@ async def view_traces():
     if trace_id:
         conditions.append("TraceId=?")
         params.append(trace_id)
+    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
+    conditions.extend(time_conditions)
+    params.extend(time_params)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
     rows = db.execute(
@@ -2048,6 +2136,9 @@ async def view_traces():
         offset=offset,
         service=service,
         trace_id=trace_id,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        error_msg=time_error,
         services=services,
         sort_by=sort_by,
         sort_dir=sort_dir,
@@ -2263,6 +2354,794 @@ async def view_ai():
         sort_by=sort_by,
         sort_dir=sort_dir,
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom Dashboards (Template-driven eCharts)
+# ---------------------------------------------------------------------------
+
+# Chart Templates: Define structure, column roles, and eCharts rendering
+CHART_TEMPLATES = {
+    "time_series_percentiles": {
+        "id": "time_series_percentiles",
+        "name": "Time Series with Normal Range",
+        "description": "Show metric with percentile bands for anomaly detection",
+        "icon": "bi-graph-up",
+        "query_shape": "Columns: time, value, p95, p99",
+        "sample_sql": (
+            "SELECT\n"
+            "  toStartOfMinute(Timestamp) AS time,\n"
+            "  avg(Duration) AS value,\n"
+            "  quantile(0.95)(Duration) AS p95,\n"
+            "  quantile(0.99)(Duration) AS p99\n"
+            "FROM otel_traces\n"
+            "GROUP BY time\n"
+            "ORDER BY time"
+        ),
+        "drilldown": {
+            "target": "traces",
+            "label": "Open source traces",
+            "bucket_seconds": 60,
+            "time_axis": "x",
+        },
+        "min_columns": 4,
+        "max_columns": 4,
+        "column_roles": {"time": 0, "value": 1, "p95": 2, "p99": 3},
+        "echarts_option_template": {
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": ["Metric", "p95 Band", "p99 Band"], "bottom": 0},
+            "xAxis": {"type": "time", "data": "{{time}}"},
+            "yAxis": {"type": "value"},
+            "grid": {"left": "3%", "right": "4%", "bottom": "15%", "containLabel": True},
+            "series": [
+                {
+                    "name": "Metric",
+                    "type": "line",
+                    "data": "{{value}}",
+                    "lineStyle": {"color": "#0d6efd"},
+                    "symbol": "none",
+                },
+                {
+                    "name": "p95 Band",
+                    "type": "line",
+                    "data": "{{p95}}",
+                    "lineStyle": {"type": "dashed", "color": "#ffc107"},
+                    "symbol": "none",
+                },
+                {
+                    "name": "p99 Band",
+                    "type": "line",
+                    "data": "{{p99}}",
+                    "lineStyle": {"type": "dashed", "color": "#dc3545"},
+                    "symbol": "none",
+                    "areaStyle": {"color": "rgba(220, 53, 69, 0.1)"},
+                },
+            ],
+        },
+    },
+    "heatmap": {
+        "id": "heatmap",
+        "name": "Heatmap",
+        "description": "2D heatmap for correlating errors across dimensions",
+        "icon": "bi-fire",
+        "query_shape": "Columns: x category, y time bucket, numeric value",
+        "sample_sql": (
+            "SELECT\n"
+            "  ServiceName AS x_category,\n"
+            "  toStartOfFiveMinutes(Timestamp) AS y_category,\n"
+            "  round(100.0 * countIf(StatusCode = 'STATUS_CODE_ERROR') / count(), 2) AS value\n"
+            "FROM otel_traces\n"
+            "GROUP BY ServiceName, y_category\n"
+            "ORDER BY ServiceName, y_category"
+        ),
+        "drilldown": {
+            "target": "traces",
+            "label": "Open source traces",
+            "bucket_seconds": 300,
+            "time_axis": "y",
+            "service_axis": "x",
+        },
+        "min_columns": 3,
+        "max_columns": 3,
+        "column_roles": {"x_category": 0, "y_category": 1, "value": 2},
+        "echarts_option_template": {
+            "tooltip": {"trigger": "item", "formatter": "{b}: {c}"},
+            "xAxis": {"type": "category", "data": "{{x_unique_values}}"},
+            "yAxis": {"type": "category", "data": "{{y_unique_values}}"},
+            "visualMap": {
+                "min": "{{value_min}}",
+                "max": "{{value_max}}",
+                "inRange": {"color": ["#ebedf0", "#c6e48b", "#7bc96f", "#239a3b", "#196127"]},
+                "text": ["High", "Low"],
+                "bottom": 0,
+            },
+            "grid": {"left": "15%", "right": "10%", "bottom": "15%", "top": "10%", "containLabel": True},
+            "series": [
+                {
+                    "type": "heatmap",
+                    "data": "{{heatmap_data}}",
+                    "emphasis": {"itemStyle": {"borderColor": "#fff", "borderWidth": 2}},
+                }
+            ],
+        },
+    },
+    "box_plot": {
+        "id": "box_plot",
+        "name": "Distribution Box Plot",
+        "description": "Show distribution, quartiles, and outliers",
+        "icon": "bi-boxes",
+        "query_shape": "Columns: dimension, min, q1, median, q3, max",
+        "sample_sql": (
+            "SELECT\n"
+            "  HTTPMethod AS dimension,\n"
+            "  min(Duration) AS min,\n"
+            "  quantile(0.25)(Duration) AS q1,\n"
+            "  quantile(0.5)(Duration) AS median,\n"
+            "  quantile(0.75)(Duration) AS q3,\n"
+            "  max(Duration) AS max\n"
+            "FROM otel_traces\n"
+            "GROUP BY HTTPMethod\n"
+            "ORDER BY median DESC"
+        ),
+        "drilldown": {
+            "target": "traces",
+            "label": "Open traces view",
+        },
+        "min_columns": 6,
+        "max_columns": 6,
+        "column_roles": {"dimension": 0, "min": 1, "q1": 2, "median": 3, "q3": 4, "max": 5},
+        "echarts_option_template": {
+            "tooltip": {"trigger": "item"},
+            "xAxis": {"type": "category", "data": "{{dimension_values}}", "nameGap": 30},
+            "yAxis": {"type": "value", "name": "Value"},
+            "grid": {"left": "10%", "right": "10%", "bottom": "15%", "containLabel": True},
+            "series": [
+                {
+                    "type": "boxplot",
+                    "data": "{{boxplot_data}}",
+                    "itemStyle": {"color": "#0d6efd", "borderColor": "#0d6efd"},
+                }
+            ],
+        },
+    },
+    "dual_axis_anomaly": {
+        "id": "dual_axis_anomaly",
+        "name": "Metric + Anomaly Score",
+        "description": "Compare metric vs anomaly detection signal on dual axes",
+        "icon": "bi-graph-up-arrow",
+        "query_shape": "Columns: time, metric, anomaly_score",
+        "sample_sql": (
+            "SELECT\n"
+            "  toStartOfMinute(Timestamp) AS time,\n"
+            "  avg(Duration) AS metric,\n"
+            "  max(AnomalyScore) AS anomaly_score\n"
+            "FROM otel_traces_with_anomalies\n"
+            "GROUP BY time\n"
+            "ORDER BY time"
+        ),
+        "drilldown": {
+            "target": "logs",
+            "label": "Open source logs",
+            "bucket_seconds": 60,
+            "time_axis": "x",
+            "extra": {"analyze": "1", "stats": "1"},
+        },
+        "min_columns": 3,
+        "max_columns": 3,
+        "column_roles": {"time": 0, "metric": 1, "anomaly_score": 2},
+        "echarts_option_template": {
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": ["Metric", "Anomaly Score"], "bottom": 0},
+            "xAxis": {"type": "time", "data": "{{time}}"},
+            "yAxis": [
+                {
+                    "type": "value",
+                    "name": "Metric",
+                    "position": "left",
+                    "axisLine": {"lineStyle": {"color": "#0d6efd"}},
+                },
+                {
+                    "type": "value",
+                    "name": "Anomaly Score",
+                    "position": "right",
+                    "axisLine": {"lineStyle": {"color": "#dc3545"}},
+                },
+            ],
+            "grid": {"left": "3%", "right": "4%", "bottom": "15%", "containLabel": True},
+            "series": [
+                {
+                    "name": "Metric",
+                    "type": "line",
+                    "data": "{{metric}}",
+                    "yAxisIndex": 0,
+                    "lineStyle": {"color": "#0d6efd"},
+                    "symbol": "none",
+                },
+                {
+                    "name": "Anomaly Score",
+                    "type": "bar",
+                    "data": "{{anomaly_score}}",
+                    "yAxisIndex": 1,
+                    "itemStyle": {"color": "rgba(220, 53, 69, 0.5)"},
+                },
+            ],
+        },
+    },
+    "gauge_kpi": {
+        "id": "gauge_kpi",
+        "name": "KPI Gauge",
+        "description": "Single-value gauge for KPI monitoring (SLA %, uptime %)",
+        "icon": "bi-speedometer",
+        "query_shape": "Columns: single numeric value",
+        "sample_sql": (
+            "SELECT\n"
+            "  round(100.0 * countIf(StatusCode = 'STATUS_CODE_OK') / count(), 2) AS value\n"
+            "FROM otel_traces\n"
+            "WHERE Timestamp > now() - interval 1 hour"
+        ),
+        "drilldown": {
+            "target": "traces",
+            "label": "Open source traces",
+        },
+        "min_columns": 1,
+        "max_columns": 1,
+        "column_roles": {"value": 0},
+        "echarts_option_template": {
+            "series": [
+                {
+                    "type": "gauge",
+                    "progress": {"itemStyle": {"color": "#0d6efd"}},
+                    "axisLine": {
+                        "lineStyle": {
+                            "color": [[0.3, "#dc3545"], [0.7, "#ffc107"], [1, "#28a745"]],
+                            "width": 30,
+                        }
+                    },
+                    "splitLine": {"distance": 8},
+                    "axisTick": {"distance": 8},
+                    "axisLabel": {"color": "#adb5bd"},
+                    "detail": {"valueAnimation": True, "formatter": "{value}%", "color": "#adb5bd"},
+                    "data": [{"value": "{{value_first}}", "name": "Current"}],
+                    "min": 0,
+                    "max": 100,
+                }
+            ]
+        },
+    },
+}
+
+_QUERY_DENY_PATTERN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|RENAME|ATTACH|DETACH|GRANT|REVOKE)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_chart_query(query: str) -> str | None:
+    """Return an error message if the query is not a safe SELECT, otherwise None."""
+    stripped = query.strip()
+    if not stripped:
+        return "Query cannot be empty"
+    if not stripped.upper().startswith("SELECT"):
+        return "Only SELECT queries are allowed"
+    if _QUERY_DENY_PATTERN.search(stripped):
+        return "Query contains a disallowed keyword"
+    return None
+
+
+def _public_dashboard_query_error(exc: Exception) -> str:
+    """Extract a concise, user-safe error message from a database exception."""
+    raw = str(exc).strip()
+    message = raw.splitlines()[0].strip()
+    message = re.sub(r"^Code:\s*\d+\.\s*DB::Exception:\s*", "", message)
+    message = re.sub(r"^DB::Exception:\s*", "", message)
+    message = message.split(": while executing function", 1)[0].strip()
+    message = message.split(". Stack trace", 1)[0].strip()
+    if not message:
+        return "Query execution failed"
+    if (
+        any(code in raw for code in ("NO_COMMON_TYPE", "TYPE_MISMATCH"))
+        and "Check casts and column types." not in message
+    ):
+        message = f"{message}. Check casts and column types."
+    if len(message) > 280:
+        message = message[:277].rstrip() + "..."
+    return message
+
+
+def _deep_substitute(obj: object, bindings: dict) -> object:
+    """Recursively substitute {{key}} placeholders in a JSON object."""
+    if isinstance(obj, dict):
+        return {k: _deep_substitute(v, bindings) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_deep_substitute(item, bindings) for item in obj]
+    if isinstance(obj, str):
+        # Replace {{key}} with binding value
+        for key, value in bindings.items():
+            placeholder = f"{{{{{key}}}}}"
+            if placeholder in obj:
+                return value if value is not None else obj
+        return obj
+    return obj
+
+
+def _extract_bindings(template: dict, columns: list[str], rows: list) -> dict:  # type: ignore
+    """Extract data bindings from query results based on column roles."""
+    column_roles = template.get("column_roles", {})
+    bindings: dict[str, object] = {}
+
+    # Basic extraction: for each role, get the column data
+    for role, col_idx_raw in column_roles.items():
+        col_idx = int(col_idx_raw) if isinstance(col_idx_raw, (int, float)) else 0
+        if col_idx < len(columns):
+            values = [row[col_idx] if isinstance(row, (list, tuple)) else row.get(columns[col_idx]) for row in rows]
+            bindings[role] = values
+
+    # Special bindings for common patterns
+    if "time" in bindings:
+        bindings["time"] = bindings["time"]
+
+    # For heatmap: extract unique X and Y, build matrix
+    if "x_category" in bindings and "y_category" in bindings and "value" in bindings:
+        x_vals = bindings["x_category"]
+        y_vals = bindings["y_category"]
+        v_vals = bindings["value"]
+        if isinstance(x_vals, list) and isinstance(y_vals, list) and isinstance(v_vals, list):
+            x_unique = sorted(set(x_vals))
+            y_unique = sorted(set(y_vals))
+            bindings["x_unique_values"] = x_unique
+            bindings["y_unique_values"] = y_unique
+
+            # Build heatmap matrix: row[x_idx][y_idx] = value
+            heatmap_data = []
+            for i, x_val in enumerate(x_unique):
+                for j, y_val in enumerate(y_unique):
+                    # Find row where x_category == x_val and y_category == y_val
+                    for x, y, val in zip(x_vals, y_vals, v_vals):
+                        if x == x_val and y == y_val:
+                            heatmap_data.append([i, j, val])
+                            break
+            bindings["heatmap_data"] = heatmap_data
+            v_nums = [v for v in v_vals if isinstance(v, (int, float))]
+            bindings["value_min"] = min(v_nums) if v_nums else 0
+            bindings["value_max"] = max(v_nums) if v_nums else 1
+
+    # For box plot: build [min, q1, median, q3, max] array
+    if "min" in bindings and "max" in bindings:
+        min_vals = bindings["min"]
+        q1_vals = bindings["q1"]
+        med_vals = bindings["median"]
+        q3_vals = bindings["q3"]
+        max_vals = bindings["max"]
+        if all(isinstance(v, list) for v in [min_vals, q1_vals, med_vals, q3_vals, max_vals]):
+            boxplot_data = [
+                [_v[0], _v[1], _v[2], _v[3], _v[4]]  # type: ignore
+                for _v in zip(min_vals, q1_vals, med_vals, q3_vals, max_vals)  # type: ignore
+            ]
+            bindings["boxplot_data"] = boxplot_data
+            bindings["dimension_values"] = bindings.get("dimension", [])
+
+    # For gauge: get first value
+    if "value" in bindings and isinstance(bindings["value"], list) and bindings["value"]:
+        v_list = bindings["value"]
+        if isinstance(v_list, list) and v_list:
+            bindings["value_first"] = v_list[0]
+
+    return bindings  # type: ignore
+
+
+def _format_drilldown_time(value: object) -> str:
+    """Return a canonical ISO-8601 UTC timestamp string for drilldown URLs."""
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        normalized = _normalize_ch_timestamp(raw)
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return raw
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _attach_drilldown_metadata(template: dict, bindings: dict[str, object], option: dict) -> dict:
+    """Annotate rendered series data with canonical drilldown metadata."""
+    drilldown = template.get("drilldown")
+    if not isinstance(drilldown, dict):
+        return option
+
+    series = option.get("series")
+    if not isinstance(series, list):
+        return option
+
+    template_id = str(template.get("id", ""))
+    bucket_seconds = drilldown.get("bucket_seconds")
+
+    if template_id in {"time_series_percentiles", "dual_axis_anomaly"}:
+        time_values = bindings.get("time")
+        if isinstance(time_values, list):
+            for series_entry in series:
+                if not isinstance(series_entry, dict):
+                    continue
+                data = series_entry.get("data")
+                if not isinstance(data, list) or len(data) != len(time_values):
+                    continue
+                series_entry["data"] = [
+                    {
+                        "value": value,
+                        "drilldown": {
+                            "from_ts": _format_drilldown_time(time_values[idx]),
+                            "window_s": bucket_seconds,
+                        },
+                    }
+                    for idx, value in enumerate(data)
+                ]
+        return option
+
+    if template_id == "heatmap" and series:
+        x_unique = bindings.get("x_unique_values")
+        y_unique = bindings.get("y_unique_values")
+        first_series = series[0]
+        if isinstance(first_series, dict) and isinstance(x_unique, list) and isinstance(y_unique, list):
+            data = first_series.get("data")
+            if isinstance(data, list):
+                drilldown_data = []
+                for item in data:
+                    if not (isinstance(item, list) and len(item) >= 3):
+                        drilldown_data.append(item)
+                        continue
+                    x_idx = int(item[0])
+                    y_idx = int(item[1])
+                    from_value = y_unique[y_idx] if 0 <= y_idx < len(y_unique) else ""
+                    service_value = x_unique[x_idx] if 0 <= x_idx < len(x_unique) else ""
+                    drilldown_data.append(
+                        {
+                            "value": item,
+                            "drilldown": {
+                                "from_ts": _format_drilldown_time(from_value),
+                                "window_s": bucket_seconds,
+                                "service": service_value,
+                            },
+                        }
+                    )
+                first_series["data"] = drilldown_data
+        return option
+
+    return option
+
+
+def _render_chart_from_template(template_id: str, columns: list[str], rows: list) -> dict:  # type: ignore
+    """
+    Render chart option by substituting query results into template.
+
+    Raises ValueError if template not found or columns don't match.
+    """
+    template = CHART_TEMPLATES.get(template_id)
+    if not template:
+        raise ValueError(f"Unknown template: {template_id}")
+
+    if not rows:
+        return {"series": [], "xAxis": {}, "yAxis": {}}
+
+    # Validate column count
+    min_cols_raw = template.get("min_columns", 0)
+    min_cols = int(min_cols_raw) if isinstance(min_cols_raw, (int, float)) else 0
+    max_cols_raw = template.get("max_columns")
+    max_cols: int | None = int(max_cols_raw) if isinstance(max_cols_raw, (int, float)) else None
+    if len(columns) < min_cols:
+        raise ValueError(f"Template {template_id} requires at least {min_cols} columns, got {len(columns)}")
+    if max_cols and len(columns) > max_cols:
+        raise ValueError(f"Template {template_id} accepts maximum {max_cols} columns, got {len(columns)}")
+
+    # Extract bindings
+    bindings = _extract_bindings(template, columns, rows)
+
+    # Substitute into template and add dark theme styling
+    option = _deep_substitute(template["echarts_option_template"], bindings)
+    if isinstance(option, dict):
+        option = _attach_drilldown_metadata(template, bindings, option)
+        option.setdefault("backgroundColor", "transparent")
+        option.setdefault("textStyle", {"color": "#adb5bd"})
+    return option  # type: ignore
+
+
+def _get_dashboards(db: ChDbConnection) -> list[dict]:
+    rows = db.execute(
+        "SELECT Id, Name, Description FROM sobs_dashboards FINAL WHERE IsDeleted = 0 ORDER BY Name"
+    ).fetchall()
+    return [{"id": str(r["Id"]), "name": str(r["Name"]), "description": str(r["Description"])} for r in rows]
+
+
+def _get_dashboard(db: ChDbConnection, dashboard_id: str) -> dict | None:
+    row = db.execute(
+        "SELECT Id, Name, Description FROM sobs_dashboards FINAL WHERE IsDeleted = 0 AND Id = ?",
+        [dashboard_id],
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": str(row["Id"]), "name": str(row["Name"]), "description": str(row["Description"])}
+
+
+def _get_charts(db: ChDbConnection, dashboard_id: str) -> list[dict]:
+    rows = db.execute(
+        "SELECT Id, Title, ChartType, Query, OptionsJson, Position "
+        "FROM sobs_chart_configs FINAL WHERE IsDeleted = 0 AND DashboardId = ? "
+        "ORDER BY Position, Id",
+        [dashboard_id],
+    ).fetchall()
+    return [
+        {
+            "id": str(r["Id"]),
+            "title": str(r["Title"]),
+            "chart_type": str(r["ChartType"]),
+            "query": str(r["Query"]),
+            "options_json": str(r["OptionsJson"]),
+            "position": int(r["Position"]),
+        }
+        for r in rows
+    ]
+
+
+@app.route("/dashboards")
+@require_basic_auth
+async def list_dashboards():
+    db = get_db()
+    dashboards = _get_dashboards(db)
+    return await render_template("custom_dashboards.html", dashboards=dashboards)
+
+
+@app.route("/dashboards/new", methods=["GET"])
+@require_basic_auth
+async def new_dashboard_form():
+    return await render_template("custom_dashboards.html", dashboards=[], show_new_form=True)
+
+
+@app.route("/dashboards", methods=["POST"])
+@require_basic_auth
+async def create_dashboard():
+    form = await request.form
+    name = (form.get("name") or "").strip()
+    description = (form.get("description") or "").strip()
+    if not name:
+        await flash("Dashboard name is required", "warning")
+        return redirect(url_for("list_dashboards"))
+    dashboard_id = str(uuid.uuid4())
+    version = int(time.time() * 1000)
+    db = get_db()
+    _insert_rows_json_each_row(
+        db,
+        "sobs_dashboards",
+        [{"Id": dashboard_id, "Name": name, "Description": description, "IsDeleted": 0, "Version": version}],
+    )
+    return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+
+
+@app.route("/dashboards/<dashboard_id>")
+@require_basic_auth
+async def view_custom_dashboard(dashboard_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    charts = _get_charts(db, dashboard_id)
+    # Convert chart_type to template metadata for frontend
+    templates = [
+        {
+            "id": tid,
+            "name": t["name"],
+            "description": t["description"],
+            "icon": t["icon"],
+            "query_shape": t.get("query_shape", ""),
+            "sample_sql": t.get("sample_sql", ""),
+            "drilldown": t.get("drilldown"),
+        }
+        for tid, t in sorted(CHART_TEMPLATES.items())
+    ]
+    return await render_template(
+        "custom_dashboard_view.html",
+        dashboard=dashboard,
+        charts=charts,
+        templates=templates,
+    )
+
+
+@app.route("/dashboards/<dashboard_id>/delete", methods=["POST"])
+@require_basic_auth
+async def delete_dashboard(dashboard_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    version = int(time.time() * 1000)
+    # Soft-delete dashboard
+    _insert_rows_json_each_row(
+        db,
+        "sobs_dashboards",
+        [
+            {
+                "Id": dashboard_id,
+                "Name": dashboard["name"],
+                "Description": dashboard["description"],
+                "IsDeleted": 1,
+                "Version": version,
+            }
+        ],
+    )
+    # Soft-delete all charts in this dashboard
+    charts = _get_charts(db, dashboard_id)
+    if charts:
+        tombstones = [
+            {
+                "Id": c["id"],
+                "DashboardId": dashboard_id,
+                "Title": c["title"],
+                "ChartType": c["chart_type"],
+                "Query": c["query"],
+                "OptionsJson": c["options_json"],
+                "Position": c["position"],
+                "IsDeleted": 1,
+                "Version": version,
+            }
+            for c in charts
+        ]
+        _insert_rows_json_each_row(db, "sobs_chart_configs", tombstones)
+    await flash(f"Dashboard '{dashboard['name']}' deleted", "success")
+    return redirect(url_for("list_dashboards"))
+
+
+@app.route("/dashboards/<dashboard_id>/charts", methods=["POST"])
+@require_basic_auth
+async def add_chart(dashboard_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    form = await request.form
+    title = (form.get("title") or "").strip()
+    template_id = (form.get("template_id") or "time_series_percentiles").strip()
+    query = (form.get("query") or "").strip()
+    if not title:
+        await flash("Chart title is required", "warning")
+        return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+    if template_id not in CHART_TEMPLATES:
+        template_id = "time_series_percentiles"
+    err = _validate_chart_query(query)
+    if err:
+        await flash(f"Invalid query: {err}", "warning")
+        return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+    existing = _get_charts(db, dashboard_id)
+    position = max((c["position"] for c in existing), default=-1) + 1
+    chart_id = str(uuid.uuid4())
+    version = int(time.time() * 1000)
+    _insert_rows_json_each_row(
+        db,
+        "sobs_chart_configs",
+        [
+            {
+                "Id": chart_id,
+                "DashboardId": dashboard_id,
+                "Title": title,
+                "ChartType": template_id,
+                "Query": query,
+                "OptionsJson": "{}",
+                "Position": position,
+                "IsDeleted": 0,
+                "Version": version,
+            }
+        ],
+    )
+    return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+
+
+@app.route("/dashboards/<dashboard_id>/charts/<chart_id>/delete", methods=["POST"])
+@require_basic_auth
+async def remove_chart(dashboard_id: str, chart_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    charts = _get_charts(db, dashboard_id)
+    chart = next((c for c in charts if c["id"] == chart_id), None)
+    if not chart:
+        await flash("Chart not found", "warning")
+        return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+    version = int(time.time() * 1000)
+    _insert_rows_json_each_row(
+        db,
+        "sobs_chart_configs",
+        [
+            {
+                "Id": chart_id,
+                "DashboardId": dashboard_id,
+                "Title": chart["title"],
+                "ChartType": chart["chart_type"],
+                "Query": chart["query"],
+                "OptionsJson": chart["options_json"],
+                "Position": chart["position"],
+                "IsDeleted": 1,
+                "Version": version,
+            }
+        ],
+    )
+    return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+
+
+@app.route("/api/dashboards/query", methods=["POST"])
+@require_basic_auth
+async def execute_chart_query():
+    """Execute a ClickHouse SELECT query and return raw results for eChart rendering."""
+    body = await request.get_json(silent=True) or {}
+    query = (body.get("query") or "").strip()
+    err = _validate_chart_query(query)
+    if err:
+        return jsonify({"error": err}), 400
+    # Inject a row limit to prevent runaway queries
+    if not re.search(r"\bLIMIT\b", query, re.IGNORECASE):
+        query = query.rstrip(";") + " LIMIT 1000"
+    db = get_db()
+    try:
+        result = db.execute(query)
+        rows = result.fetchall()
+        columns = list(rows[0].keys()) if rows else []
+        data = [[row[col] for col in columns] for row in rows]
+        return jsonify({"columns": columns, "rows": data})
+    except Exception as exc:
+        app.logger.exception("Chart query execution failed: %s", query)
+        return jsonify({"error": _public_dashboard_query_error(exc)}), 400
+
+
+@app.route("/api/dashboards/render", methods=["POST"])
+@require_basic_auth
+async def render_chart():
+    """Execute a query and render with a template to produce eCharts option."""
+    body = await request.get_json(silent=True) or {}
+    query = (body.get("query") or "").strip()
+    template_id = (body.get("template_id") or "time_series_percentiles").strip()
+
+    err = _validate_chart_query(query)
+    if err:
+        return jsonify({"error": err}), 400
+
+    if template_id not in CHART_TEMPLATES:
+        return jsonify({"error": f"Unknown template: {template_id}"}), 400
+
+    # Inject a row limit to prevent runaway queries
+    if not re.search(r"\bLIMIT\b", query, re.IGNORECASE):
+        query = query.rstrip(";") + " LIMIT 1000"
+
+    db = get_db()
+    try:
+        result = db.execute(query)
+        rows = result.fetchall()
+        columns = list(rows[0].keys()) if rows else []
+
+        # Convert to list of values for template rendering
+        data = [[row[col] for col in columns] for row in rows]
+
+        # Render using template
+        option = _render_chart_from_template(template_id, columns, data)
+        return jsonify({"option": option})
+    except ValueError as ve:
+        # Template column mismatch
+        return jsonify({"error": str(ve)}), 400
+    except Exception as exc:
+        app.logger.exception("Chart render failed: template=%s query=%s", template_id, query)
+        return jsonify({"error": _public_dashboard_query_error(exc)}), 400
 
 
 # ---------------------------------------------------------------------------

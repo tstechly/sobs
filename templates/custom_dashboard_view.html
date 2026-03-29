@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+{% block title %}{{ dashboard.name }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <nav aria-label="breadcrumb">
+      <ol class="breadcrumb mb-1">
+        <li class="breadcrumb-item"><a href="{{ url_for('list_dashboards') }}">Dashboards</a></li>
+        <li class="breadcrumb-item active">{{ dashboard.name }}</li>
+      </ol>
+    </nav>
+    <h4 class="fw-semibold mb-0">{{ dashboard.name }}</h4>
+    {% if dashboard.description %}
+    <p class="text-secondary small mb-0">{{ dashboard.description }}</p>
+    {% endif %}
+  </div>
+  <div class="d-flex gap-2">
+    <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addChartModal">
+      <i class="bi bi-plus-lg me-1"></i>Add Chart
+    </button>
+    <form method="post" action="{{ url_for('delete_dashboard', dashboard_id=dashboard.id) }}"
+          onsubmit="return confirm('Delete this dashboard and all its charts?')">
+      <button type="submit" class="btn btn-outline-danger btn-sm">
+        <i class="bi bi-trash me-1"></i>Delete
+      </button>
+    </form>
+  </div>
+</div>
+
+{% if charts %}
+<div class="row g-3" id="charts-container">
+  {% for chart in charts %}
+  <div class="col-lg-6" id="chart-card-{{ chart.id }}">
+    <div class="card border-secondary">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-bar-chart me-1 text-primary"></i>{{ chart.title }}</span>
+        <div class="d-flex gap-2 align-items-center">
+          <span class="badge bg-secondary text-capitalize">{{ chart.chart_type }}</span>
+          <form method="post"
+                action="{{ url_for('remove_chart', dashboard_id=dashboard.id, chart_id=chart.id) }}"
+                onsubmit="return confirm('Remove this chart?')">
+            <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1">
+              <i class="bi bi-x"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+      <div class="card-body p-2">
+        <div id="chart-{{ chart.id }}" style="height:300px;width:100%;"></div>
+        <div class="d-flex justify-content-between align-items-center gap-2 mt-2">
+          <div id="chart-hint-{{ chart.id }}" class="small text-secondary"></div>
+          <a id="chart-source-btn-{{ chart.id }}" class="btn btn-sm btn-outline-info d-none" href="#">
+            <i class="bi bi-box-arrow-up-right me-1"></i>Open Source View
+          </a>
+        </div>
+        <details class="mt-2">
+          <summary class="text-secondary small" style="cursor:pointer;">SQL Query</summary>
+          <pre class="small mt-1 p-2 bg-dark rounded text-secondary" style="max-height:120px;overflow:auto;">{{ chart.query }}</pre>
+        </details>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-5 text-secondary">
+  <i class="bi bi-bar-chart fs-1 d-block mb-3"></i>
+  <p class="mb-3">No charts yet. Add your first chart to this dashboard.</p>
+  <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addChartModal">
+    <i class="bi bi-plus-lg me-1"></i>Add Chart
+  </button>
+</div>
+{% endif %}
+
+<!-- Add Chart Modal -->
+<div class="modal fade" id="addChartModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <form method="post" action="{{ url_for('add_chart', dashboard_id=dashboard.id) }}">
+        <div class="modal-header">
+          <h5 class="modal-title">Add Chart</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Title <span class="text-danger">*</span></label>
+            <input type="text" name="title" class="form-control" placeholder="e.g. Request Latency" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Chart Template</label>
+            <select name="template_id" class="form-select" id="templateSelect">
+              {% for t in templates %}
+              <option value="{{ t.id }}" title="{{ t.description }}">
+                <i class="{{ t.icon }}"></i> {{ t.name }}
+              </option>
+              {% endfor %}
+            </select>
+            <div class="form-text" id="templateDesc"></div>
+            <div class="form-text mt-1" id="columnHint"></div>
+          </div>
+          <div class="mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <label class="form-label mb-0">Example SQL</label>
+              <button type="button" class="btn btn-sm btn-outline-secondary" id="useExampleBtn">
+                <i class="bi bi-arrow-down-square me-1"></i>Use Example
+              </button>
+            </div>
+            <pre id="templateExampleSql" class="small mt-1 p-2 bg-dark rounded text-secondary" style="max-height:160px;overflow:auto;white-space:pre-wrap;"></pre>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">
+              ClickHouse SQL Query <span class="text-danger">*</span>
+              <small class="text-secondary ms-1">(SELECT only · max 1000 rows)</small>
+            </label>
+            <textarea id="queryInput" name="query" class="form-control font-monospace" rows="6"
+                      placeholder="SELECT toStartOfMinute(Timestamp) AS time, avg(Duration) AS value, quantile(0.95)(Duration) AS p95, quantile(0.99)(Duration) AS p99 FROM otel_traces GROUP BY time ORDER BY time"
+                      required></textarea>
+          </div>
+          <div class="mb-3" id="queryPreviewArea" style="display:none;">
+            <label class="form-label">Query Preview</label>
+            <div id="queryPreviewMsg" class="text-secondary small mb-2"></div>
+            <div id="queryPreviewChart" style="height:250px;"></div>
+          </div>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="previewBtn">
+              <i class="bi bi-eye me-1"></i>Preview
+            </button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add Chart</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='echarts.min.js') }}"></script>
+<script>
+(function () {
+  'use strict';
+
+  var CHART_DATA = {{ charts | tojson }};
+  var TEMPLATES = {{ templates | tojson }};
+  var queryRenderUrl = {{ url_for('render_chart') | tojson }};
+  var templatesMap = {};
+  TEMPLATES.forEach(function (t) { templatesMap[t.id] = t; });
+  var sourceUrls = {
+    logs: {{ url_for('view_logs') | tojson }},
+    traces: {{ url_for('view_traces') | tojson }},
+    errors: {{ url_for('view_errors') | tojson }}
+  };
+
+  function axisData(option, axisName) {
+    var axis = option[axisName];
+    if (!axis) return [];
+    if (Array.isArray(axis)) {
+      return axis[0] && Array.isArray(axis[0].data) ? axis[0].data : [];
+    }
+    return Array.isArray(axis.data) ? axis.data : [];
+  }
+
+  function buildDrilldownUrl(drilldown, chartInstance, params) {
+    if (!drilldown || !sourceUrls[drilldown.target]) return null;
+
+    var url = new URL(sourceUrls[drilldown.target], window.location.origin);
+    var option = chartInstance.getOption();
+    var pointDrilldown = params && params.data && params.data.drilldown ? params.data.drilldown : null;
+
+    if (pointDrilldown) {
+      Object.keys(pointDrilldown).forEach(function (key) {
+        if (pointDrilldown[key] !== undefined && pointDrilldown[key] !== null && pointDrilldown[key] !== '') {
+          url.searchParams.set(key, String(pointDrilldown[key]));
+        }
+      });
+    }
+
+    function categoryValue(axisName, index) {
+      var data = axisData(option, axisName);
+      return data && data[index] !== undefined ? data[index] : '';
+    }
+
+    if (drilldown.time_axis && !url.searchParams.get('from_ts') && params) {
+      var fromValue = '';
+      if (params.componentSubType === 'heatmap' && Array.isArray(params.value)) {
+        fromValue = drilldown.time_axis === 'x' ? categoryValue('xAxis', params.value[0]) : categoryValue('yAxis', params.value[1]);
+      } else {
+        fromValue = params.name || '';
+      }
+      if (fromValue) {
+        url.searchParams.set('from_ts', String(fromValue));
+        if (drilldown.bucket_seconds) {
+          url.searchParams.set('window_s', String(drilldown.bucket_seconds));
+        }
+      }
+    }
+
+    if (!url.searchParams.get('service') && drilldown.service_axis && params && params.componentSubType === 'heatmap' && Array.isArray(params.value)) {
+      var serviceValue = drilldown.service_axis === 'x' ? categoryValue('xAxis', params.value[0]) : categoryValue('yAxis', params.value[1]);
+      if (serviceValue) {
+        url.searchParams.set('service', String(serviceValue));
+      }
+    }
+
+    if (drilldown.extra) {
+      Object.keys(drilldown.extra).forEach(function (key) {
+        url.searchParams.set(key, String(drilldown.extra[key]));
+      });
+    }
+
+    return url.toString();
+  }
+
+  function buildTemplateExample(t) {
+    if (!t) return '';
+    var parts = [];
+    if (t.query_shape) {
+      parts.push('Expected query shape: ' + t.query_shape);
+    }
+    if (t.drilldown) {
+      parts.push('Drilldown: ' + (t.drilldown.label || 'open source data') + '.');
+    }
+    return parts.join(' ');
+  }
+
+  /* ── Render existing charts ── */
+  function renderChart(chartCfg) {
+    var el = document.getElementById('chart-' + chartCfg.id);
+    var hintEl = document.getElementById('chart-hint-' + chartCfg.id);
+    var sourceBtn = document.getElementById('chart-source-btn-' + chartCfg.id);
+    if (!el) return;
+    var ec = echarts.init(el, 'dark');
+    ec.showLoading({ text: 'Loading…', color: '#0d6efd', textColor: '#adb5bd', maskColor: 'rgba(0,0,0,0.3)' });
+
+    // Use /api/dashboards/render to get full eCharts option with template
+    fetch(queryRenderUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: chartCfg.query, template_id: chartCfg.chart_type })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        ec.hideLoading();
+        if (data.error) {
+          ec.setOption({ title: { text: 'Error: ' + data.error, left: 'center', top: 'center', textStyle: { color: '#dc3545', fontSize: 12 } } });
+          if (hintEl) { hintEl.textContent = ''; }
+          return;
+        }
+        ec.setOption(data.option);
+
+        var template = templatesMap[chartCfg.chart_type];
+        var drilldown = template && template.drilldown;
+        if (drilldown) {
+          var baseSourceUrl = buildDrilldownUrl(drilldown, ec);
+          el.style.cursor = 'pointer';
+          if (hintEl) {
+            hintEl.textContent = 'Click chart data to ' + (drilldown.label || 'open source data') + '.';
+          }
+          if (sourceBtn && baseSourceUrl) {
+            sourceBtn.href = baseSourceUrl;
+            sourceBtn.classList.remove('d-none');
+            sourceBtn.title = drilldown.label || 'Open source data';
+          }
+          ec.on('click', function (params) {
+            var targetUrl = buildDrilldownUrl(drilldown, ec, params);
+            if (targetUrl && sourceBtn) {
+              sourceBtn.href = targetUrl;
+              sourceBtn.classList.remove('d-none');
+            }
+            if (targetUrl) {
+              window.location.assign(targetUrl);
+            }
+          });
+        } else {
+          el.style.cursor = 'default';
+          if (hintEl) {
+            hintEl.textContent = '';
+          }
+          if (sourceBtn) {
+            sourceBtn.classList.add('d-none');
+            sourceBtn.removeAttribute('href');
+          }
+        }
+      })
+      .catch(function (err) {
+        ec.hideLoading();
+        ec.setOption({ title: { text: 'Network error', left: 'center', top: 'center', textStyle: { color: '#dc3545' } } });
+      });
+
+    window.addEventListener('resize', function () { ec.resize(); });
+  }
+
+  CHART_DATA.forEach(renderChart);
+
+  /* ── Template selector: update description ── */
+  var templateSelect = document.getElementById('templateSelect');
+  var templateDesc = document.getElementById('templateDesc');
+  var columnHint = document.getElementById('columnHint');
+  var templateExampleSql = document.getElementById('templateExampleSql');
+  var useExampleBtn = document.getElementById('useExampleBtn');
+  var queryInput = document.getElementById('queryInput');
+
+  function updateTemplateInfo() {
+    var t = templatesMap[templateSelect.value];
+    if (!t) {
+      templateDesc.textContent = '';
+      columnHint.textContent = '';
+      templateExampleSql.textContent = '';
+      return;
+    }
+
+    templateDesc.textContent = t.description || '';
+    columnHint.textContent = buildTemplateExample(t);
+    templateExampleSql.textContent = t.sample_sql || '';
+    useExampleBtn.disabled = !t.sample_sql;
+  }
+  updateTemplateInfo();
+  templateSelect.addEventListener('change', updateTemplateInfo);
+  if (useExampleBtn) {
+    useExampleBtn.addEventListener('click', function () {
+      var t = templatesMap[templateSelect.value];
+      if (t && t.sample_sql && queryInput) {
+        queryInput.value = t.sample_sql;
+        queryInput.focus();
+      }
+    });
+  }
+
+  /* ── Preview in modal ── */
+  var previewBtn = document.getElementById('previewBtn');
+  var previewChartInst = null;
+  if (previewBtn) {
+    previewBtn.addEventListener('click', function () {
+      var modal = document.getElementById('addChartModal');
+      var query = modal.querySelector('[name="query"]').value.trim();
+      var templateId = modal.querySelector('[name="template_id"]').value;
+      var area = document.getElementById('queryPreviewArea');
+      var msg = document.getElementById('queryPreviewMsg');
+
+      if (!query) {
+        msg.textContent = 'Please enter a query';
+        area.style.display = 'block';
+        return;
+      }
+
+      area.style.display = 'block';
+      msg.textContent = 'Rendering…';
+      if (previewChartInst) { previewChartInst.dispose(); previewChartInst = null; }
+
+      fetch(queryRenderUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query, template_id: templateId })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.error) {
+            msg.textContent = 'Error: ' + data.error;
+            return;
+          }
+          msg.textContent = 'Preview ready';
+          var el = document.getElementById('queryPreviewChart');
+          previewChartInst = echarts.init(el, 'dark');
+          previewChartInst.setOption(data.option);
+        })
+        .catch(function (err) {
+          msg.textContent = 'Network error: ' + err;
+        });
+    });
+  }
+})();
+</script>
+{% endblock %}
