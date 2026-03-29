@@ -13,6 +13,8 @@
 - 🐛 **Error tracking** – with stack traces and one-click resolve
 - 🤖 **AI transparency** – record LLM prompts, responses and token usage
 - 🔍 **Search** – grep (regex) and SQL WHERE clause filtering on logs
+- 📊 **Query statistics** – collapsible logs analytics panel with query-scoped level/service distributions
+- 🧠 **Manual advanced log analysis** – on-demand message pattern clustering, keyword signals, and optimization hints
 - 📡 **Live tail** – SSE endpoint (`/tail`) for real-time streaming of logs and traces
 - ⚡ **Live logs mode** – optional in-page streaming on Logs with pause-on-scroll and queued event counter
 - 🎨 **Bootstrap 5 dark UI** – served locally, no CDN required
@@ -240,6 +242,21 @@ The Logs page includes a **Live mode** toggle (top-right) that consumes `/tail?s
 - If you scroll down, Live mode pauses rendering to avoid jumpy UX.
 - While paused, a `N new` button appears; click it (or scroll back to top) to flush queued events.
 - SQL WHERE mode disables Live mode to avoid mixed client/server filtering behavior.
+
+### Logs query analytics
+
+The Logs page includes a collapsible **Query Statistics** panel between filters and the table.
+
+- Statistics are **query scoped** (computed across all rows matching the current query filters), not page scoped.
+- Basic analytics include counts by severity level and top services.
+- Advanced analytics are **manual**: click **Run advanced analysis** to compute message intelligence for the current query.
+
+Advanced analysis outputs include:
+
+- repeated message pattern fingerprints
+- detected error families (for example, `TimeoutError`, `ConnectionRefusedError`)
+- top message keywords
+- actionable optimization hints based on severity mix, repetition, and timeout signals
 
 ## Kubernetes
 
