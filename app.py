@@ -691,6 +691,38 @@ def _stringify_attrs(values: dict | None) -> dict[str, str]:
     return out
 
 
+def _extract_messages_text(messages_str: str) -> str:
+    """Extract readable text from gen_ai.input.messages or gen_ai.output.messages JSON.
+
+    Accepts either a JSON array of message objects (OTel GenAI convention) or a plain
+    string and returns a human-readable representation for UI display.
+    """
+    if not messages_str:
+        return ""
+    try:
+        messages = json.loads(messages_str)
+        if isinstance(messages, list):
+            parts = []
+            for msg in messages:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # Content blocks (e.g. OpenAI vision API)
+                        content = " ".join(
+                            part.get("text", "") if isinstance(part, dict) else str(part)
+                            for part in content
+                        )
+                    if content:
+                        parts.append(f"[{role}] {content}" if role else str(content))
+                elif isinstance(msg, str):
+                    parts.append(msg)
+            return "\n".join(parts)
+        return messages_str
+    except (json.JSONDecodeError, TypeError):
+        return messages_str
+
+
 def _map_to_dict(value) -> dict:
     """Best-effort conversion of ClickHouse Map values to Python dicts."""
     if isinstance(value, dict):
@@ -1165,6 +1197,23 @@ async def ingest_traces():
                 "status": event.status,
             }
         )
+        # Also broadcast as an AI event when the span carries GenAI attributes
+        provider = event.attrs.get("gen_ai.provider.name") or event.attrs.get("gen_ai.system", "")
+        if provider:
+            await _sse_broadcast(
+                {
+                    "source": "ai",
+                    "ts": event.ts,
+                    "trace_id": event.trace_id,
+                    "span_id": event.span_id,
+                    "service": event.service,
+                    "provider": provider,
+                    "model": str(event.attrs.get("gen_ai.request.model", "")),
+                    "operation": str(event.attrs.get("gen_ai.operation.name", "")),
+                    "duration_ms": event.duration_ms,
+                    "status": event.status,
+                }
+            )
     count = len(span_events)
     return jsonify({"accepted": count}), 200
 
@@ -1290,20 +1339,37 @@ async def ingest_ai():
     payload = await request.get_json(force=True, silent=True) or {}
     ts = payload.get("timestamp", _now_iso())
     model = str(payload.get("model", ""))
-    operation = str(payload.get("operation", "chat"))
+    # Canonicalize operation: default to "chat" for chat completions
+    operation = str(payload.get("operation", "chat")) or "chat"
     duration_ms = float(payload.get("duration_ms", 0) or 0)
+    provider = str(payload.get("provider", ""))
+    service = str(payload.get("service", ""))
     span_name = f"{operation} {model}".strip()
-    span_attrs = {
+    span_attrs: dict = {
         "gen_ai.operation.name": operation,
-        "gen_ai.provider.name": str(payload.get("provider", "")),
+        "gen_ai.provider.name": provider,
         "gen_ai.request.model": model,
         "gen_ai.usage.input_tokens": int(payload.get("tokens_in", 0) or 0),
         "gen_ai.usage.output_tokens": int(payload.get("tokens_out", 0) or 0),
     }
+    # Standard OTel GenAI content attributes (primary)
+    if payload.get("input_messages") is not None:
+        raw = payload["input_messages"]
+        span_attrs["gen_ai.input.messages"] = (
+            raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        )
+    if payload.get("output_messages") is not None:
+        raw = payload["output_messages"]
+        span_attrs["gen_ai.output.messages"] = (
+            raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        )
+    # Legacy sobs fields (kept for backward-compat / UI fallback)
     if payload.get("prompt"):
-        span_attrs["sobs.gen_ai.prompt"] = str(payload.get("prompt"))
+        span_attrs["sobs.gen_ai.prompt"] = str(payload["prompt"])
     if payload.get("response"):
-        span_attrs["sobs.gen_ai.response"] = str(payload.get("response"))
+        span_attrs["sobs.gen_ai.response"] = str(payload["response"])
+    if payload.get("error_type"):
+        span_attrs["error.type"] = str(payload["error_type"])
     row = {
         "Timestamp": ts,
         "TraceId": str(payload.get("trace_id", "")),
@@ -1312,7 +1378,7 @@ async def ingest_ai():
         "TraceState": "",
         "SpanName": span_name,
         "SpanKind": "CLIENT",
-        "ServiceName": str(payload.get("service", "")),
+        "ServiceName": service,
         "ResourceAttributes": {},
         "ScopeName": "sobs-ai",
         "ScopeVersion": "",
@@ -1331,6 +1397,19 @@ async def ingest_ai():
     except Exception as exc:
         app.logger.exception("ai ingest write failed")
         return jsonify({"error": str(exc)}), 500
+    await _sse_broadcast(
+        {
+            "source": "ai",
+            "ts": ts,
+            "service": service,
+            "provider": provider,
+            "model": model,
+            "operation": operation,
+            "duration_ms": round(duration_ms, 1),
+            "tokens_in": span_attrs["gen_ai.usage.input_tokens"],
+            "tokens_out": span_attrs["gen_ai.usage.output_tokens"],
+        }
+    )
     return jsonify({"ok": True}), 200
 
 
@@ -1441,7 +1520,7 @@ async def dashboard():
         "spans": db.execute("SELECT COUNT(*) FROM otel_traces").fetchone()[0],
         "rum": db.execute("SELECT COUNT(*) FROM hyperdx_sessions").fetchone()[0],
         "ai": db.execute(
-            "SELECT COUNT(*) FROM otel_traces WHERE SpanAttributes['gen_ai.provider.name'] != ''"
+            "SELECT COUNT(*) FROM otel_traces WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
         ).fetchone()[0],
         "services": [
             r[0]
@@ -1488,7 +1567,7 @@ async def dashboard():
         "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) ti, "
         "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) to_ "
         "FROM otel_traces "
-        "WHERE SpanAttributes['gen_ai.provider.name'] != '' "
+        "WHERE SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '' "
         "GROUP BY model"
     ).fetchall()
     return await render_template(
@@ -1902,7 +1981,7 @@ async def view_ai():
     if model:
         conditions.append("SpanAttributes['gen_ai.request.model']=?")
         params.append(model)
-    conditions.append("SpanAttributes['gen_ai.provider.name'] != ''")
+    conditions.append("(SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')")
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
@@ -1916,10 +1995,16 @@ async def view_ai():
     for r in rows:
         attrs = _map_to_dict(r["SpanAttributes"])
         ts = str(r["Timestamp"])
-        provider = str(attrs.get("gen_ai.provider.name", ""))
+        # Coalesce provider: canonical gen_ai.provider.name with legacy gen_ai.system fallback
+        provider = str(attrs.get("gen_ai.provider.name") or attrs.get("gen_ai.system", ""))
         req_model = str(attrs.get("gen_ai.request.model", ""))
-        prompt = str(attrs.get("sobs.gen_ai.prompt", ""))
-        response = str(attrs.get("sobs.gen_ai.response", ""))
+        # Coalesce prompt/response: OTel standard fields first, sobs legacy fields as fallback
+        prompt = _extract_messages_text(str(attrs.get("gen_ai.input.messages", ""))) or str(
+            attrs.get("sobs.gen_ai.prompt", "")
+        )
+        response = _extract_messages_text(str(attrs.get("gen_ai.output.messages", ""))) or str(
+            attrs.get("sobs.gen_ai.response", "")
+        )
         tokens_in = int(float(attrs.get("gen_ai.usage.input_tokens", "0") or 0))
         tokens_out = int(float(attrs.get("gen_ai.usage.output_tokens", "0") or 0))
         err_type = str(attrs.get("error.type", ""))
@@ -1938,6 +2023,7 @@ async def view_ai():
                 "tokens_out": tokens_out,
                 "duration_ms": round(float(r["Duration"]) / 1_000_000, 1),
                 "trace_id": r["TraceId"],
+                "error_type": err_type,
             }
         )
 
@@ -1945,14 +2031,14 @@ async def view_ai():
         row[0]
         for row in db.execute(
             "SELECT DISTINCT ServiceName FROM otel_traces "
-            "WHERE SpanAttributes['gen_ai.provider.name'] != '' AND ServiceName!='' ORDER BY ServiceName"
+            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') AND ServiceName!='' ORDER BY ServiceName"
         ).fetchall()
     ]
     models = [
         row[0]
         for row in db.execute(
             "SELECT DISTINCT SpanAttributes['gen_ai.request.model'] AS model FROM otel_traces "
-            "WHERE SpanAttributes['gen_ai.provider.name'] != '' "
+            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
             "AND SpanAttributes['gen_ai.request.model'] != '' ORDER BY model"
         ).fetchall()
     ]
@@ -1963,7 +2049,7 @@ async def view_ai():
         "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) ti, "
         "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) to_, "
         "COUNT(*) cnt "
-        "FROM otel_traces WHERE SpanAttributes['gen_ai.provider.name'] != ''"
+        "FROM otel_traces WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
     ).fetchone()
 
     return await render_template(

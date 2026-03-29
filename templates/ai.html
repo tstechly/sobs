@@ -3,7 +3,26 @@
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-cpu me-2 text-success"></i>AI Transparency</h4>
-  <span class="text-secondary small">{{ total_calls }} calls · {{ total_tokens_in + total_tokens_out }} total tokens</span>
+  <div class="d-flex align-items-center gap-2">
+    <span class="text-secondary small">{{ total_calls }} calls · {{ total_tokens_in + total_tokens_out }} total tokens</span>
+    <button id="liveTailBtn" class="btn btn-sm btn-outline-success" onclick="toggleLiveTail()">
+      <i class="bi bi-broadcast me-1"></i>Live Tail
+    </button>
+  </div>
+</div>
+
+<!-- Live Tail Panel -->
+<div id="liveTailPanel" class="card border-success mb-3" style="display:none;">
+  <div class="card-header d-flex align-items-center justify-content-between py-2">
+    <span class="text-success small fw-semibold"><i class="bi bi-broadcast me-1"></i>Live AI Tail</span>
+    <div class="d-flex align-items-center gap-2">
+      <span id="liveTailStatus" class="badge bg-secondary">Connecting…</span>
+      <button class="btn btn-sm btn-outline-danger" onclick="stopLiveTail()">Stop</button>
+    </div>
+  </div>
+  <div id="liveTailFeed" class="card-body p-2" style="max-height:250px;overflow-y:auto;font-size:0.8rem;">
+    <div class="text-secondary text-center py-2">Waiting for AI events…</div>
+  </div>
 </div>
 
 <!-- Token summary -->
@@ -89,6 +108,9 @@
         <div class="d-flex gap-3 align-items-center w-100 me-2 flex-wrap">
           <span class="badge bg-success">{{ item.model }}</span>
           <span class="badge bg-info text-dark">{{ item.provider }}</span>
+          {% if item.error_type %}
+          <span class="badge bg-danger">{{ item.error_type }}</span>
+          {% endif %}
           <span class="small flex-grow-1 text-truncate text-secondary" style="max-width:300px;" title="{{ item.prompt }}">
             {{ item.prompt[:80] }}{% if item.prompt | length > 80 %}…{% endif %}
           </span>
@@ -110,11 +132,14 @@
             <div class="prompt-box">{{ item.response }}</div>
           </div>
         </div>
-        <div class="mt-2 d-flex gap-3 small text-secondary">
+        <div class="mt-2 d-flex gap-3 small text-secondary flex-wrap">
           <span><strong>Service:</strong> {{ item.service }}</span>
           <span><strong>Tokens in:</strong> {{ item.tokens_in }}</span>
           <span><strong>Tokens out:</strong> {{ item.tokens_out }}</span>
           <span><strong>Duration:</strong> {{ item.duration_ms }}ms</span>
+          {% if item.error_type %}
+          <span class="text-danger"><strong>Error:</strong> {{ item.error_type }}</span>
+          {% endif %}
           {% if item.trace_id %}
           <a href="{{ url_for('view_traces', trace_id=item.trace_id) }}" class="trace-link">
             Trace {{ item.trace_id[:12] }}…
@@ -175,6 +200,10 @@ def tracked_llm_call(prompt, model="gpt-4o", provider="openai"):
         "service": "my-app",
         "provider": provider,
         "model": model,
+        # Standard OTel GenAI content attributes (recommended)
+        "input_messages": [{"role": "user", "content": prompt}],
+        "output_messages": [{"role": "assistant", "content": response_text}],
+        # Legacy fields also accepted for backward compatibility
         "prompt": prompt,
         "response": response_text,
         "tokens_in": tokens_in,
@@ -183,4 +212,87 @@ def tracked_llm_call(prompt, model="gpt-4o", provider="openai"):
     })</code></pre>
   </div>
 </div>
+
+<script>
+var _liveTailEvt = null;
+
+function toggleLiveTail() {
+  var panel = document.getElementById('liveTailPanel');
+  if (panel.style.display === 'none') {
+    panel.style.display = '';
+    startLiveTail();
+  } else {
+    stopLiveTail();
+    panel.style.display = 'none';
+  }
+}
+
+function startLiveTail() {
+  stopLiveTail();
+  var status = document.getElementById('liveTailStatus');
+  status.className = 'badge bg-warning text-dark';
+  status.textContent = 'Connecting…';
+  _liveTailEvt = new EventSource('/tail?source=ai');
+  _liveTailEvt.onopen = function() {
+    status.className = 'badge bg-success';
+    status.textContent = 'Live';
+  };
+  _liveTailEvt.onerror = function() {
+    status.className = 'badge bg-danger';
+    status.textContent = 'Error';
+  };
+  _liveTailEvt.onmessage = function(e) {
+    try {
+      var ev = JSON.parse(e.data);
+      appendLiveTailEvent(ev);
+    } catch(err) {}
+  };
+}
+
+function stopLiveTail() {
+  if (_liveTailEvt) {
+    _liveTailEvt.close();
+    _liveTailEvt = null;
+    var status = document.getElementById('liveTailStatus');
+    if (status) {
+      status.className = 'badge bg-secondary';
+      status.textContent = 'Stopped';
+    }
+  }
+}
+
+function appendLiveTailEvent(ev) {
+  var feed = document.getElementById('liveTailFeed');
+  // Remove placeholder
+  var placeholder = feed.querySelector('.text-center');
+  if (placeholder) placeholder.remove();
+
+  var ts = ev.ts ? ev.ts.substring(0, 19) : '';
+  var provider = ev.provider || '';
+  var model = ev.model || '';
+  var svc = ev.service || '';
+  var dur = ev.duration_ms != null ? ev.duration_ms + 'ms' : '';
+  var tin = ev.tokens_in != null ? ev.tokens_in + '↑' : '';
+  var tout = ev.tokens_out != null ? ev.tokens_out + '↓' : '';
+
+  var row = document.createElement('div');
+  row.className = 'd-flex gap-2 align-items-center border-bottom border-secondary py-1 live-tail-row';
+  row.innerHTML =
+    '<span class="text-secondary">' + ts + '</span>' +
+    (provider ? '<span class="badge bg-info text-dark">' + escHtml(provider) + '</span>' : '') +
+    (model ? '<span class="badge bg-success">' + escHtml(model) + '</span>' : '') +
+    (svc ? '<span class="text-secondary">' + escHtml(svc) + '</span>' : '') +
+    (dur ? '<span class="text-secondary">' + escHtml(dur) + '</span>' : '') +
+    ((tin || tout) ? '<span class="text-warning">' + tin + ' ' + tout + '</span>' : '');
+
+  feed.insertBefore(row, feed.firstChild);
+  // Keep last 50 rows
+  var rows = feed.querySelectorAll('.live-tail-row');
+  if (rows.length > 50) rows[rows.length - 1].remove();
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
 {% endblock %}
