@@ -161,12 +161,27 @@ document.querySelectorAll('.resolve-btn').forEach(btn => {
 // AI Help: copy error details as markdown to clipboard (no network request)
 document.querySelectorAll('.ai-help-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
-    const errType = btn.dataset.errType || '';
-    const message = btn.dataset.errMessage || '';
-    const service = btn.dataset.errService || '';
-    const ts = btn.dataset.errTs || '';
+    const normalizeText = value => String(value || '').replace(/\r\n?/g, '\n').trim();
+    const toSingleLine = value => normalizeText(value).replace(/\n+/g, ' ');
+    const escapeInlineMd = value => toSingleLine(value).replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+    const fenceFor = value => {
+      const content = normalizeText(value);
+      const runs = content.match(/`+/g) || [];
+      let longestRun = 0;
+      runs.forEach(run => {
+        if (run.length > longestRun) {
+          longestRun = run.length;
+        }
+      });
+      return '`'.repeat(Math.max(3, longestRun + 1));
+    };
+
+    const errType = escapeInlineMd(btn.dataset.errType);
+    const message = escapeInlineMd(btn.dataset.errMessage);
+    const service = escapeInlineMd(btn.dataset.errService);
+    const ts = escapeInlineMd(btn.dataset.errTs);
     const stackEl = document.getElementById('stack-' + btn.dataset.errId);
-    const stack = stackEl ? stackEl.innerText.trim() : '';
+    const stack = stackEl ? normalizeText(stackEl.innerText) : '';
 
     const lines = [
       '## Error Investigation Request',
@@ -177,7 +192,8 @@ document.querySelectorAll('.ai-help-btn').forEach(btn => {
       '**Message:** ' + message,
     ];
     if (stack) {
-      lines.push('', '**Stack Trace:**', '```', stack, '```');
+      const fence = fenceFor(stack);
+      lines.push('', '**Stack Trace:**', fence, stack, fence);
     }
     lines.push('', '---', 'Please analyze this issue and suggest possible causes and next steps.');
 
