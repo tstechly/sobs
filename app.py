@@ -1101,7 +1101,14 @@ async def ingest_logs():
         return jsonify({"error": str(exc)}), 500
     for event in events:
         await _sse_broadcast(
-            {"source": "logs", "ts": event.ts, "level": event.level, "service": event.service, "body": event.body, "trace_id": event.trace_id}
+            {
+                "source": "logs",
+                "ts": event.ts,
+                "level": event.level,
+                "service": event.service,
+                "body": event.body,
+                "trace_id": event.trace_id,
+            }
         )
     count = len(events)
     return jsonify({"accepted": count}), 200

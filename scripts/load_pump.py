@@ -3,14 +3,17 @@ Load pump for SOBS — fires mixed OTEL/RUM/AI/Error requests against a running 
 
 Usage:
     python scripts/load_pump.py [--base URL] [--total N] [--workers N]
+    python scripts/load_pump.py [--mode realistic --rps 4 --jitter-ms 250]
 
 Defaults:
     --base      http://127.0.0.1:4317
     --total     420
     --workers   28
+    --mode      load
 """
 
 import argparse
+import random
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +27,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base", default="http://127.0.0.1:4317", help="Base URL of the SOBS instance")
     p.add_argument("--total", type=int, default=420, help="Total number of requests to send")
     p.add_argument("--workers", type=int, default=28, help="Number of concurrent sender threads")
+    p.add_argument(
+        "--mode",
+        choices=["load", "realistic"],
+        default="load",
+        help="load: saturate workers, realistic: pace submissions to approximate user traffic",
+    )
+    p.add_argument(
+        "--rps",
+        type=float,
+        default=4.0,
+        help="Target requests/second in realistic mode",
+    )
+    p.add_argument(
+        "--jitter-ms",
+        type=float,
+        default=200.0,
+        help="Random pacing jitter in milliseconds (+/-) around the realistic interval",
+    )
     return p.parse_args()
 
 
@@ -31,6 +52,9 @@ args = parse_args()
 BASE = args.base
 TOTAL = args.total
 WORKERS = args.workers
+MODE = args.mode
+RPS = args.rps
+JITTER_MS = args.jitter_ms
 
 
 def send(i: int) -> tuple[str, int]:
@@ -150,14 +174,24 @@ def send(i: int) -> tuple[str, int]:
 
 
 if __name__ == "__main__":
-    print(f"base={BASE}  total={TOTAL}  workers={WORKERS}")
+    print(f"base={BASE}  total={TOTAL}  workers={WORKERS}  mode={MODE}" f"  rps={RPS}  jitter_ms={JITTER_MS}")
     start = time.time()
     endpoint_counts: Counter[str] = Counter()
     status_counts: Counter[int] = Counter()
     errors: list[str] = []
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futures = [ex.submit(send, i) for i in range(1, TOTAL + 1)]
+        futures = []
+        if MODE == "realistic":
+            interval_sec = 1.0 / max(RPS, 0.001)
+            jitter_sec = max(0.0, JITTER_MS) / 1000.0
+            for i in range(1, TOTAL + 1):
+                futures.append(ex.submit(send, i))
+                # Pace submissions to mimic steadier real-world traffic.
+                sleep_sec = max(0.0, interval_sec + random.uniform(-jitter_sec, jitter_sec))
+                time.sleep(sleep_sec)
+        else:
+            futures = [ex.submit(send, i) for i in range(1, TOTAL + 1)]
         for fut in as_completed(futures):
             try:
                 endpoint, status = fut.result()

@@ -14,6 +14,7 @@
 - 🤖 **AI transparency** – record LLM prompts, responses and token usage
 - 🔍 **Search** – grep (regex) and SQL WHERE clause filtering on logs
 - 📡 **Live tail** – SSE endpoint (`/tail`) for real-time streaming of logs and traces
+- ⚡ **Live logs mode** – optional in-page streaming on Logs with pause-on-scroll and queued event counter
 - 🎨 **Bootstrap 5 dark UI** – served locally, no CDN required
 - 🐳 **Docker ready** – Dockerfile + docker-compose + Kubernetes manifests
 
@@ -231,6 +232,15 @@ source.onmessage = (e) => {
 };
 ```
 
+### Logs page Live mode
+
+The Logs page includes a **Live mode** toggle (top-right) that consumes `/tail?source=logs` and appends new rows in real time.
+
+- New rows are prepended at the top and briefly highlighted.
+- If you scroll down, Live mode pauses rendering to avoid jumpy UX.
+- While paused, a `N new` button appears; click it (or scroll back to top) to flush queued events.
+- SQL WHERE mode disables Live mode to avoid mixed client/server filtering behavior.
+
 ## Kubernetes
 
 Deploy as a standalone pod:
@@ -263,6 +273,24 @@ pytest tests/
 # Or target a custom endpoint
 ./scripts/benchmark.sh http://127.0.0.1:44318
 ```
+
+## Traffic Pump (including realistic mode)
+
+Use `scripts/load_pump.py` directly when you want to drive specific event rates.
+
+```bash
+# High-throughput load mode (default)
+python scripts/load_pump.py --base http://127.0.0.1:4317 --total 420 --workers 28
+
+# Realistic paced mode for UI demos
+python scripts/load_pump.py --base http://127.0.0.1:4317 --mode realistic --rps 3 --jitter-ms 250 --total 180 --workers 8
+```
+
+Parameters:
+
+- `--mode load|realistic`
+- `--rps` target requests/sec in realistic mode
+- `--jitter-ms` random +/- milliseconds around the realistic interval
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and quality checks.
 

@@ -1273,9 +1273,7 @@ class TestSSETail:
         monkeypatch.setattr(app_module, "_check_external_auth", lambda _auth: True)
         app.config["TESTING"] = True
         async with app.test_client() as c:
-            status, _ = await self._get_streaming_response(
-                c, "/tail", headers={"Authorization": "Bearer valid-token"}
-            )
+            status, _ = await self._get_streaming_response(c, "/tail", headers={"Authorization": "Bearer valid-token"})
         assert status == 200
 
     async def test_tail_accessible_without_auth_in_none_mode(self, client):
@@ -1411,8 +1409,6 @@ class TestSSETail:
 
     async def test_tail_source_and_service_filtering_logic(self):
         """Filtering by source and service should work as expected by the generator logic."""
-        import app as app_module
-
         all_events = [
             {"source": "logs", "ts": "t1", "level": "INFO", "service": "myapp", "body": "a"},
             {"source": "traces", "ts": "t2", "name": "span", "service": "myapp"},
