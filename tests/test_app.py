@@ -948,6 +948,296 @@ class TestUIPages:
         r = await client.get("/logs?sort_by=ServiceName&sort_dir=desc")
         assert r.status_code == 200
 
+    async def test_logs_stats_panel_visible(self, client):
+        """Query statistics panel should appear when logs exist."""
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "stats-svc"}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                        "severityText": "ERROR",
+                                        "body": {"stringValue": "stats panel test error"},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        r = await client.get("/logs")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"Query Statistics" in data
+        assert b"By Level" in data
+        assert b"By Service" in data
+        assert b'id="statsPanel" class="accordion-collapse collapse"' in data
+        assert b"Snapshot:" in data
+
+    async def test_logs_stats_panel_sql_mode(self, client):
+        """Query statistics panel should appear when using SQL WHERE filter."""
+        r = await client.get("/logs?sql=SeverityText%3D%27ERROR%27")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"Query Statistics" in data
+
+    async def test_logs_stats_chips_are_clickable_filters(self, client):
+        """Stats chips should be drill-down links for level and service filters."""
+        now_ns = str(int(time.time() * 1_000_000_000))
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "chip-svc"}}]},
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": now_ns,
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "chip level test"},
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/logs", json=payload)
+
+        r = await client.get("/logs?stats=1")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"level=ERROR" in data
+        assert b"service=chip-svc" in data
+
+    async def test_logs_stats_chip_click_exits_sql_mode(self, client):
+        """Chip links should clear SQL mode to apply deterministic standard filters."""
+        r = await client.get("/logs?sql=SeverityText%3D%27ERROR%27&stats=1")
+        assert r.status_code == 200
+        data = await r.get_data()
+        # Chip links intentionally include sql='' to exit SQL mode.
+        assert b"sql=&" in data
+
+    async def test_logs_stats_are_query_scoped_not_page_scoped(self, client):
+        """Stats should summarize full query result set, not just current page."""
+        now_ns = str(int(time.time() * 1_000_000_000))
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "query-scope"}}]},
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": now_ns,
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "query scoped error A"},
+                                },
+                                {
+                                    "timeUnixNano": str(int(now_ns) + 1),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "query scoped error B"},
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/logs", json=payload)
+
+        r = await client.get("/logs?service=query-scope&limit=1&offset=0")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"2 total records" in data
+        assert b"ERROR: 2" in data
+
+    async def test_logs_stats_respect_grep_query_scope(self, client):
+        """When grep is used, stats should reflect all grep-matching rows across pages."""
+        now_ns = int(time.time() * 1_000_000_000)
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "grep-scope"}}]},
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": str(now_ns),
+                                    "severityText": "WARN",
+                                    "body": {"stringValue": "cache timeout after 5000 ms"},
+                                },
+                                {
+                                    "timeUnixNano": str(now_ns + 1),
+                                    "severityText": "WARN",
+                                    "body": {"stringValue": "cache timeout after 7000 ms"},
+                                },
+                                {
+                                    "timeUnixNano": str(now_ns + 2),
+                                    "severityText": "INFO",
+                                    "body": {"stringValue": "health check passed"},
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/logs", json=payload)
+
+        r = await client.get("/logs?service=grep-scope&q=cache%20timeout&limit=1&offset=0")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"2 total records" in data
+        assert b"WARN: 2" in data
+
+    async def test_logs_sql_and_grep_query_scope(self, client):
+        """SQL WHERE + grep should both participate in query-scoped stats and totals."""
+        now_ns = int(time.time() * 1_000_000_000)
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "sqlgrep"}}]},
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": str(now_ns),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "queue backlog marker-xyz"},
+                                },
+                                {
+                                    "timeUnixNano": str(now_ns + 1),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "queue backlog marker-xyz"},
+                                },
+                                {
+                                    "timeUnixNano": str(now_ns + 2),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "queue backlog without marker"},
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/logs", json=payload)
+
+        r = await client.get("/logs?sql=service%3D%27sqlgrep%27&q=marker-xyz&limit=1&offset=0")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"2 total records" in data
+        assert b"ERROR: 2" in data
+
+    async def test_logs_invalid_regex_query_returns_error_message(self, client):
+        """Invalid regex should return an error message and not raise."""
+        r = await client.get("/logs?q=([)")
+        assert r.status_code == 200
+        assert b"Regex error" in await r.get_data()
+
+    async def test_logs_advanced_analysis_manual_trigger(self, client):
+        """Advanced message analysis should render only after manual trigger."""
+        now_ns = int(time.time() * 1_000_000_000)
+        payload = {
+            "resourceLogs": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "adv-scope"}}]},
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "timeUnixNano": str(now_ns),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "DatabaseTimeoutError while calling postgres"},
+                                },
+                                {
+                                    "timeUnixNano": str(now_ns + 1),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "DatabaseTimeoutError while calling postgres"},
+                                },
+                                {
+                                    "timeUnixNano": str(now_ns + 2),
+                                    "severityText": "ERROR",
+                                    "body": {"stringValue": "DatabaseTimeoutError while calling postgres"},
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/logs", json=payload)
+
+        baseline = await client.get("/logs?service=adv-scope")
+        assert baseline.status_code == 200
+        assert b"Top Message Patterns" not in await baseline.get_data()
+
+        analyzed = await client.get("/logs?service=adv-scope&analyze=1&stats=1&stats_updated=1")
+        assert analyzed.status_code == 200
+        analyzed_data = await analyzed.get_data()
+        assert b"Top Message Patterns" in analyzed_data
+        assert b"Error Families" in analyzed_data
+        assert b"Top Keywords" in analyzed_data
+        assert b"Optimization Hints" in analyzed_data
+        assert b'id="statsPanel" class="accordion-collapse collapse show"' in analyzed_data
+        assert b"stats-panel-updated" in analyzed_data
+
+    async def test_logs_stats_snapshot_live_mode_hint(self, client):
+        """When live mode is on, stats panel should show snapshot staleness guidance."""
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {
+                            "attributes": [{"key": "service.name", "value": {"stringValue": "live-hint-svc"}}]
+                        },
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": "live hint sample"},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        r = await client.get("/logs?live=1&stats=1")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"Snapshot:" in data
+        assert b"Live stream active. Stats remain snapshot-based until refreshed." in data
+
+    async def test_logs_advanced_analysis_uses_exception_type_for_families(self, client):
+        """Error families should include structured exception.type values from log attributes."""
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "pump-err-svc",
+                "type": "RuntimeError",
+                "message": "simulated error without family token",
+                "stack": "Traceback line",
+            },
+        )
+
+        analyzed = await client.get("/logs?service=pump-err-svc&analyze=1&stats=1")
+        assert analyzed.status_code == 200
+        data = await analyzed.get_data()
+        assert b"Error Families" in data
+        assert b"RuntimeError" in data
+
     async def test_logs_invalid_sort_ignored(self, client):
         """An unknown sort_by value should fall back to Timestamp without error."""
         r = await client.get("/logs?sort_by=INVALID_COL&sort_dir=desc")

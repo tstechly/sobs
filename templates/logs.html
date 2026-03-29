@@ -2,13 +2,23 @@
 {% block title %}Logs{% endblock %}
 {% block content %}
 {% set live = request.args.get('live', '') %}
+{% set analyze = '1' if run_advanced_analysis else '' %}
+{% set stats_open = request.args.get('stats', '') == '1' %}
+{% set stats_updated = request.args.get('stats_updated', '') == '1' %}
 <style>
   @keyframes liveRowFlash {
     0% { background-color: rgba(13, 202, 240, 0.38); }
     100% { background-color: transparent; }
   }
+  @keyframes statsPanelFlash {
+    0% { background-color: rgba(25, 135, 84, 0.22); }
+    100% { background-color: transparent; }
+  }
   .live-row-new > td {
     animation: liveRowFlash 1.8s ease-out;
+  }
+  .stats-panel-updated {
+    animation: statsPanelFlash 1.3s ease-out;
   }
 </style>
 <div class="d-flex align-items-center justify-content-between mb-3">
@@ -30,6 +40,8 @@
   <div class="card-body">
     <form method="get" class="row g-2 align-items-end">
       <input type="hidden" name="live" id="liveModeInput" value="{{ '1' if live == '1' else '' }}">
+      <input type="hidden" name="analyze" value="{{ analyze }}">
+      <input type="hidden" name="stats" value="{{ '1' if stats_open else '' }}">
       <div class="col-md-4">
         <label class="form-label small text-secondary">Grep pattern</label>
         <input type="text" name="q" class="form-control form-control-sm" placeholder="regex search…" value="{{ q }}">
@@ -70,6 +82,154 @@
   </div>
 </div>
 
+<!-- Query Statistics Panel -->
+{% if level_stats or service_stats %}
+<div class="accordion mb-3" id="statsAccordion">
+  <div id="statsPanelContainer" class="accordion-item border-secondary{% if stats_updated %} stats-panel-updated{% endif %}">
+    <h2 class="accordion-header" id="statsHeading">
+      <button class="accordion-button py-2{% if not stats_open %} collapsed{% endif %}" type="button"
+              data-bs-toggle="collapse" data-bs-target="#statsPanel"
+              aria-expanded="{{ 'true' if stats_open else 'false' }}" aria-controls="statsPanel">
+        <i class="bi bi-bar-chart-line me-2 text-info"></i>
+        <span class="fw-semibold">Query Statistics</span>
+        <span class="badge bg-secondary ms-2">{{ total }} record{{ 's' if total != 1 else '' }}</span>
+      </button>
+    </h2>
+    <div id="statsPanel" class="accordion-collapse collapse{% if stats_open %} show{% endif %}" aria-labelledby="statsHeading" data-bs-parent="#statsAccordion">
+      <div class="accordion-body py-3">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div class="small text-secondary d-flex flex-column">
+            <span>Scope: current query result set (all matching rows, not just this page).</span>
+            {% if stats_generated_at_display %}
+            <span>
+              Snapshot: <span class="font-monospace">{{ stats_generated_at_display }}</span>
+              <span>(~<span id="statsSnapshotAge">{{ stats_generated_age_s }}</span>s ago)</span>
+            </span>
+            {% if live == '1' %}
+            <span>Live stream active. Stats remain snapshot-based until refreshed.</span>
+            {% endif %}
+            {% endif %}
+          </div>
+           <a id="advancedAnalysisBtn" class="btn btn-sm btn-outline-info"
+             href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset, analyze='1', stats='1', stats_updated='1') }}">
+            <i class="bi bi-stars me-1"></i>{{ 'Refresh advanced analysis' if run_advanced_analysis else 'Run advanced analysis' }}
+          </a>
+        </div>
+        <div class="row g-3">
+          {% if level_stats %}
+          <div class="col-md-6">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <h6 class="text-secondary small mb-0"><i class="bi bi-tag me-1"></i>By Level</h6>
+              {% if level %}
+              <a class="small text-decoration-none"
+                 href="{{ url_for('view_logs', q=q, level='', service=service, sql='', live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}">
+                Clear
+              </a>
+              {% endif %}
+            </div>
+            <div class="d-flex flex-wrap gap-2">
+              {% for lvl, cnt in level_stats.items() %}
+              <a href="{{ url_for('view_logs', q=q, level=lvl, service=service, sql='', live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
+                 class="badge badge-level-{{ lvl }} text-decoration-none{% if lvl == level %} border border-light{% endif %}">
+                {{ lvl }}: {{ cnt }}
+              </a>
+              {% endfor %}
+            </div>
+            {% if sql_where %}
+            <small class="text-secondary d-block mt-2">Clicking a chip switches from SQL mode to standard filters.</small>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if service_stats %}
+          <div class="col-md-6">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <h6 class="text-secondary small mb-0"><i class="bi bi-server me-1"></i>By Service</h6>
+              {% if service %}
+              <a class="small text-decoration-none"
+                 href="{{ url_for('view_logs', q=q, level=level, service='', sql='', live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}">
+                Clear
+              </a>
+              {% endif %}
+            </div>
+            <div class="d-flex flex-wrap gap-2">
+              {% for svc, cnt in service_stats.items() %}
+              <a href="{{ url_for('view_logs', q=q, level=level, service=svc, sql='', live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
+                 class="badge bg-secondary text-decoration-none{% if svc == service %} border border-light{% endif %}">
+                {{ svc }}: {{ cnt }}
+              </a>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if run_advanced_analysis and advanced_analysis %}
+        <hr class="border-secondary-subtle my-3">
+        <div class="row g-3">
+          <div class="col-lg-6">
+            <h6 class="text-secondary small mb-2"><i class="bi bi-repeat me-1"></i>Top Message Patterns</h6>
+            {% if advanced_analysis.top_patterns %}
+            <ul class="list-group list-group-flush small">
+              {% for item in advanced_analysis.top_patterns %}
+              <li class="list-group-item bg-transparent px-0 py-1 d-flex justify-content-between gap-2">
+                <span class="font-monospace text-break">{{ item.pattern }}</span>
+                <span class="badge bg-secondary">{{ item.count }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <div class="small text-secondary">No repeated message patterns found.</div>
+            {% endif %}
+          </div>
+          <div class="col-lg-6">
+            <h6 class="text-secondary small mb-2"><i class="bi bi-collection me-1"></i>Error Families</h6>
+            {% if advanced_analysis.error_families %}
+            <div class="d-flex flex-wrap gap-2">
+              {% for item in advanced_analysis.error_families %}
+              <span class="badge bg-danger-subtle text-danger-emphasis">
+                {{ item.family }}: {{ item.count }}
+              </span>
+              {% endfor %}
+            </div>
+            {% else %}
+            <div class="small text-secondary">No explicit exception family names detected.</div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="row g-3 mt-1">
+          <div class="col-lg-6">
+            <h6 class="text-secondary small mb-2"><i class="bi bi-tag me-1"></i>Top Keywords</h6>
+            {% if advanced_analysis.top_keywords %}
+            <div class="d-flex flex-wrap gap-2">
+              {% for item in advanced_analysis.top_keywords %}
+              <span class="badge bg-info-subtle text-info-emphasis">{{ item.keyword }}: {{ item.count }}</span>
+              {% endfor %}
+            </div>
+            {% else %}
+            <div class="small text-secondary">No keyword signals available.</div>
+            {% endif %}
+          </div>
+          <div class="col-lg-6">
+            <h6 class="text-secondary small mb-2"><i class="bi bi-lightbulb me-1"></i>Optimization Hints</h6>
+            {% if advanced_analysis.hints %}
+            <ul class="small mb-0 ps-3">
+              {% for hint in advanced_analysis.hints %}
+              <li>{{ hint }}</li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <div class="small text-secondary">No immediate optimization hints generated for this query.</div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
   <table class="table table-sm table-hover align-middle">
     <thead>
@@ -78,17 +238,17 @@
       {% set svc_next_dir = 'asc' if (sort_by == 'ServiceName' and sort_dir == 'desc') else 'desc' %}
       <tr>
         <th style="width:155px;">
-          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, analyze=analyze, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Timestamp {% if sort_by == 'Timestamp' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:90px;">
-          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='SeverityText', sort_dir=level_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, analyze=analyze, sort_by='SeverityText', sort_dir=level_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Level {% if sort_by == 'SeverityText' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:100px;">
-          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, analyze=analyze, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Service {% if sort_by == 'ServiceName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
@@ -127,19 +287,19 @@
     <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
     <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
       {% for n in [10, 25, 50, 100, 200] %}
-      <option value="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
+      <option value="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
       {% endfor %}
     </select>
   </div>
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
+      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, sql=sql_where, live=live, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
@@ -164,6 +324,10 @@
   const tableContainer = document.getElementById("logsTableContainer");
   const tableBody = document.getElementById("logsTableBody");
   const emptyState = document.getElementById("logsEmptyState");
+  const advancedAnalysisBtn = document.getElementById("advancedAnalysisBtn");
+  const statsPanel = document.getElementById("statsPanel");
+  const statsSnapshotAge = document.getElementById("statsSnapshotAge");
+  const statsSnapshotIso = {{ stats_generated_at_iso|tojson }};
 
   if (!toggleBtn || !statusBadge) {
     return;
@@ -200,6 +364,42 @@
       }
     }
     window.history.replaceState({}, "", url.toString());
+  }
+
+  function updateStatsParam(isOpen) {
+    const url = new URL(window.location.href);
+    if (isOpen) {
+      url.searchParams.set("stats", "1");
+    } else {
+      url.searchParams.delete("stats");
+      url.searchParams.delete("stats_updated");
+    }
+    window.history.replaceState({}, "", url.toString());
+  }
+
+  function clearStatsUpdatedParam() {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("stats_updated")) {
+      return;
+    }
+    url.searchParams.delete("stats_updated");
+    window.history.replaceState({}, "", url.toString());
+  }
+
+  function startSnapshotAgeTicker() {
+    if (!statsSnapshotAge || !statsSnapshotIso) {
+      return;
+    }
+    const snapshotMs = Date.parse(statsSnapshotIso);
+    if (Number.isNaN(snapshotMs)) {
+      return;
+    }
+    const update = () => {
+      const ageSec = Math.max(0, Math.floor((Date.now() - snapshotMs) / 1000));
+      statsSnapshotAge.textContent = String(ageSec);
+    };
+    update();
+    window.setInterval(update, 1000);
   }
 
   function isPausedByScroll() {
@@ -253,6 +453,33 @@
       toggleBtn.innerHTML = '<i class="bi bi-broadcast-pin me-1"></i>Live mode';
     }
   }
+
+  function setAdvancedAnalysisLoading() {
+    if (!advancedAnalysisBtn) {
+      return;
+    }
+    advancedAnalysisBtn.classList.add("disabled");
+    advancedAnalysisBtn.setAttribute("aria-disabled", "true");
+    advancedAnalysisBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Running analysis...';
+  }
+
+  if (advancedAnalysisBtn) {
+    advancedAnalysisBtn.addEventListener("click", () => {
+      setAdvancedAnalysisLoading();
+    });
+  }
+
+  if (statsPanel) {
+    statsPanel.addEventListener("shown.bs.collapse", () => {
+      updateStatsParam(true);
+    });
+    statsPanel.addEventListener("hidden.bs.collapse", () => {
+      updateStatsParam(false);
+    });
+  }
+
+  clearStatsUpdatedParam();
+  startSnapshotAgeTicker();
 
   function formatTs(ts) {
     if (!ts) {

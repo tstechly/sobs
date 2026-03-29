@@ -21,6 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
@@ -1576,6 +1577,142 @@ async def dashboard():
     )
 
 
+def _compute_log_stats(db, where_clause: str, params: list) -> tuple[dict, dict]:
+    """Return (level_stats, service_stats) counts for the given WHERE clause."""
+    level_query = (
+        "SELECT SeverityText, COUNT(*) AS cnt "
+        f"FROM otel_logs {where_clause} "
+        "GROUP BY SeverityText ORDER BY cnt DESC"
+    )
+    level_stats = {(r["SeverityText"] or "UNKNOWN"): r["cnt"] for r in db.execute(level_query, params).fetchall()}
+
+    svc_cond = "AND ServiceName!=''" if where_clause else "WHERE ServiceName!=''"
+    service_query = (
+        "SELECT ServiceName, COUNT(*) AS cnt "
+        f"FROM otel_logs {where_clause} {svc_cond} "
+        "GROUP BY ServiceName ORDER BY cnt DESC LIMIT 10"
+    )
+    service_stats = {r["ServiceName"]: r["cnt"] for r in db.execute(service_query, params).fetchall()}
+    return level_stats, service_stats
+
+
+def _fingerprint_log_message(message: str) -> str:
+    """Normalize dynamic values so repeating message patterns can be grouped."""
+    normalized = (message or "").strip().lower()
+    if not normalized:
+        return "(empty message)"
+
+    patterns = [
+        (r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>"),
+        (r"\b0x[0-9a-f]+\b", "<hex>"),
+        (r"\b[0-9a-f]{16,}\b", "<hash>"),
+        (r"\b\d{4,}\b", "<num>"),
+        (r"\b\d+\b", "<n>"),
+    ]
+    for pattern, replacement in patterns:
+        normalized = re.sub(pattern, replacement, normalized)
+
+    normalized = re.sub(r"'[^']*'", "'<text>'", normalized)
+    normalized = re.sub(r'"[^"]*"', '"<text>"', normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized[:160]
+
+
+def _compute_advanced_log_analysis(rows: list[dict], level_stats: dict, service_stats: dict) -> dict:
+    """Compute message intelligence for manual advanced analysis runs."""
+    messages = [str(row["Body"] or "") for row in rows if row["Body"]]
+    if not messages:
+        return {
+            "top_patterns": [],
+            "top_keywords": [],
+            "error_families": [],
+            "hints": [],
+        }
+
+    fingerprint_counts: Counter[str] = Counter(_fingerprint_log_message(msg) for msg in messages)
+    most_common_patterns = fingerprint_counts.most_common(8)
+    top_patterns = [{"pattern": pattern, "count": count} for pattern, count in most_common_patterns]
+
+    family_regex = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout|Refused|Unavailable|Failure))\b")
+    family_counts: Counter[str] = Counter()
+
+    # Prefer structured exception types when available, then fall back to message parsing.
+    for row in rows:
+        attrs = _map_to_dict(row.get("LogAttributes"))
+        exc_type = str(attrs.get("exception.type", "")).strip()
+        if exc_type:
+            family_counts[exc_type] += 1
+
+    for msg in messages:
+        for family in set(family_regex.findall(msg)):
+            family_counts[family] += 1
+    error_families = [{"family": family, "count": count} for family, count in family_counts.most_common(8)]
+
+    stop_words = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "into",
+        "this",
+        "that",
+        "http",
+        "https",
+        "failed",
+        "error",
+        "warn",
+        "info",
+        "debug",
+        "trace",
+        "service",
+    }
+    keyword_counts: Counter[str] = Counter()
+    for msg in messages:
+        for token in re.findall(r"[a-z][a-z0-9_\-]{2,}", msg.lower()):
+            if token not in stop_words:
+                keyword_counts[token] += 1
+    top_keywords = [{"keyword": keyword, "count": count} for keyword, count in keyword_counts.most_common(10)]
+
+    hints = []
+    total = max(len(rows), 1)
+    severe = sum(
+        int(count)
+        for level, count in level_stats.items()
+        if str(level).upper() in {"ERROR", "FATAL", "CRITICAL", "ALERT", "EMERGENCY"}
+    )
+    severe_ratio = severe / total
+    if severe_ratio >= 0.25:
+        hints.append(
+            f"High severe-log ratio ({severe_ratio:.0%}); prioritize stabilizing error paths before scaling traffic."
+        )
+
+    if most_common_patterns and most_common_patterns[0][1] >= 3:
+        top_count = most_common_patterns[0][1]
+        hints.append(
+            "Most frequent message pattern repeats "
+            f"{top_count} times; consider deduplication/sampling and shared remediation guidance."
+        )
+
+    timeout_hits = keyword_counts.get("timeout", 0) + keyword_counts.get("timed", 0)
+    if timeout_hits >= 3:
+        hints.append("Timeout-related logs are common; review dependency latency, retry budgets, and circuit breakers.")
+
+    if service_stats:
+        top_service, top_service_count = next(iter(service_stats.items()))
+        if int(top_service_count) / total >= 0.6:
+            hints.append(
+                f"Most events come from {top_service}; investigate service-level hotspots and noisy call paths."
+            )
+
+    return {
+        "top_patterns": top_patterns,
+        "top_keywords": top_keywords,
+        "error_families": error_families,
+        "hints": hints,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Web UI – Logs
 # ---------------------------------------------------------------------------
@@ -1587,6 +1724,7 @@ async def view_logs():
     level = request.args.get("level", "").strip().upper()
     service = request.args.get("service", "").strip()
     sql_where = request.args.get("sql", "").strip()
+    run_advanced_analysis = request.args.get("analyze", "").strip() == "1"
     limit = _parse_limit(200)
     offset = _parse_offset()
     sort_by, sort_col, sort_dir = _parse_sort(
@@ -1596,10 +1734,27 @@ async def view_logs():
     order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
 
     rows = []
+    log_rows = []
     total = 0
     error_msg = ""
+    level_stats: dict = {}
+    service_stats: dict = {}
+    advanced_analysis = None
+    stats_generated_at_iso = ""
+    stats_generated_at_display = ""
+    stats_generated_age_s = 0
+    where = ""
+    params: list = []
 
-    if sql_where:
+    if q:
+        try:
+            re.compile(q, re.IGNORECASE)
+        except re.error as exc:
+            error_msg = f"Regex error: {exc}"
+
+    if error_msg:
+        pass
+    elif sql_where:
         # Allow raw WHERE clause (SQL search)
         try:
             safe_sql = sql_where.replace(";", "")
@@ -1609,15 +1764,9 @@ async def view_logs():
             safe_sql = re.sub(r"\bspan_id\b", "SpanId", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bts\b", "Timestamp", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bbody\b", "Body", safe_sql, flags=re.IGNORECASE)
-            query = (
-                f"SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId FROM otel_logs "
-                f"WHERE {safe_sql} {order_clause} LIMIT ? OFFSET ?"
-            )
-            rows = db.execute(query, (limit, offset)).fetchall()
-            total = db.execute(f"SELECT COUNT(*) FROM otel_logs WHERE {safe_sql}").fetchone()[0]
+            where = f"WHERE {safe_sql}"
         except Exception as exc:
             error_msg = f"SQL error: {exc}"
-            rows = []
     else:
         conditions = []
         params = []
@@ -1628,19 +1777,62 @@ async def view_logs():
             conditions.append("ServiceName=?")
             params.append(service)
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-        total = db.execute(f"SELECT COUNT(*) FROM otel_logs {where}", params).fetchone()[0]
-        rows = db.execute(
-            f"SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId FROM otel_logs {where} "
-            f"{order_clause} LIMIT ? OFFSET ?",
-            params + [limit, offset],
-        ).fetchall()
 
-    log_rows = []
-    grep_pat = re.compile(q, re.IGNORECASE) if q else None
+    if not error_msg:
+        try:
+            query_where = where
+            query_params = list(params)
+            if q:
+                query_where = f"{query_where} AND match(Body, ?)" if query_where else "WHERE match(Body, ?)"
+                query_params.append(q)
+
+            select_base = (
+                "SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId " f"FROM otel_logs {query_where} "
+            )
+
+            total = db.execute(f"SELECT COUNT(*) FROM otel_logs {query_where}", query_params).fetchone()[0]
+            rows = db.execute(
+                f"{select_base}{order_clause} LIMIT ? OFFSET ?",
+                query_params + [limit, offset],
+            ).fetchall()
+            level_stats, service_stats = _compute_log_stats(db, query_where, query_params)
+            if run_advanced_analysis:
+                analysis_rows = db.execute(
+                    f"SELECT SeverityText, ServiceName, Body, LogAttributes FROM otel_logs {query_where}",
+                    query_params,
+                ).fetchall()
+                advanced_analysis = _compute_advanced_log_analysis(analysis_rows, level_stats, service_stats)
+
+            generated_at = datetime.now(timezone.utc)
+            snapshot_raw = db.execute(f"SELECT max(Timestamp) FROM otel_logs {query_where}", query_params).fetchone()[0]
+            snapshot_at = generated_at
+            if snapshot_raw is not None:
+                if isinstance(snapshot_raw, datetime):
+                    snapshot_at = snapshot_raw
+                else:
+                    parsed = datetime.fromisoformat(str(snapshot_raw).replace("Z", "+00:00"))
+                    snapshot_at = parsed
+                if snapshot_at.tzinfo is None:
+                    snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+                else:
+                    snapshot_at = snapshot_at.astimezone(timezone.utc)
+
+            stats_generated_at_iso = snapshot_at.isoformat()
+            stats_generated_at_display = snapshot_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+            stats_generated_age_s = max(0, int((generated_at - snapshot_at).total_seconds()))
+        except Exception as exc:
+            if sql_where:
+                error_msg = f"SQL error: {exc}"
+            else:
+                error_msg = f"Query error: {exc}"
+            rows = []
+            total = 0
+            level_stats = {}
+            service_stats = {}
+            advanced_analysis = None
+
     for r in rows:
         body = r["Body"]
-        if grep_pat and not grep_pat.search(body):
-            continue
         log_rows.append(
             {
                 "ts": str(r["Timestamp"]),
@@ -1677,6 +1869,13 @@ async def view_logs():
         error_msg=error_msg,
         sort_by=sort_by,
         sort_dir=sort_dir,
+        run_advanced_analysis=run_advanced_analysis,
+        level_stats=level_stats,
+        service_stats=service_stats,
+        advanced_analysis=advanced_analysis,
+        stats_generated_at_iso=stats_generated_at_iso,
+        stats_generated_at_display=stats_generated_at_display,
+        stats_generated_age_s=stats_generated_age_s,
     )
 
 
@@ -1808,7 +2007,6 @@ async def view_traces():
         conditions.append("TraceId=?")
         params.append(trace_id)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
     total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
     rows = db.execute(
         f"SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode, SpanAttributes "
