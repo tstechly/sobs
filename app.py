@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zlib
 from collections import Counter
 from dataclasses import dataclass
@@ -37,10 +38,13 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTrace
 from quart import (
     Quart,
     Response,
+    flash,
     jsonify,
+    redirect,
     render_template,
     request,
     send_from_directory,
+    url_for,
 )
 
 # ---------------------------------------------------------------------------
@@ -235,6 +239,30 @@ CREATE TABLE IF NOT EXISTS sobs_error_resolutions (
 ) ENGINE = MergeTree()
 ORDER BY (ErrorId, ResolvedAt)
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+CREATE TABLE IF NOT EXISTS sobs_dashboards (
+    Id String CODEC(ZSTD(1)),
+    Name String CODEC(ZSTD(1)),
+    Description String CODEC(ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY Id
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS sobs_chart_configs (
+    Id String CODEC(ZSTD(1)),
+    DashboardId String CODEC(ZSTD(1)),
+    Title String CODEC(ZSTD(1)),
+    ChartType LowCardinality(String) CODEC(ZSTD(1)),
+    Query String CODEC(ZSTD(1)),
+    OptionsJson String CODEC(ZSTD(1)),
+    Position UInt16 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (DashboardId, Id)
+SETTINGS index_granularity = 8192;
 """
 
 
@@ -2263,6 +2291,262 @@ async def view_ai():
         sort_by=sort_by,
         sort_dir=sort_dir,
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom Dashboards (eChart-based)
+# ---------------------------------------------------------------------------
+_ALLOWED_CHART_TYPES = {"line", "bar", "pie", "scatter", "area"}
+
+_QUERY_DENY_PATTERN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|RENAME|ATTACH|DETACH|GRANT|REVOKE)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_chart_query(query: str) -> str | None:
+    """Return an error message if the query is not a safe SELECT, otherwise None."""
+    stripped = query.strip()
+    if not stripped:
+        return "Query cannot be empty"
+    if not stripped.upper().startswith("SELECT"):
+        return "Only SELECT queries are allowed"
+    if _QUERY_DENY_PATTERN.search(stripped):
+        return "Query contains a disallowed keyword"
+    return None
+
+
+def _get_dashboards(db: ChDbConnection) -> list[dict]:
+    rows = db.execute(
+        "SELECT Id, Name, Description FROM sobs_dashboards FINAL WHERE IsDeleted = 0 ORDER BY Name"
+    ).fetchall()
+    return [{"id": str(r["Id"]), "name": str(r["Name"]), "description": str(r["Description"])} for r in rows]
+
+
+def _get_dashboard(db: ChDbConnection, dashboard_id: str) -> dict | None:
+    row = db.execute(
+        "SELECT Id, Name, Description FROM sobs_dashboards FINAL WHERE IsDeleted = 0 AND Id = ?",
+        [dashboard_id],
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": str(row["Id"]), "name": str(row["Name"]), "description": str(row["Description"])}
+
+
+def _get_charts(db: ChDbConnection, dashboard_id: str) -> list[dict]:
+    rows = db.execute(
+        "SELECT Id, Title, ChartType, Query, OptionsJson, Position "
+        "FROM sobs_chart_configs FINAL WHERE IsDeleted = 0 AND DashboardId = ? "
+        "ORDER BY Position, Id",
+        [dashboard_id],
+    ).fetchall()
+    return [
+        {
+            "id": str(r["Id"]),
+            "title": str(r["Title"]),
+            "chart_type": str(r["ChartType"]),
+            "query": str(r["Query"]),
+            "options_json": str(r["OptionsJson"]),
+            "position": int(r["Position"]),
+        }
+        for r in rows
+    ]
+
+
+@app.route("/dashboards")
+@require_basic_auth
+async def list_dashboards():
+    db = get_db()
+    dashboards = _get_dashboards(db)
+    return await render_template("custom_dashboards.html", dashboards=dashboards)
+
+
+@app.route("/dashboards/new", methods=["GET"])
+@require_basic_auth
+async def new_dashboard_form():
+    return await render_template("custom_dashboards.html", dashboards=[], show_new_form=True)
+
+
+@app.route("/dashboards", methods=["POST"])
+@require_basic_auth
+async def create_dashboard():
+    form = await request.form
+    name = (form.get("name") or "").strip()
+    description = (form.get("description") or "").strip()
+    if not name:
+        await flash("Dashboard name is required", "warning")
+        return redirect(url_for("list_dashboards"))
+    dashboard_id = str(uuid.uuid4())
+    version = int(time.time() * 1000)
+    db = get_db()
+    _insert_rows_json_each_row(
+        db,
+        "sobs_dashboards",
+        [{"Id": dashboard_id, "Name": name, "Description": description, "IsDeleted": 0, "Version": version}],
+    )
+    return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+
+
+@app.route("/dashboards/<dashboard_id>")
+@require_basic_auth
+async def view_custom_dashboard(dashboard_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    charts = _get_charts(db, dashboard_id)
+    return await render_template(
+        "custom_dashboard_view.html",
+        dashboard=dashboard,
+        charts=charts,
+        chart_types=sorted(_ALLOWED_CHART_TYPES),
+    )
+
+
+@app.route("/dashboards/<dashboard_id>/delete", methods=["POST"])
+@require_basic_auth
+async def delete_dashboard(dashboard_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    version = int(time.time() * 1000)
+    # Soft-delete dashboard
+    _insert_rows_json_each_row(
+        db,
+        "sobs_dashboards",
+        [{"Id": dashboard_id, "Name": dashboard["name"], "Description": dashboard["description"], "IsDeleted": 1, "Version": version}],
+    )
+    # Soft-delete all charts in this dashboard
+    charts = _get_charts(db, dashboard_id)
+    if charts:
+        tombstones = [
+            {
+                "Id": c["id"],
+                "DashboardId": dashboard_id,
+                "Title": c["title"],
+                "ChartType": c["chart_type"],
+                "Query": c["query"],
+                "OptionsJson": c["options_json"],
+                "Position": c["position"],
+                "IsDeleted": 1,
+                "Version": version,
+            }
+            for c in charts
+        ]
+        _insert_rows_json_each_row(db, "sobs_chart_configs", tombstones)
+    await flash(f"Dashboard '{dashboard['name']}' deleted", "success")
+    return redirect(url_for("list_dashboards"))
+
+
+@app.route("/dashboards/<dashboard_id>/charts", methods=["POST"])
+@require_basic_auth
+async def add_chart(dashboard_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    form = await request.form
+    title = (form.get("title") or "").strip()
+    chart_type = (form.get("chart_type") or "bar").strip().lower()
+    query = (form.get("query") or "").strip()
+    options_json = (form.get("options_json") or "{}").strip()
+    if not title:
+        await flash("Chart title is required", "warning")
+        return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+    err = _validate_chart_query(query)
+    if err:
+        await flash(f"Invalid query: {err}", "warning")
+        return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+    if chart_type not in _ALLOWED_CHART_TYPES:
+        chart_type = "bar"
+    # Validate options_json is valid JSON
+    try:
+        json.loads(options_json)
+    except (json.JSONDecodeError, ValueError):
+        options_json = "{}"
+    existing = _get_charts(db, dashboard_id)
+    position = max((c["position"] for c in existing), default=-1) + 1
+    chart_id = str(uuid.uuid4())
+    version = int(time.time() * 1000)
+    _insert_rows_json_each_row(
+        db,
+        "sobs_chart_configs",
+        [
+            {
+                "Id": chart_id,
+                "DashboardId": dashboard_id,
+                "Title": title,
+                "ChartType": chart_type,
+                "Query": query,
+                "OptionsJson": options_json,
+                "Position": position,
+                "IsDeleted": 0,
+                "Version": version,
+            }
+        ],
+    )
+    return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+
+
+@app.route("/dashboards/<dashboard_id>/charts/<chart_id>/delete", methods=["POST"])
+@require_basic_auth
+async def remove_chart(dashboard_id: str, chart_id: str):
+    db = get_db()
+    dashboard = _get_dashboard(db, dashboard_id)
+    if not dashboard:
+        await flash("Dashboard not found", "danger")
+        return redirect(url_for("list_dashboards"))
+    charts = _get_charts(db, dashboard_id)
+    chart = next((c for c in charts if c["id"] == chart_id), None)
+    if not chart:
+        await flash("Chart not found", "warning")
+        return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+    version = int(time.time() * 1000)
+    _insert_rows_json_each_row(
+        db,
+        "sobs_chart_configs",
+        [
+            {
+                "Id": chart_id,
+                "DashboardId": dashboard_id,
+                "Title": chart["title"],
+                "ChartType": chart["chart_type"],
+                "Query": chart["query"],
+                "OptionsJson": chart["options_json"],
+                "Position": chart["position"],
+                "IsDeleted": 1,
+                "Version": version,
+            }
+        ],
+    )
+    return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
+
+
+@app.route("/api/dashboards/query", methods=["POST"])
+@require_basic_auth
+async def execute_chart_query():
+    """Execute a ClickHouse SELECT query and return results for eChart rendering."""
+    body = await request.get_json(silent=True) or {}
+    query = (body.get("query") or "").strip()
+    err = _validate_chart_query(query)
+    if err:
+        return jsonify({"error": err}), 400
+    # Inject a row limit to prevent runaway queries
+    if not re.search(r"\bLIMIT\b", query, re.IGNORECASE):
+        query = query.rstrip(";") + " LIMIT 1000"
+    db = get_db()
+    try:
+        result = db.execute(query)
+        rows = result.fetchall()
+        columns = list(rows[0].keys()) if rows else []
+        data = [[row[col] for col in columns] for row in rows]
+        return jsonify({"columns": columns, "rows": data})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 # ---------------------------------------------------------------------------

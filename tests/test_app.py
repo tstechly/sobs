@@ -2037,3 +2037,183 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "RateLimitError" in body
+
+
+# ---------------------------------------------------------------------------
+# Custom Dashboards (eChart)
+# ---------------------------------------------------------------------------
+class TestCustomDashboards:
+    async def test_list_dashboards_empty(self, client):
+        r = await client.get("/dashboards")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Dashboards" in body
+
+    async def test_create_and_view_dashboard(self, client):
+        r = await client.post(
+            "/dashboards",
+            form={"name": "Test Dashboard", "description": "A test"},
+            follow_redirects=False,
+        )
+        assert r.status_code in (302, 303)
+        location = r.headers.get("Location", "")
+        assert "/dashboards/" in location
+
+        r2 = await client.get(location, follow_redirects=False)
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "Test Dashboard" in body
+        assert "Add Chart" in body
+
+    async def test_create_dashboard_requires_name(self, client):
+        r = await client.post(
+            "/dashboards",
+            form={"name": "", "description": ""},
+            follow_redirects=False,
+        )
+        assert r.status_code in (302, 303)
+        assert r.headers.get("Location", "").endswith("/dashboards")
+
+    async def test_add_chart_to_dashboard(self, client):
+        # Create a dashboard first
+        r = await client.post(
+            "/dashboards",
+            form={"name": "Chart Dashboard", "description": ""},
+            follow_redirects=False,
+        )
+        location = r.headers.get("Location", "")
+        dashboard_id = location.rstrip("/").split("/")[-1]
+
+        # Add a chart
+        r2 = await client.post(
+            f"/dashboards/{dashboard_id}/charts",
+            form={
+                "title": "Log Count",
+                "chart_type": "bar",
+                "query": "SELECT 'now' AS ts, COUNT(*) AS cnt FROM otel_logs",
+            },
+            follow_redirects=False,
+        )
+        assert r2.status_code in (302, 303)
+
+        # Verify chart appears on dashboard page
+        r3 = await client.get(f"/dashboards/{dashboard_id}")
+        assert r3.status_code == 200
+        body = await r3.get_data(as_text=True)
+        assert "Log Count" in body
+
+    async def test_remove_chart_from_dashboard(self, client):
+        # Create dashboard and add chart
+        r = await client.post(
+            "/dashboards",
+            form={"name": "Remove Chart Test", "description": ""},
+            follow_redirects=False,
+        )
+        location = r.headers.get("Location", "")
+        dashboard_id = location.rstrip("/").split("/")[-1]
+        await client.post(
+            f"/dashboards/{dashboard_id}/charts",
+            form={"title": "Temp Chart", "chart_type": "line", "query": "SELECT 1 AS x"},
+            follow_redirects=False,
+        )
+
+        # Get chart list to find chart id
+        from app import get_db, _get_charts  # noqa: PLC0415
+        import app as sobs_app  # noqa: PLC0415
+        charts = _get_charts(get_db(), dashboard_id)
+        assert len(charts) >= 1
+        chart_id = charts[0]["id"]
+
+        r2 = await client.post(
+            f"/dashboards/{dashboard_id}/charts/{chart_id}/delete",
+            follow_redirects=False,
+        )
+        assert r2.status_code in (302, 303)
+
+    async def test_delete_dashboard(self, client):
+        r = await client.post(
+            "/dashboards",
+            form={"name": "Delete Me", "description": ""},
+            follow_redirects=False,
+        )
+        location = r.headers.get("Location", "")
+        dashboard_id = location.rstrip("/").split("/")[-1]
+
+        r2 = await client.post(
+            f"/dashboards/{dashboard_id}/delete",
+            follow_redirects=False,
+        )
+        assert r2.status_code in (302, 303)
+
+        # Dashboard should no longer appear
+        r3 = await client.get(f"/dashboards/{dashboard_id}", follow_redirects=False)
+        assert r3.status_code in (302, 303)
+
+    async def test_chart_query_api_select(self, client):
+        r = await client.post(
+            "/api/dashboards/query",
+            json={"query": "SELECT 1 AS num"},
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert "columns" in data
+        assert "rows" in data
+        assert data["columns"] == ["num"]
+        assert data["rows"][0][0] == 1
+
+    async def test_chart_query_api_rejects_non_select(self, client):
+        r = await client.post(
+            "/api/dashboards/query",
+            json={"query": "INSERT INTO otel_logs FORMAT JSONEachRow {}"},
+        )
+        assert r.status_code == 400
+        data = await r.get_json()
+        assert "error" in data
+
+    async def test_chart_query_api_rejects_empty(self, client):
+        r = await client.post(
+            "/api/dashboards/query",
+            json={"query": ""},
+        )
+        assert r.status_code == 400
+
+    async def test_chart_query_api_auto_limits(self, client):
+        r = await client.post(
+            "/api/dashboards/query",
+            json={"query": "SELECT number FROM system.numbers"},
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert len(data["rows"]) <= 1000
+
+    async def test_add_chart_rejects_non_select_query(self, client):
+        r = await client.post(
+            "/dashboards",
+            form={"name": "Security Test", "description": ""},
+            follow_redirects=False,
+        )
+        location = r.headers.get("Location", "")
+        dashboard_id = location.rstrip("/").split("/")[-1]
+
+        r2 = await client.post(
+            f"/dashboards/{dashboard_id}/charts",
+            form={
+                "title": "Bad Query",
+                "chart_type": "bar",
+                "query": "DROP TABLE otel_logs",
+            },
+            follow_redirects=False,
+        )
+        # Should redirect back (flash warning) not crash
+        assert r2.status_code in (302, 303)
+
+        # Confirm no chart was added
+        from app import get_db, _get_charts  # noqa: PLC0415
+        charts = _get_charts(get_db(), dashboard_id)
+        assert not any(c["title"] == "Bad Query" for c in charts)
+
+    async def test_dashboards_page_in_nav(self, client):
+        r = await client.get("/dashboards")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "bar-chart-line" in body
