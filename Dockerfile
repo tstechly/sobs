@@ -21,5 +21,5 @@ ENV SOBS_DATA_DIR=/data
 # Expose default port
 EXPOSE 4317
 
-# Production server (gunicorn with gthread workers for async processing)
-CMD gunicorn --worker-class gthread --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-4} --bind 0.0.0.0:${PORT:-4317} app:app
+# Production server (hypercorn, single-worker ASGI for embedded chDB safety)
+CMD python app.py

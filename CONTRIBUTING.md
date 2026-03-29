@@ -36,6 +36,9 @@ If formatters update files, the hook re-stages those Python files automatically.
 Run these before opening or updating a PR:
 
 ```bash
-mypy tests
-pytest -q tests/test_app.py
+isort *.py tests/ scripts
+black *.py tests/ scripts
+flake8 *.py tests/ scripts
+mypy app.py tests scripts
+pytest tests/
 ```
