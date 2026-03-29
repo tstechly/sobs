@@ -3,7 +3,7 @@
 SOBS supports two independent auth areas:
 
 - Ingest API auth for `/v1/*` via `SOBS_API_KEY`
-- Web UI auth for `/`, `/logs`, `/errors`, `/traces`, `/rum`, `/ai`
+- Web UI auth for `/`, `/logs`, `/errors`, `/traces`, `/rum`, `/ai`, `/tail`
 
 Web UI auth mode is exclusive. Configure exactly one mode:
 
