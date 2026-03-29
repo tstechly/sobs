@@ -312,7 +312,11 @@ class ChDbConnection:
         log.info("chDB connect target: %s", connect_target)
         self._conn = chdb_driver.connect(connect_target)
         self._lock = threading.Lock()
-        _validate_chdb_startup_configuration(self)
+        try:
+            _validate_chdb_startup_configuration(self)
+        except Exception:
+            self._conn.close()
+            raise
 
     def execute(self, query: str, params=None):
         with self._lock:
