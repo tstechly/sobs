@@ -538,3 +538,50 @@ Once Phase 1 is solid:
 - [ ] Column validation prevents bad queries
 - [ ] Error messages are helpful
 - [ ] Can easily add new templates without code refactor
+
+---
+
+## Future Enhancements
+
+### Phase 1.5: Query Authoring Tools
+
+To improve the user experience of writing ClickHouse queries in the dashboard modal, add:
+
+#### SQL Autocomplete & DDL Helper
+- When users type in the query textarea, provide autocomplete suggestions for:
+  - Table names from available data sources (otel_logs, otel_traces, otel_spans, etc.)
+  - Column names for each table (introspected from schema)
+  - Common aggregation functions (avg, count, countIf, quantile, etc.)
+  - Keywords and syntax hints
+- Show a **DDL Inspector** pane that displays:
+  - Available tables with column names and types
+  - Quick reference for common column roles expected by templates
+  - Example sub-queries for each table
+
+#### SQL Syntax Highlighting
+- Add lightweight syntax highlighting to the query textarea:
+  - Keywords (SELECT, FROM, GROUP BY, ORDER BY) in one color
+  - Function names in another
+  - String literals and numbers in distinct styles
+  - Comments in muted color
+- Can use a simple library like [Prism.js](https://prismjs.com/) or hand-rolled regex-based highlighting for ClickHouse SQL
+
+#### Integration Points
+- Emit DDL schema on dashboard page load (or fetch via `GET /api/schema`)
+- Attach autocomplete handler to the textarea element
+- Update highlighting as user types
+- Maintain chart preview functionality alongside new authoring tools
+
+### Phase 2: Visual Template Editor
+
+Move templates to the database and add a full visual template builder:
+- Drag-and-drop eCharts option JSON builder
+- Live preview as template is edited
+- Template marketplace and sharing
+
+### Phase 3: Advanced Features
+
+- Template versioning and rollback
+- Data transformations and custom functions
+- Conditional rendering based on row count or data shape
+- Template permissions and approval workflow
