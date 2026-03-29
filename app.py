@@ -421,6 +421,9 @@ def _queue_write(op: Callable[[ChDbConnection], None], wait: bool = False) -> No
     except queue.Full as exc:
         raise WriteQueueFullError("write queue is full") from exc
     if done is not None:
+        # Intentionally best-effort wait: embedded chDB runs in single-process mode
+        # and sustained bursts can delay writer completion. We avoid surfacing a hard
+        # timeout to clients here to prevent avoidable 5xx responses under backpressure.
         done.wait(timeout=15)
         if task.error is not None:
             raise task.error
@@ -1514,18 +1517,49 @@ async def view_errors():
     limit = _parse_limit(100)
     offset = _parse_offset()
     resolved_ids = _get_resolved_error_ids(db)
-    all_items = []
-    for row in db.execute(f"SELECT * FROM ({ERROR_SOURCES_SQL}) ORDER BY Timestamp DESC").fetchall():
-        item = _build_error_item(dict(row))
-        item["resolved"] = item["id"] in resolved_ids
-        if service and item["service"] != service:
-            continue
-        if resolved in ("0", "1") and item["resolved"] != (resolved == "1"):
-            continue
-        all_items.append(item)
+    where_parts = []
+    where_params = []
+    if service:
+        where_parts.append("ServiceName=?")
+        where_params.append(service)
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    source_sql = (
+        "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
+        f"FROM ({ERROR_SOURCES_SQL}) {where_sql} "
+        "ORDER BY Timestamp DESC LIMIT ? OFFSET ?"
+    )
 
-    total = len(all_items)
-    errors = all_items[offset : offset + limit]
+    if resolved not in ("0", "1"):
+        total = db.execute(
+            f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {where_sql}",
+            where_params,
+        ).fetchone()[0]
+        rows = db.execute(source_sql, where_params + [limit, offset]).fetchall()
+        errors = []
+        for row in rows:
+            item = _build_error_item(dict(row))
+            item["resolved"] = item["id"] in resolved_ids
+            errors.append(item)
+    else:
+        # Keep behavior identical while avoiding full in-memory materialization.
+        target_resolved = resolved == "1"
+        scan_batch = max(200, limit)
+        scan_offset = 0
+        total = 0
+        errors = []
+        while True:
+            batch = db.execute(source_sql, where_params + [scan_batch, scan_offset]).fetchall()
+            if not batch:
+                break
+            for row in batch:
+                item = _build_error_item(dict(row))
+                item["resolved"] = item["id"] in resolved_ids
+                if item["resolved"] != target_resolved:
+                    continue
+                if total >= offset and len(errors) < limit:
+                    errors.append(item)
+                total += 1
+            scan_offset += scan_batch
 
     services = [
         row[0]
