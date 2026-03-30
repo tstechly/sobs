@@ -11,8 +11,9 @@
     .nav-link.active { font-weight: 600; }
     /* ===== Sidebar Base ===== */
     :root { --sb-full: 220px; --sb-compact: 56px; }
-    .sidebar { flex-shrink: 0; width: var(--sb-full); min-height: 100vh; padding: 1rem; background: #1a1d21; border-right: 1px solid #2d3035; position: relative; overflow: hidden; transition: width 0.22s ease; }
+    .sidebar { flex-shrink: 0; width: var(--sb-full); min-height: 100vh; padding: 1rem; background: #1a1d21; border-right: 1px solid #2d3035; position: relative; overflow: visible; z-index: 1060; transition: width 0.22s ease; }
     .sidebar .nav-link { color: #adb5bd; border-radius: 6px; margin: 1px 4px; padding: .4rem .8rem; display: flex; align-items: center; gap: .5rem; white-space: nowrap; }
+    .sidebar .nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
     .sidebar .nav-link:hover, .sidebar .nav-link.active { background: #2d3035; color: #fff; }
     .sidebar .nav-link i { width: 1.4rem; flex-shrink: 0; }
     /* Sidebar label (text part) */
@@ -25,7 +26,10 @@
     .sidebar.sidebar-compact .sb-brand { padding: 0 .6rem; justify-content: center; }
     .sidebar.sidebar-compact .sb-footer { display: none; }
     /* ===== Sidebar edge toggle button ===== */
-    .sb-toggle-btn { position: absolute; right: -14px; top: 64px; z-index: 200; width: 28px; height: 28px; border-radius: 50%; border: 1px solid #2d3035; background: #1a1d21; color: #adb5bd; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; transition: background 0.15s, color 0.15s; }
+    /* Draw border as a right-side half-ring so the menu-side edge stays clean and the icon remains unobstructed. */
+    .sb-toggle-btn { position: absolute; right: -14px; top: 64px; z-index: 1200; width: 28px; height: 28px; border-radius: 50%; border: 0; background: #1a1d21; color: #adb5bd; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; transition: background 0.15s, color 0.15s; }
+    .sb-toggle-btn::after { content: ''; position: absolute; inset: 0; border: 1px solid #2d3035; border-radius: 50%; clip-path: inset(0 0 0 50%); pointer-events: none; }
+    .sb-toggle-btn > i { position: relative; z-index: 1; }
     .sb-toggle-btn:hover { background: #2d3035; color: #fff; }
     /* ===== State 3: Hamburger topbar ===== */
     .sb-topbar { display: none; background: #1a1d21; border-bottom: 1px solid #2d3035; padding: .5rem 1rem; align-items: center; gap: .75rem; position: sticky; top: 0; z-index: 100; }
@@ -36,7 +40,7 @@
     @media (max-width: 575.98px) {
       .sb-topbar { display: flex; }
       .sb-toggle-btn { display: none; }
-      .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: var(--sb-full); z-index: 1045; overflow-y: auto; transform: translateX(-100%); transition: transform 0.25s ease; }
+      .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: var(--sb-full); z-index: 1045; overflow: visible; transform: translateX(-100%); transition: transform 0.25s ease; }
       .sidebar.sb-open { transform: translateX(0); }
       .sidebar.sidebar-compact { padding-left: 1rem; padding-right: 1rem; }
       .sidebar.sidebar-compact .sb-label { opacity: 1; max-width: 200px; pointer-events: auto; }
@@ -115,7 +119,7 @@
     </button>
     <a href="{{ url_for('summary') }}" class="text-decoration-none mb-4 d-flex align-items-center gap-2 sb-brand">
       <span style="font-size:1.4rem;">🔭</span>
-      <span class="fw-bold fs-5 text-white sb-brand-text">SOBS</span>
+      <span class="fw-bold fs-5 text-white sb-brand-text">SObS</span>
     </a>
     <ul class="nav flex-column gap-1">
       <li class="nav-item">
@@ -197,6 +201,7 @@
   var hamburgerBtn = document.getElementById('sbHamburgerBtn');
   var backdrop = document.getElementById('sbBackdrop');
   var mq = window.matchMedia('(max-width: 575.98px)');
+  var lastFocusedElement = null;
 
   function isHamburgerMode() { return mq.matches; }
 
@@ -216,10 +221,15 @@
 
   // Hamburger button: open sidebar as overlay (State 3)
   hamburgerBtn.addEventListener('click', function () {
+    lastFocusedElement = document.activeElement;
     sidebar.classList.add('sb-open');
     backdrop.classList.add('show');
     document.body.style.overflow = 'hidden';
     hamburgerBtn.setAttribute('aria-expanded', 'true');
+    var firstFocusable = sidebar.querySelector('a.nav-link, button.nav-link, button, a');
+    if (firstFocusable) {
+      firstFocusable.focus();
+    }
   });
 
   function closeSidebar() {
@@ -227,16 +237,29 @@
     backdrop.classList.remove('show');
     document.body.style.overflow = '';
     hamburgerBtn.setAttribute('aria-expanded', 'false');
+    if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+      lastFocusedElement.focus();
+      lastFocusedElement = null;
+    } else {
+      hamburgerBtn.focus();
+    }
   }
 
   // Close on backdrop click
   backdrop.addEventListener('click', closeSidebar);
 
   // Close on nav-link click in hamburger mode (navigate away)
-  sidebar.querySelectorAll('a.nav-link').forEach(function (link) {
+  sidebar.querySelectorAll('a.nav-link, button.nav-link').forEach(function (link) {
     link.addEventListener('click', function () {
       if (isHamburgerMode()) closeSidebar();
     });
+  });
+
+  // Escape closes overlay menu in hamburger mode
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && isHamburgerMode() && sidebar.classList.contains('sb-open')) {
+      closeSidebar();
+    }
   });
 
   // Handle transition between hamburger and normal modes on resize
