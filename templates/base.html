@@ -9,10 +9,42 @@
   <style>
     body { font-size: .9rem; }
     .nav-link.active { font-weight: 600; }
-    .sidebar { min-height: 100vh; background: #1a1d21; border-right: 1px solid #2d3035; }
-    .sidebar .nav-link { color: #adb5bd; border-radius: 6px; margin: 1px 4px; padding: .4rem .8rem; }
+    /* ===== Sidebar Base ===== */
+    :root { --sb-full: 220px; --sb-compact: 56px; }
+    .sidebar { flex-shrink: 0; width: var(--sb-full); min-height: 100vh; padding: 1rem; background: #1a1d21; border-right: 1px solid #2d3035; position: relative; overflow: hidden; transition: width 0.22s ease; }
+    .sidebar .nav-link { color: #adb5bd; border-radius: 6px; margin: 1px 4px; padding: .4rem .8rem; display: flex; align-items: center; gap: .5rem; white-space: nowrap; }
     .sidebar .nav-link:hover, .sidebar .nav-link.active { background: #2d3035; color: #fff; }
-    .sidebar .nav-link i { width: 1.4rem; }
+    .sidebar .nav-link i { width: 1.4rem; flex-shrink: 0; }
+    /* Sidebar label (text part) */
+    .sb-label { overflow: hidden; transition: opacity 0.15s ease, max-width 0.22s ease; max-width: 200px; white-space: nowrap; }
+    /* ===== State 2: Compact (icon-only) ===== */
+    .sidebar.sidebar-compact { width: var(--sb-compact); padding-left: 0; padding-right: 0; }
+    .sidebar.sidebar-compact .sb-label { opacity: 0; max-width: 0; pointer-events: none; }
+    .sidebar.sidebar-compact .sb-brand-text { display: none; }
+    .sidebar.sidebar-compact .nav-link { margin: 1px 2px; padding: .5rem .4rem; justify-content: center; }
+    .sidebar.sidebar-compact .sb-brand { padding: 0 .6rem; justify-content: center; }
+    .sidebar.sidebar-compact .sb-footer { display: none; }
+    /* ===== Sidebar edge toggle button ===== */
+    .sb-toggle-btn { position: absolute; right: -14px; top: 64px; z-index: 200; width: 28px; height: 28px; border-radius: 50%; border: 1px solid #2d3035; background: #1a1d21; color: #adb5bd; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; transition: background 0.15s, color 0.15s; }
+    .sb-toggle-btn:hover { background: #2d3035; color: #fff; }
+    /* ===== State 3: Hamburger topbar ===== */
+    .sb-topbar { display: none; background: #1a1d21; border-bottom: 1px solid #2d3035; padding: .5rem 1rem; align-items: center; gap: .75rem; position: sticky; top: 0; z-index: 100; }
+    /* Overlay backdrop */
+    .sb-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1040; }
+    .sb-backdrop.show { display: block; }
+    /* Hamburger mode (≤ 575px) */
+    @media (max-width: 575.98px) {
+      .sb-topbar { display: flex; }
+      .sb-toggle-btn { display: none; }
+      .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: var(--sb-full); z-index: 1045; overflow-y: auto; transform: translateX(-100%); transition: transform 0.25s ease; }
+      .sidebar.sb-open { transform: translateX(0); }
+      .sidebar.sidebar-compact { padding-left: 1rem; padding-right: 1rem; }
+      .sidebar.sidebar-compact .sb-label { opacity: 1; max-width: 200px; pointer-events: auto; }
+      .sidebar.sidebar-compact .sb-brand-text { display: inline; }
+      .sidebar.sidebar-compact .nav-link { margin: 1px 4px; padding: .4rem .8rem; justify-content: flex-start; }
+      .sidebar.sidebar-compact .sb-brand { padding: 0; justify-content: flex-start; }
+      .sidebar.sidebar-compact .sb-footer { display: block; }
+    }
     .main-content { min-height: 100vh; }
     .badge-level-ERROR, .badge-level-FATAL, .badge-level-CRITICAL { background-color: #dc3545 !important; }
     .badge-level-WARN, .badge-level-WARNING { background-color: #fd7e14 !important; }
@@ -62,61 +94,77 @@
   </style>
 </head>
 <body>
+<!-- Overlay backdrop for hamburger sidebar -->
+<div id="sbBackdrop" class="sb-backdrop"></div>
+<!-- Topbar: visible only in hamburger/small-screen mode -->
+<div id="sbTopbar" class="sb-topbar">
+  <button id="sbHamburgerBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center" aria-label="Open menu" aria-expanded="false" aria-controls="sbSidebar">
+    <i class="bi bi-list fs-5"></i>
+  </button>
+  <a href="{{ url_for('summary') }}" class="text-decoration-none d-flex align-items-center gap-2">
+    <span>🔭</span>
+    <span class="fw-bold text-white">SOBS</span>
+  </a>
+</div>
 <div class="d-flex">
   <!-- Sidebar -->
-  <nav class="sidebar d-flex flex-column p-3" style="width:220px;flex-shrink:0;">
-    <a href="{{ url_for('summary') }}" class="text-decoration-none mb-4 d-flex align-items-center gap-2">
+  <nav id="sbSidebar" class="sidebar d-flex flex-column" aria-label="Main navigation">
+    <!-- Sidebar edge toggle button (full ↔ compact) -->
+    <button id="sbToggleBtn" class="sb-toggle-btn" aria-label="Toggle sidebar">
+      <i id="sbToggleIcon" class="bi bi-chevron-left"></i>
+    </button>
+    <a href="{{ url_for('summary') }}" class="text-decoration-none mb-4 d-flex align-items-center gap-2 sb-brand">
       <span style="font-size:1.4rem;">🔭</span>
-      <span class="fw-bold fs-5 text-white">SOBS</span>
+      <span class="fw-bold fs-5 text-white sb-brand-text">SOBS</span>
     </a>
     <ul class="nav flex-column gap-1">
       <li class="nav-item">
-        <a href="{{ url_for('summary') }}" class="nav-link {% if request.endpoint == 'summary' %}active{% endif %}">
-          <i class="bi bi-speedometer2"></i> Summary
+        <a href="{{ url_for('summary') }}" class="nav-link {% if request.endpoint == 'summary' %}active{% endif %}" title="Summary">
+          <i class="bi bi-speedometer2"></i><span class="sb-label">Summary</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('list_dashboards') }}" class="nav-link {% if request.endpoint in ('list_dashboards', 'view_custom_dashboard', 'new_dashboard_form') %}active{% endif %}">
-          <i class="bi bi-bar-chart-line"></i> Dashboards
+        <a href="{{ url_for('list_dashboards') }}" class="nav-link {% if request.endpoint in ('list_dashboards', 'view_custom_dashboard', 'new_dashboard_form') %}active{% endif %}" title="Dashboards">
+          <i class="bi bi-bar-chart-line"></i><span class="sb-label">Dashboards</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_logs') }}" class="nav-link {% if request.endpoint == 'view_logs' %}active{% endif %}">
-          <i class="bi bi-journal-text"></i> Logs
+        <a href="{{ url_for('view_logs') }}" class="nav-link {% if request.endpoint == 'view_logs' %}active{% endif %}" title="Logs">
+          <i class="bi bi-journal-text"></i><span class="sb-label">Logs</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_errors') }}" class="nav-link {% if request.endpoint == 'view_errors' %}active{% endif %}">
-          <i class="bi bi-bug"></i> Errors
+        <a href="{{ url_for('view_errors') }}" class="nav-link {% if request.endpoint == 'view_errors' %}active{% endif %}" title="Errors">
+          <i class="bi bi-bug"></i><span class="sb-label">Errors</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_traces') }}" class="nav-link {% if request.endpoint == 'view_traces' %}active{% endif %}">
-          <i class="bi bi-diagram-3"></i> Traces
+        <a href="{{ url_for('view_traces') }}" class="nav-link {% if request.endpoint == 'view_traces' %}active{% endif %}" title="Traces">
+          <i class="bi bi-diagram-3"></i><span class="sb-label">Traces</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_metrics') }}" class="nav-link {% if request.endpoint in ('view_metrics', 'view_metrics_anomaly', 'view_metrics_rules') %}active{% endif %}">
-          <i class="bi bi-graph-up-arrow"></i> Metrics
+        <a href="{{ url_for('view_metrics') }}" class="nav-link {% if request.endpoint in ('view_metrics', 'view_metrics_anomaly', 'view_metrics_rules') %}active{% endif %}" title="Metrics">
+          <i class="bi bi-graph-up-arrow"></i><span class="sb-label">Metrics</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_rum') }}" class="nav-link {% if request.endpoint == 'view_rum' %}active{% endif %}">
-          <i class="bi bi-globe"></i> RUM
+        <a href="{{ url_for('view_rum') }}" class="nav-link {% if request.endpoint == 'view_rum' %}active{% endif %}" title="RUM">
+          <i class="bi bi-globe"></i><span class="sb-label">RUM</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_ai') }}" class="nav-link {% if request.endpoint == 'view_ai' %}active{% endif %}">
-          <i class="bi bi-cpu"></i> AI
+        <a href="{{ url_for('view_ai') }}" class="nav-link {% if request.endpoint == 'view_ai' %}active{% endif %}" title="AI">
+          <i class="bi bi-cpu"></i><span class="sb-label">AI</span>
         </a>
       </li>
       <li class="nav-item mt-2">
-        <button id="reopenWelcomeTourBtn" type="button" class="nav-link btn btn-link text-start w-100">
-          <i class="bi bi-stars"></i> Quick Tour
+        <button id="reopenWelcomeTourBtn" type="button" class="nav-link btn btn-link text-start w-100" title="Quick Tour">
+          <i class="bi bi-stars"></i><span class="sb-label">Quick Tour</span>
         </button>
       </li>
     </ul>
-    <div class="mt-auto pt-3 border-top border-secondary">
+    <div class="mt-auto pt-3 border-top border-secondary sb-footer">
       <small class="text-secondary">Simple Observe Stack v1.0</small>
     </div>
   </nav>
@@ -141,5 +189,72 @@
   {% include "_first_run_tour.html" %}
 {% endif %}
 {% block scripts %}{% endblock %}
+<script>
+(function () {
+  var sidebar = document.getElementById('sbSidebar');
+  var toggleBtn = document.getElementById('sbToggleBtn');
+  var toggleIcon = document.getElementById('sbToggleIcon');
+  var hamburgerBtn = document.getElementById('sbHamburgerBtn');
+  var backdrop = document.getElementById('sbBackdrop');
+  var mq = window.matchMedia('(max-width: 575.98px)');
+
+  function isHamburgerMode() { return mq.matches; }
+
+  // Restore saved state (compact or full) on medium+ screens
+  var saved = localStorage.getItem('sobs-sidebar-state') || 'full';
+  if (saved === 'compact' && !isHamburgerMode()) {
+    sidebar.classList.add('sidebar-compact');
+    toggleIcon.className = 'bi bi-chevron-right';
+  }
+
+  // Toggle button: switch between full (State 1) and compact (State 2)
+  toggleBtn.addEventListener('click', function () {
+    var isCompact = sidebar.classList.toggle('sidebar-compact');
+    toggleIcon.className = isCompact ? 'bi bi-chevron-right' : 'bi bi-chevron-left';
+    localStorage.setItem('sobs-sidebar-state', isCompact ? 'compact' : 'full');
+  });
+
+  // Hamburger button: open sidebar as overlay (State 3)
+  hamburgerBtn.addEventListener('click', function () {
+    sidebar.classList.add('sb-open');
+    backdrop.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    hamburgerBtn.setAttribute('aria-expanded', 'true');
+  });
+
+  function closeSidebar() {
+    sidebar.classList.remove('sb-open');
+    backdrop.classList.remove('show');
+    document.body.style.overflow = '';
+    hamburgerBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  // Close on backdrop click
+  backdrop.addEventListener('click', closeSidebar);
+
+  // Close on nav-link click in hamburger mode (navigate away)
+  sidebar.querySelectorAll('a.nav-link').forEach(function (link) {
+    link.addEventListener('click', function () {
+      if (isHamburgerMode()) closeSidebar();
+    });
+  });
+
+  // Handle transition between hamburger and normal modes on resize
+  mq.addEventListener('change', function (e) {
+    if (!e.matches) {
+      // Back to normal/desktop mode
+      closeSidebar();
+      var restoredState = localStorage.getItem('sobs-sidebar-state') || 'full';
+      if (restoredState === 'compact') {
+        sidebar.classList.add('sidebar-compact');
+        toggleIcon.className = 'bi bi-chevron-right';
+      } else {
+        sidebar.classList.remove('sidebar-compact');
+        toggleIcon.className = 'bi bi-chevron-left';
+      }
+    }
+  });
+}());
+</script>
 </body>
 </html>
