@@ -825,6 +825,8 @@
   let activeIdx = -1;        // keyboard-navigation index
   let lastItems = [];        // items currently in dropdown
   let validateTimer = null;  // debounced server-side validation timer
+  let validateSeq = 0;       // monotonic request counter for stale-response protection
+  let validateController = null; // abort in-flight validation fetch when superseded
 
   const fieldHintsUrl = {{ url_for('api_logs_field_hints')|tojson }};
   const validateUrl = {{ url_for('api_logs_validate_filter')|tojson }};
@@ -900,18 +902,31 @@
   }
 
   async function validateServerSide() {
+    const requestSeq = ++validateSeq;
+    const sqlSnapshot = input.value;
+
     const local = localValidate(input.value);
     setFeedback(local.level, local.message);
     if (!local.ok || !input.value.trim()) return;
+
+    if (validateController) {
+      validateController.abort();
+    }
+    validateController = new AbortController();
+
     try {
       const res = await fetch(validateUrl, {
         method: "POST",
         credentials: "same-origin",
+        signal: validateController.signal,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sql: input.value }),
+        body: JSON.stringify({ sql: sqlSnapshot }),
       });
       if (!res.ok) return;
       const data = await res.json();
+      if (requestSeq !== validateSeq || input.value !== sqlSnapshot) {
+        return;
+      }
       if (!data.ok) {
         const first = (data.issues || [])[0];
         setFeedback(first && first.level ? first.level : "error", first && first.message ? first.message : "Invalid SQL filter.");
@@ -924,7 +939,14 @@
         setFeedback("success", "Filter is valid.");
       }
     } catch (_err) {
+      if (_err && _err.name === "AbortError") {
+        return;
+      }
       // Keep local feedback when network validation fails.
+    } finally {
+      if (requestSeq === validateSeq) {
+        validateController = null;
+      }
     }
   }
 
@@ -1110,6 +1132,13 @@
         insert: sn.insert,
         prefix: "",
       }));
+      const attrSnippets = (h.attr_keys || []).map((key) => ({
+        type: "snippet",
+        label: `attr.${key}`,
+        hint: "log attribute",
+        insert: `LogAttributes['${String(key).replace(/'/g, "''")}']`,
+        prefix: "",
+      }));
       const matchesPrefix = (item) => {
         const label = String(item.label || "").toLowerCase();
         const insert = String(item.insert || "").toLowerCase();
@@ -1126,6 +1155,7 @@
         ...pinnedFunctions,
         ...otherFunctions,
         ...keywords,
+        ...attrSnippets,
         ...snippets,
       ];
 
@@ -1210,9 +1240,6 @@
   // Initial validation state for pre-filled sql query params.
   const initial = localValidate(input.value);
   setFeedback(initial.level, initial.message);
-  if (input.value.trim()) {
-    validateServerSide();
-  }
 })();
 </script>
 {% endblock %}

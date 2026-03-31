@@ -968,6 +968,50 @@ class TestUIPages:
         assert bad_data["ok"] is False
         assert bad_data["issues"]
 
+    async def test_logs_attr_keys_catalog_and_hints(self, client):
+        import time as _time
+
+        from app import get_db
+
+        ts_ns = int(_time.time() * 1_000_000_000)
+        attr_key = f"http.route.test.{ts_ns}"
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "attr-key-svc"}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": "attr key capture test"},
+                                        "attributes": [
+                                            {"key": attr_key, "value": {"stringValue": "ok"}},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        db = get_db()
+        row = db.execute(
+            "SELECT count() FROM sobs_log_attr_keys FINAL WHERE RecordType='log' AND AttrKey=? AND IsDeleted=0",
+            [attr_key],
+        ).fetchone()
+        assert row is not None and int(row[0]) >= 1
+
+        hints = await client.get("/api/logs/field-hints")
+        assert hints.status_code == 200
+        hints_data = await hints.get_json()
+        assert attr_key in (hints_data.get("attr_keys") or [])
+
     async def test_logs_has_tag_filter(self, client):
         """has_tag() in sql WHERE should filter by record tags."""
         import time as _time
@@ -1340,7 +1384,7 @@ class TestUIPages:
         }
         await client.post("/v1/logs", json=payload)
 
-        r = await client.get("/logs?stats=1")
+        r = await client.get("/logs?stats=1&service=chip-svc")
         assert r.status_code == 200
         data = await r.get_data()
         assert b"level=ERROR" in data

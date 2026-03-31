@@ -678,6 +678,15 @@ CREATE TABLE IF NOT EXISTS sobs_record_tags (
 ) ENGINE = ReplacingMergeTree(Version)
 ORDER BY (RecordType, RecordId, TagKey)
 SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS sobs_log_attr_keys (
+    RecordType LowCardinality(String) CODEC(ZSTD(1)),
+    AttrKey LowCardinality(String) CODEC(ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (RecordType, AttrKey)
+SETTINGS index_granularity = 8192;
 """
 
 
@@ -794,10 +803,14 @@ _schema_ready = False
 _write_queue: queue.Queue["_WriteTask"] | None = None
 _write_thread: threading.Thread | None = None
 _write_worker_lock = threading.Lock()
+_log_attr_keys_lock = threading.Lock()
+_log_attr_keys_cache_loaded = False
+_log_attr_keys_by_record_type: dict[str, set[str]] = {"log": set()}
 
 WRITE_QUEUE_MAX = int(os.environ.get("SOBS_WRITE_QUEUE_MAX", 5000))
 WRITE_BATCH_MAX = int(os.environ.get("SOBS_WRITE_BATCH_MAX", 200))
 WRITE_BATCH_WAIT_MS = int(os.environ.get("SOBS_WRITE_BATCH_WAIT_MS", 20))
+LOG_ATTR_KEYS_MAX = int(os.environ.get("SOBS_LOG_ATTR_KEYS_MAX", 20000))
 
 
 @dataclass
@@ -856,8 +869,84 @@ def ensure_db_schema():
 
 def _ensure_post_schema_state(db: ChDbConnection) -> None:
     _ensure_anomaly_rule_schema(db)
+    _prime_log_attr_key_cache(db)
     if not app.config.get("TESTING"):
         _seed_example_metrics_content(db)
+
+
+def _load_log_attr_keys_from_db(db: ChDbConnection, record_type: str) -> set[str]:
+    rows = db.execute(
+        "SELECT DISTINCT AttrKey FROM sobs_log_attr_keys FINAL " "WHERE RecordType=? AND IsDeleted=0 ORDER BY AttrKey",
+        [record_type],
+    ).fetchall()
+    return {str(r[0]) for r in rows if str(r[0]).strip()}
+
+
+def _prime_log_attr_key_cache(db: ChDbConnection) -> None:
+    global _log_attr_keys_cache_loaded
+    with _log_attr_keys_lock:
+        if _log_attr_keys_cache_loaded:
+            return
+        _log_attr_keys_by_record_type["log"] = _load_log_attr_keys_from_db(db, "log")
+        _log_attr_keys_cache_loaded = True
+
+
+def _get_cached_log_attr_keys(db: ChDbConnection, record_type: str = "log") -> list[str]:
+    _prime_log_attr_key_cache(db)
+    with _log_attr_keys_lock:
+        keys = sorted(_log_attr_keys_by_record_type.get(record_type, set()))
+    return keys
+
+
+def _remember_log_attr_keys(db: ChDbConnection, attrs_maps: list[dict], record_type: str = "log") -> None:
+    if not attrs_maps:
+        return
+    _prime_log_attr_key_cache(db)
+
+    with _log_attr_keys_lock:
+        existing = _log_attr_keys_by_record_type.setdefault(record_type, set())
+        if len(existing) >= LOG_ATTR_KEYS_MAX:
+            return
+
+        candidates: set[str] = set()
+        for attrs in attrs_maps:
+            if not isinstance(attrs, dict):
+                continue
+            for raw_key in attrs.keys():
+                key = str(raw_key).strip()
+                if not key or key in existing or key in candidates:
+                    continue
+                if len(existing) + len(candidates) >= LOG_ATTR_KEYS_MAX:
+                    break
+                candidates.add(key)
+
+        if not candidates:
+            return
+
+        version = int(time.time() * 1000)
+        rows = [
+            {
+                "RecordType": record_type,
+                "AttrKey": key,
+                "IsDeleted": 0,
+                "Version": version + idx,
+            }
+            for idx, key in enumerate(sorted(candidates))
+        ]
+        try:
+            _insert_rows_json_each_row(db, "sobs_log_attr_keys", rows)
+            existing.update(candidates)
+        except Exception:
+            app.logger.exception("failed to persist discovered log attribute keys")
+
+
+def _extract_log_attr_maps(rows: list[dict]) -> list[dict]:
+    maps: list[dict] = []
+    for row in rows:
+        raw_attrs = row.get("LogAttributes", {})
+        if isinstance(raw_attrs, dict):
+            maps.append(raw_attrs)
+    return maps
 
 
 def _ensure_anomaly_rule_schema(db: ChDbConnection) -> None:
@@ -2005,6 +2094,7 @@ def _insert_log_events(db, events: list[LogEvent]) -> int:
             }
         )
     count = _insert_rows_json_each_row(db, "otel_logs", rows)
+    _remember_log_attr_keys(db, _extract_log_attr_maps(rows), record_type="log")
     try:
         rules = _load_tag_rules(db)
         if rules:
@@ -2077,6 +2167,7 @@ def _insert_error_events(db, error_events: list[ErrorEvent]):
             }
         )
     _insert_rows_json_each_row(db, "otel_logs", rows)
+    _remember_log_attr_keys(db, _extract_log_attr_maps(rows), record_type="log")
     try:
         rules = _load_tag_rules(db)
         if rules:
@@ -2363,6 +2454,7 @@ async def ingest_rum():
     def _op(db: ChDbConnection) -> None:
         _insert_rows_json_each_row(db, "hyperdx_sessions", session_rows)
         _insert_rows_json_each_row(db, "otel_logs", error_rows)
+        _remember_log_attr_keys(db, _extract_log_attr_maps(error_rows), record_type="log")
         try:
             rules = _load_tag_rules(db)
             if rules:
@@ -2506,6 +2598,7 @@ async def ingest_errors():
 
     def _op(db: ChDbConnection) -> None:
         _insert_rows_json_each_row(db, "otel_logs", [row])
+        _remember_log_attr_keys(db, _extract_log_attr_maps([row]), record_type="log")
         try:
             rules = _load_tag_rules(db)
             if rules:
@@ -8691,26 +8784,18 @@ async def api_delete_tag(record_type: str, record_id: str, tag_key: str):
 async def api_logs_field_hints():
     db = get_db()
 
-    # Enum-like fields: fetch distinct values (cap at 50 to keep response small)
-    def _distinct(col: str, table: str = "otel_logs", limit: int = 50) -> list[str]:
-        try:
-            rows = db.execute(
-                f"SELECT DISTINCT {col} FROM {table} WHERE {col} != '' ORDER BY {col} LIMIT {limit}"
-            ).fetchall()
-            return [str(r[0]) for r in rows]
-        except Exception:
-            return []
-
     fields = [
-        {"name": "level", "column": "SeverityText", "type": "string", "values": _distinct("SeverityText")},
-        {"name": "service", "column": "ServiceName", "type": "string", "values": _distinct("ServiceName")},
+        {"name": "level", "column": "SeverityText", "type": "string", "values": []},
+        {"name": "service", "column": "ServiceName", "type": "string", "values": []},
         {"name": "body", "column": "Body", "type": "string", "values": []},
         {"name": "trace_id", "column": "TraceId", "type": "string", "values": []},
         {"name": "span_id", "column": "SpanId", "type": "string", "values": []},
         {"name": "ts", "column": "Timestamp", "type": "datetime", "values": []},
-        {"name": "EventName", "column": "EventName", "type": "string", "values": _distinct("EventName")},
-        {"name": "ScopeName", "column": "ScopeName", "type": "string", "values": _distinct("ScopeName")},
+        {"name": "EventName", "column": "EventName", "type": "string", "values": []},
+        {"name": "ScopeName", "column": "ScopeName", "type": "string", "values": []},
     ]
+
+    attr_keys = _get_cached_log_attr_keys(db, record_type="log")
 
     # Active tag keys for logs (used in has_tag() suggestions)
     try:
@@ -8760,6 +8845,7 @@ async def api_logs_field_hints():
     return jsonify(
         {
             "fields": fields,
+            "attr_keys": attr_keys,
             "tag_keys": tag_keys,
             "tag_values": tag_values,
             "operators": operators,
@@ -8836,7 +8922,8 @@ async def api_logs_validate_filter():
         )
 
         db = get_db()
-        db.execute(f"SELECT count() FROM otel_logs WHERE {safe_sql} LIMIT 1").fetchone()
+        # Existence probe is much cheaper than aggregate count() for live typing validation.
+        db.execute(f"SELECT 1 FROM otel_logs WHERE {safe_sql} LIMIT 1").fetchone()
     except Exception as exc:
         issues.append({"level": "error", "message": _public_dashboard_query_error(exc)})
         return jsonify({"ok": False, "normalized": "", "issues": issues}), 200
