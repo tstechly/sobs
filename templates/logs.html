@@ -22,6 +22,13 @@
   .stats-panel-updated {
     animation: statsPanelFlash 1.3s ease-out;
   }
+  .sql-feedback {
+    min-height: 1.25rem;
+    line-height: 1.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 </style>
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-journal-text me-2 text-info"></i>Logs</h4>
@@ -71,7 +78,7 @@
         <div class="position-relative">
           <input type="text" name="sql" id="sql-filter-input" class="form-control form-control-sm font-monospace"
                  placeholder="level='ERROR' AND service='api'" value="{{ sql_where }}"
-                 autocomplete="off" aria-autocomplete="list" aria-haspopup="listbox">
+                 autocomplete="off" aria-autocomplete="list" aria-haspopup="listbox" aria-describedby="sql-filter-feedback">
           <ul id="sql-ac-dropdown" role="listbox"
               class="dropdown-menu p-0 font-monospace small"
               style="display:none;position:absolute;top:100%;left:0;right:0;z-index:1060;max-height:220px;overflow-y:auto;"></ul>
@@ -97,7 +104,10 @@
         <a href="{{ url_for('view_logs') }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x"></i></a>
       </div>
     </form>
-    {% if error_msg %}
+    <div id="sql-filter-feedback" class="form-text small text-secondary mt-1 sql-feedback" title="{{ error_msg if (error_msg and sql_where) else '' }}">
+      {{ (error_msg if (error_msg and sql_where) else "Use fields, SQL operators, or functions like has_tag().") }}
+    </div>
+    {% if error_msg and not sql_where %}
     <div class="alert alert-danger mt-2 mb-0 py-1 small">{{ error_msg }}</div>
     {% endif %}
   </div>
@@ -190,14 +200,13 @@
           <div class="col-12">
             <h6 class="text-secondary small mb-2"><i class="bi bi-tags me-1"></i>Tags on visible records <small class="text-muted fw-normal">(click to filter)</small></h6>
             <div class="d-flex flex-wrap gap-2">
-              {% for tag_label, cnt in tag_stats.items() %}
-              {% set tag_parts = tag_label.split(':', 1) %}
-              {% set safe_key = tag_parts[0] | replace("'", "''") %}
-              {% set safe_val = (tag_parts[1] if tag_parts|length > 1 else '') | replace("'", "''") %}
+              {% for tag in tag_stats %}
+              {% set safe_key = tag.key | replace("'", "''") %}
+              {% set safe_val = tag.value | replace("'", "''") %}
               <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql="has_tag('" + safe_key + "','" + safe_val + "')", from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, stats='1') }}"
                  class="badge bg-info-subtle text-info-emphasis text-decoration-none"
-                 title="Filter by {{ tag_label }}">
-                <i class="bi bi-tag me-1"></i>{{ tag_label }}: {{ cnt }}
+                 title="Filter by {{ tag.key }}={{ tag.value }}">
+                <i class="bi bi-tag me-1"></i>{{ tag.key }}={{ tag.value }}: {{ tag.count }}
               </a>
               {% endfor %}
             </div>
@@ -809,13 +818,115 @@
 (() => {
   const input = document.getElementById("sql-filter-input");
   const dropdown = document.getElementById("sql-ac-dropdown");
+  const feedback = document.getElementById("sql-filter-feedback");
   if (!input || !dropdown) return;
 
   let hints = null;          // cached field hints from API
   let activeIdx = -1;        // keyboard-navigation index
   let lastItems = [];        // items currently in dropdown
+  let validateTimer = null;  // debounced server-side validation timer
 
   const fieldHintsUrl = {{ url_for('api_logs_field_hints')|tojson }};
+  const validateUrl = {{ url_for('api_logs_validate_filter')|tojson }};
+
+  const localOperators = ["=", "!=", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE", "IN", "NOT IN", ">", "<", ">=", "<="];
+
+  function compactSqlMessage(message) {
+    const text = String(message || "").trim();
+    if (!text) return "Invalid SQL filter.";
+    const firstLine = text.split(/\r?\n/, 1)[0].trim();
+    const simplified = firstLine
+      .replace(/^SQL\s+error:\s*/i, "")
+      .replace(/^DB::Exception:\s*/i, "")
+      .replace(/\s*\(SYNTAX_ERROR\)\s*$/i, "")
+      .replace(/\s+Expected one of:.*$/i, "")
+      .trim();
+    if (simplified.length <= 160) return simplified;
+    return `${simplified.slice(0, 157).trim()}...`;
+  }
+
+  function setFeedback(level, message) {
+    if (!feedback) return;
+    feedback.classList.remove("text-secondary", "text-danger", "text-warning", "text-success");
+    if (level === "error") {
+      feedback.classList.add("text-danger");
+    } else if (level === "warning") {
+      feedback.classList.add("text-warning");
+    } else if (level === "success") {
+      feedback.classList.add("text-success");
+    } else {
+      feedback.classList.add("text-secondary");
+    }
+    const compact = compactSqlMessage(message);
+    feedback.textContent = compact;
+    feedback.title = String(message || compact);
+  }
+
+  function localValidate(text) {
+    const sql = String(text || "").trim();
+    if (!sql) {
+      return { ok: true, level: "info", message: "Use fields, SQL operators, or functions like has_tag()." };
+    }
+    let quoteOpen = false;
+    let parenDepth = 0;
+    for (let i = 0; i < sql.length; i += 1) {
+      const ch = sql[i];
+      if (ch === "'") {
+        if (i + 1 < sql.length && sql[i + 1] === "'") {
+          i += 1;
+          continue;
+        }
+        quoteOpen = !quoteOpen;
+      } else if (!quoteOpen) {
+        if (ch === "(") parenDepth += 1;
+        if (ch === ")") {
+          parenDepth -= 1;
+          if (parenDepth < 0) {
+            return { ok: false, level: "error", message: "Unexpected ')' in filter." };
+          }
+        }
+      }
+    }
+    if (quoteOpen) {
+      return { ok: false, level: "error", message: "Unclosed single quote in filter." };
+    }
+    if (parenDepth > 0) {
+      return { ok: false, level: "error", message: "Unclosed '(' in filter." };
+    }
+    if (/(AND|OR|NOT|IN|LIKE|ILIKE)\s*$/i.test(sql)) {
+      return { ok: false, level: "warning", message: "Filter ends with an operator or keyword." };
+    }
+    return { ok: true, level: "success", message: "Filter syntax looks good so far." };
+  }
+
+  async function validateServerSide() {
+    const local = localValidate(input.value);
+    setFeedback(local.level, local.message);
+    if (!local.ok || !input.value.trim()) return;
+    try {
+      const res = await fetch(validateUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sql: input.value }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.ok) {
+        const first = (data.issues || [])[0];
+        setFeedback(first && first.level ? first.level : "error", first && first.message ? first.message : "Invalid SQL filter.");
+        return;
+      }
+      const warn = (data.issues || []).find((i) => i.level === "warning");
+      if (warn) {
+        setFeedback("warning", warn.message);
+      } else {
+        setFeedback("success", "Filter is valid.");
+      }
+    } catch (_err) {
+      // Keep local feedback when network validation fails.
+    }
+  }
 
   async function loadHints() {
     if (hints) return hints;
@@ -868,31 +979,58 @@
     return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
+  function _sqlQuote(s) {
+    return String(s).replace(/'/g, "''");
+  }
+
+  function fieldByName(name) {
+    if (!hints || !hints.fields) return null;
+    const needle = String(name || "").toLowerCase();
+    return hints.fields.find((f) => f.name.toLowerCase() === needle || f.column.toLowerCase() === needle) || null;
+  }
+
   // Parse the input to figure out what we're completing:
-  // - After AND/OR or at start: suggest field names
+  // - After AND/OR or at start: suggest field names, keywords, functions
+  // - After a complete field: suggest operators
   // - After "field=" or "field='...": suggest values for that field
   // - "has_tag(" or "has_tag('key',": suggest tag keys/values
   function parseContext(val, cursor) {
     const text = val.slice(0, cursor);
-    // Check for has_tag(  pattern
-    const hasTagOpen = text.match(/has_tag\s*\(\s*'([^']*)$/i);
+    const hasTagOpen = text.match(/has_tag\s*\(\s*'((?:[^']|'')*)$/i);
     if (hasTagOpen) {
-      return { type: "tag_key", prefix: hasTagOpen[1] };
+      return { type: "tag_key", prefix: hasTagOpen[1].replace(/''/g, "'") };
     }
-    const hasTagVal = text.match(/has_tag\s*\(\s*'([^']*)'\s*,\s*'([^']*)$/i);
+    const hasTagVal = text.match(/has_tag\s*\(\s*'((?:[^']|'')*)'\s*,\s*'((?:[^']|'')*)$/i);
     if (hasTagVal) {
-      return { type: "tag_value", tag_key: hasTagVal[1], prefix: hasTagVal[2] };
+      return { type: "tag_value", tag_key: hasTagVal[1].replace(/''/g, "'"), prefix: hasTagVal[2].replace(/''/g, "'") };
     }
-    // Check for field='value' pattern
-    const fieldVal = text.match(/(\w+)\s*=\s*'([^']*)$/i);
+
+    const inQuotedVal = text.match(/(\w+)\s*(IN|NOT\s+IN)\s*\(\s*'((?:[^']|'')*)$/i);
+    if (inQuotedVal) {
+      return { type: "field_value", field: inQuotedVal[1].toLowerCase(), prefix: inQuotedVal[3].replace(/''/g, "'") };
+    }
+
+    const fieldVal = text.match(/(\w+)\s*(=|!=|LIKE|NOT\s+LIKE|ILIKE|NOT\s+ILIKE|>|<|>=|<=)\s*'((?:[^']|'')*)$/i);
     if (fieldVal) {
-      return { type: "field_value", field: fieldVal[1].toLowerCase(), prefix: fieldVal[2] };
+      return { type: "field_value", field: fieldVal[1].toLowerCase(), prefix: fieldVal[3].replace(/''/g, "'") };
     }
-    // Check for field name at current position (after AND/OR/( or at start)
+
+    const afterFieldOpWord = text.match(/(\w+)\s+([A-Za-z]*)$/);
+    if (afterFieldOpWord && fieldByName(afterFieldOpWord[1])) {
+      return { type: "field_operator", field: afterFieldOpWord[1].toLowerCase(), prefix: afterFieldOpWord[2] || "" };
+    }
+
+    const afterFieldOpSymbol = text.match(/(\w+)\s*([<>!=]{1,2})$/);
+    if (afterFieldOpSymbol && fieldByName(afterFieldOpSymbol[1])) {
+      return { type: "field_operator", field: afterFieldOpSymbol[1].toLowerCase(), prefix: afterFieldOpSymbol[2] || "" };
+    }
+
+    // Check for field name at current position (after AND/OR/( or at start).
     const fieldName = text.match(/(?:^|[\s(](?:AND|OR)\s+|^\s*)(\w*)$/i);
     if (fieldName !== null) {
       return { type: "field_name", prefix: fieldName[1] };
     }
+
     return null;
   }
 
@@ -906,15 +1044,20 @@
     if (item.type === "field_name") {
       // Replace the partial field name
       newBefore = before.replace(/(\w*)$/, item.insert);
+    } else if (item.type === "field_operator") {
+      // Replace a partially typed operator after a known field.
+      newBefore = before.replace(/(\w+)\s+([A-Za-z<>!=]*)$/, `$1 ${item.insert}`);
+    } else if (item.type === "keyword" || item.type === "function" || item.type === "snippet") {
+      newBefore = before.replace(/(\w*)$/, item.insert);
     } else if (item.type === "field_value") {
       // Replace partial value inside quotes
-      newBefore = before.replace(/([^']*)'([^']*)$/, `$1'${item.insert}`);
+      newBefore = before.replace(/([^']*)'((?:[^']|'')*)$/, `$1'${_sqlQuote(item.insert)}`);
     } else if (item.type === "tag_key") {
       // Replace partial tag key inside has_tag('
-      newBefore = before.replace(/(has_tag\s*\(\s*')([^']*)$/i, `$1${item.insert}`);
+      newBefore = before.replace(/(has_tag\s*\(\s*')((?:[^']|'')*)$/i, `$1${_sqlQuote(item.insert)}`);
     } else if (item.type === "tag_value") {
       // Replace partial tag value
-      newBefore = before.replace(/(has_tag\s*\(\s*'[^']*'\s*,\s*')([^']*)$/i, `$1${item.insert}`);
+      newBefore = before.replace(/(has_tag\s*\(\s*'(?:[^']|'')*'\s*,\s*')((?:[^']|'')*)$/i, `$1${_sqlQuote(item.insert)}`);
     } else {
       newBefore = before;
     }
@@ -938,7 +1081,7 @@
     const pfx = (ctx.prefix || "").toLowerCase();
 
     if (ctx.type === "field_name") {
-      // Suggest field aliases + AND/OR keywords + has_tag
+      // Suggest field aliases + SQL keywords + functions + snippets.
       const fieldAliases = h.fields.map(f => ({
         type: "field_name",
         label: f.name,
@@ -946,17 +1089,57 @@
         insert: f.name,
         prefix: "",
       }));
-      // Also suggest has_tag() if there are tag keys
-      if (h.tag_keys && h.tag_keys.length) {
-        fieldAliases.push({
-          type: "field_name",
-          label: "has_tag(…)",
-          hint: "tag filter",
-          insert: "has_tag('",
-          prefix: "",
-        });
-      }
-      items = fieldAliases.filter(f => f.label.toLowerCase().startsWith(pfx) || f.insert.toLowerCase().startsWith(pfx));
+      const keywords = (h.keywords || []).map((kw) => ({
+        type: "keyword",
+        label: kw,
+        hint: "keyword",
+        insert: kw,
+        prefix: "",
+      }));
+      const functions = (h.functions || []).map((fn) => ({
+        type: "function",
+        label: fn.name,
+        hint: fn.signature || "function",
+        insert: fn.name === "has_tag" ? "has_tag('" : `${fn.name}(`,
+        prefix: "",
+      }));
+      const snippets = (h.snippets || []).map((sn) => ({
+        type: "snippet",
+        label: sn.label,
+        hint: sn.kind || "snippet",
+        insert: sn.insert,
+        prefix: "",
+      }));
+      const matchesPrefix = (item) => {
+        const label = String(item.label || "").toLowerCase();
+        const insert = String(item.insert || "").toLowerCase();
+        const hint = String(item.hint || "").toLowerCase();
+        return !pfx || label.startsWith(pfx) || insert.startsWith(pfx) || hint.includes(pfx);
+      };
+
+      // Keep fields first; then pin useful functions so they stay visible.
+      const pinnedFunctions = functions.filter((f) => f.label === "has_tag");
+      const otherFunctions = functions.filter((f) => f.label !== "has_tag");
+
+      const ordered = [
+        ...fieldAliases,
+        ...pinnedFunctions,
+        ...otherFunctions,
+        ...keywords,
+        ...snippets,
+      ];
+
+      items = ordered.filter(matchesPrefix);
+    } else if (ctx.type === "field_operator") {
+      const operators = [...(h.operators || localOperators), "IS NULL", "IS NOT NULL"]
+        .map((op) => ({
+          type: "field_operator",
+          label: op,
+          hint: "operator",
+          insert: op,
+          prefix: `${ctx.field} `,
+        }));
+      items = operators.filter((op) => op.label.toLowerCase().startsWith(pfx));
     } else if (ctx.type === "field_value") {
       const field = h.fields.find(f => f.name.toLowerCase() === ctx.field || f.column.toLowerCase() === ctx.field);
       if (field && field.values.length) {
@@ -964,6 +1147,10 @@
           .filter(v => v.toLowerCase().startsWith(pfx))
           .slice(0, 20)
           .map(v => ({ type: "field_value", label: v, insert: v, prefix: "" }));
+      } else {
+        items = [
+          { type: "field_value", label: "example", hint: "quoted value", insert: "example", prefix: "" },
+        ].filter((v) => v.label.startsWith(pfx));
       }
     } else if (ctx.type === "tag_key") {
       items = (h.tag_keys || [])
@@ -978,11 +1165,21 @@
         .map(v => ({ type: "tag_value", label: v, hint: `value for ${ctx.tag_key}`, insert: v, prefix: "" }));
     }
 
-    openDropdown(items.slice(0, 15));
+    openDropdown(items.slice(0, 100));
   }
 
-  input.addEventListener("input", suggest);
+  input.addEventListener("input", () => {
+    suggest();
+    const local = localValidate(input.value);
+    setFeedback(local.level, local.message);
+    if (validateTimer) window.clearTimeout(validateTimer);
+    validateTimer = window.setTimeout(validateServerSide, 350);
+  });
   input.addEventListener("focus", suggest);
+  input.addEventListener("blur", () => {
+    if (validateTimer) window.clearTimeout(validateTimer);
+    validateTimer = window.setTimeout(validateServerSide, 50);
+  });
 
   input.addEventListener("keydown", (e) => {
     if (dropdown.style.display === "none") return;
@@ -1009,6 +1206,13 @@
       closeDropdown();
     }
   });
+
+  // Initial validation state for pre-filled sql query params.
+  const initial = localValidate(input.value);
+  setFeedback(initial.level, initial.message);
+  if (input.value.trim()) {
+    validateServerSide();
+  }
 })();
 </script>
 {% endblock %}
