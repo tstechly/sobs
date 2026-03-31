@@ -936,6 +936,70 @@ class TestUIPages:
         r = await client.get("/logs?sql=level%3D%27INFO%27")
         assert r.status_code == 200
 
+    async def test_logs_field_hints_api(self, client):
+        r = await client.get("/api/logs/field-hints")
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert "fields" in data
+        assert "tag_keys" in data
+        assert "operators" in data
+        field_names = [f["name"] for f in data["fields"]]
+        assert "level" in field_names
+        assert "service" in field_names
+        assert "body" in field_names
+
+    async def test_logs_has_tag_filter(self, client):
+        """has_tag() in sql WHERE should filter by record tags."""
+        import time as _time
+        ts_ns = int(_time.time() * 1_000_000_000)
+        # Use a stable service name to avoid inflating the distinct-services count
+        service_name = "has-tag-test-svc"
+        tag_key = f"env-{ts_ns}"
+        # Create a tag rule that matches this service
+        await client.post(
+            "/settings/tags",
+            form={
+                "name": f"env-rule-{ts_ns}",
+                "record_types": ["log"],
+                "match_field": "service_name",
+                "match_operator": "eq",
+                "match_value": service_name,
+                "match_attr_key": "",
+                "tag_key": tag_key,
+                "tag_value": "prod",
+            },
+        )
+        # Ingest a log so the tag rule fires
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": f"has-tag-body-{ts_ns}"},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        # Use has_tag() SQL filter – should not produce an error
+        import urllib.parse
+        sql = f"has_tag('{tag_key}','prod')"
+        r = await client.get(f"/logs?sql={urllib.parse.quote(sql)}")
+        assert r.status_code == 200
+        # Should not show an SQL error
+        data = await r.get_data()
+        assert b"SQL error" not in data
+
     async def test_errors_page(self, client):
         r = await client.get("/errors")
         assert r.status_code == 200

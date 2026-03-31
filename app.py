@@ -2841,6 +2841,22 @@ async def view_logs():
             safe_sql = re.sub(r"\bspan_id\b", "SpanId", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bts\b", "Timestamp", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bbody\b", "Body", safe_sql, flags=re.IGNORECASE)
+            # Translate has_tag('key', 'value') to a correlated subquery
+            def _translate_has_tag(m: re.Match) -> str:
+                tag_key = m.group(1).replace("'", "''")
+                tag_val = m.group(2).replace("'", "''")
+                return (
+                    "MD5(concat(ServiceName,'|',toString(Timestamp),'|',TraceId,'|',SpanId)) IN ("
+                    "SELECT RecordId FROM sobs_record_tags FINAL "
+                    f"WHERE TagKey='{tag_key}' AND TagValue='{tag_val}' "
+                    "AND IsDeleted=0 AND RecordType='log')"
+                )
+            safe_sql = re.sub(
+                r"has_tag\s*\(\s*'([^']+)'\s*,\s*'([^']*)'\s*\)",
+                _translate_has_tag,
+                safe_sql,
+                flags=re.IGNORECASE,
+            )
             where = f"WHERE {safe_sql}"
             time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
             if time_conditions:
@@ -2915,8 +2931,38 @@ async def view_logs():
             service_stats = {}
             advanced_analysis = None
 
+    # Compute record IDs for visible rows so tags can be batch-fetched
+    row_record_ids = [
+        _record_id_for_log(
+            str(r["Timestamp"]), str(r["ServiceName"]), str(r["TraceId"]), str(r["SpanId"])
+        )
+        for r in rows
+    ]
+    # Batch-fetch tags for all visible rows in one query
+    tags_by_record_id: dict[str, list[dict]] = {}
+    tag_stats: dict[str, int] = {}
+    if row_record_ids:
+        try:
+            placeholders = ",".join(["?"] * len(row_record_ids))
+            tag_rows_raw = db.execute(
+                f"SELECT RecordId, TagKey, TagValue, IsAuto "
+                f"FROM sobs_record_tags FINAL "
+                f"WHERE RecordType='log' AND RecordId IN ({placeholders}) AND IsDeleted=0 "
+                f"ORDER BY RecordId, TagKey",
+                row_record_ids,
+            ).fetchall()
+            for tr in tag_rows_raw:
+                rid = str(tr["RecordId"])
+                entry = {"key": str(tr["TagKey"]), "value": str(tr["TagValue"]), "is_auto": bool(tr["IsAuto"])}
+                tags_by_record_id.setdefault(rid, []).append(entry)
+                tag_label = f"{tr['TagKey']}:{tr['TagValue']}"
+                tag_stats[tag_label] = tag_stats.get(tag_label, 0) + 1
+        except Exception:
+            pass  # Tags are supplementary; ignore failures
+
     for r in rows:
         body = r["Body"]
+        rid = _record_id_for_log(str(r["Timestamp"]), str(r["ServiceName"]), str(r["TraceId"]), str(r["SpanId"]))
         log_rows.append(
             {
                 "ts": str(r["Timestamp"]),
@@ -2925,6 +2971,8 @@ async def view_logs():
                 "body": body,
                 "trace_id": r["TraceId"],
                 "span_id": r["SpanId"],
+                "record_id": rid,
+                "tags": tags_by_record_id.get(rid, []),
             }
         )
 
@@ -2958,6 +3006,7 @@ async def view_logs():
         run_advanced_analysis=run_advanced_analysis,
         level_stats=level_stats,
         service_stats=service_stats,
+        tag_stats=tag_stats,
         advanced_analysis=advanced_analysis,
         stats_generated_at_iso=stats_generated_at_iso,
         stats_generated_at_display=stats_generated_at_display,
@@ -8621,6 +8670,63 @@ async def api_delete_tag(record_type: str, record_id: str, tag_key: str):
         tombstones,
     )
     return jsonify({"ok": True}), 200
+
+
+# ---------------------------------------------------------------------------
+# Log Field Hints API  GET /api/logs/field-hints
+# Returns available otel_logs field names (with user-friendly aliases),
+# sample values for enum-like fields, and active tag keys for the log type.
+# Used by the SQL filter autocomplete on the Logs page.
+# ---------------------------------------------------------------------------
+@app.route("/api/logs/field-hints", methods=["GET"])
+@require_basic_auth
+async def api_logs_field_hints():
+    db = get_db()
+
+    # Enum-like fields: fetch distinct values (cap at 50 to keep response small)
+    def _distinct(col: str, table: str = "otel_logs", limit: int = 50) -> list[str]:
+        try:
+            rows = db.execute(
+                f"SELECT DISTINCT {col} FROM {table} WHERE {col} != '' ORDER BY {col} LIMIT {limit}"
+            ).fetchall()
+            return [str(r[0]) for r in rows]
+        except Exception:
+            return []
+
+    fields = [
+        {"name": "level", "column": "SeverityText", "type": "string", "values": _distinct("SeverityText")},
+        {"name": "service", "column": "ServiceName", "type": "string", "values": _distinct("ServiceName")},
+        {"name": "body", "column": "Body", "type": "string", "values": []},
+        {"name": "trace_id", "column": "TraceId", "type": "string", "values": []},
+        {"name": "span_id", "column": "SpanId", "type": "string", "values": []},
+        {"name": "ts", "column": "Timestamp", "type": "datetime", "values": []},
+        {"name": "EventName", "column": "EventName", "type": "string", "values": _distinct("EventName")},
+        {"name": "ScopeName", "column": "ScopeName", "type": "string", "values": _distinct("ScopeName")},
+    ]
+
+    # Active tag keys for logs (used in has_tag() suggestions)
+    try:
+        tag_key_rows = db.execute(
+            "SELECT DISTINCT TagKey FROM sobs_record_tags FINAL "
+            "WHERE RecordType='log' AND IsDeleted=0 ORDER BY TagKey LIMIT 100"
+        ).fetchall()
+        tag_keys = [str(r[0]) for r in tag_key_rows]
+        # For each tag key, also fetch distinct values (cap at 20)
+        tag_values: dict[str, list[str]] = {}
+        for tk in tag_keys:
+            val_rows = db.execute(
+                "SELECT DISTINCT TagValue FROM sobs_record_tags FINAL "
+                "WHERE RecordType='log' AND TagKey=? AND IsDeleted=0 ORDER BY TagValue LIMIT 20",
+                [tk],
+            ).fetchall()
+            tag_values[tk] = [str(r[0]) for r in val_rows]
+    except Exception:
+        tag_keys = []
+        tag_values = {}
+
+    operators = ["=", "!=", "LIKE", "NOT LIKE", "IN", "NOT IN", ">", "<", ">=", "<="]
+
+    return jsonify({"fields": fields, "tag_keys": tag_keys, "tag_values": tag_values, "operators": operators})
 
 
 # ---------------------------------------------------------------------------

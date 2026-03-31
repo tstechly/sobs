@@ -68,8 +68,14 @@
       </div>
       <div class="col-md-3">
         <label class="form-label small text-secondary">SQL WHERE <span class="text-muted">(overrides above)</span></label>
-        <input type="text" name="sql" class="form-control form-control-sm font-monospace"
-               placeholder="level='ERROR' AND service='api'" value="{{ sql_where }}">
+        <div class="position-relative">
+          <input type="text" name="sql" id="sql-filter-input" class="form-control form-control-sm font-monospace"
+                 placeholder="level='ERROR' AND service='api'" value="{{ sql_where }}"
+                 autocomplete="off" aria-autocomplete="list" aria-haspopup="listbox">
+          <ul id="sql-ac-dropdown" role="listbox"
+              class="dropdown-menu p-0 font-monospace small"
+              style="display:none;position:absolute;top:100%;left:0;right:0;z-index:1060;max-height:220px;overflow-y:auto;"></ul>
+        </div>
       </div>
       <div class="col-md-2">
         <label class="form-label small text-secondary">From</label>
@@ -178,6 +184,27 @@
           {% endif %}
         </div>
 
+        {% if tag_stats %}
+        <hr class="border-secondary-subtle my-3">
+        <div class="row g-3">
+          <div class="col-12">
+            <h6 class="text-secondary small mb-2"><i class="bi bi-tags me-1"></i>Tags on visible records <small class="text-muted fw-normal">(click to filter)</small></h6>
+            <div class="d-flex flex-wrap gap-2">
+              {% for tag_label, cnt in tag_stats.items() %}
+              {% set tag_parts = tag_label.split(':', 1) %}
+              {% set safe_key = tag_parts[0] | replace("'", "''") %}
+              {% set safe_val = (tag_parts[1] if tag_parts|length > 1 else '') | replace("'", "''") %}
+              <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql="has_tag('" + safe_key + "','" + safe_val + "')", from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, stats='1') }}"
+                 class="badge bg-info-subtle text-info-emphasis text-decoration-none"
+                 title="Filter by {{ tag_label }}">
+                <i class="bi bi-tag me-1"></i>{{ tag_label }}: {{ cnt }}
+              </a>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
         {% if run_advanced_analysis and advanced_analysis %}
         <hr class="border-secondary-subtle my-3">
         <div class="row g-3">
@@ -277,7 +304,22 @@
         <td class="text-secondary small font-monospace">{{ log.ts[:23] }}</td>
         <td><span class="badge badge-level-{{ log.level }}">{{ log.level }}</span></td>
         <td><span class="badge bg-secondary">{{ log.service or '—' }}</span></td>
-        <td class="log-body">{{ log.body }}</td>
+        <td class="log-body">
+          {{ log.body }}
+          {% if log.tags %}
+          <div class="d-flex flex-wrap gap-1 mt-1">
+            {% for tag in log.tags %}
+            {% set safe_tag_key = tag.key | replace("'", "''") %}
+            {% set safe_tag_val = tag.value | replace("'", "''") %}
+            <a href="{{ url_for('view_logs', q=q, level=level, service=service, sql="has_tag('" + safe_tag_key + "','" + safe_tag_val + "')", from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, stats='1') }}"
+               class="badge {% if tag.is_auto %}bg-info-subtle text-info-emphasis{% else %}bg-success-subtle text-success-emphasis{% endif %} text-decoration-none"
+               title="{{ 'Auto-tag' if tag.is_auto else 'Manual tag' }}: {{ tag.key }}={{ tag.value }}">
+              <i class="bi bi-tag me-1"></i>{{ tag.key }}={{ tag.value }}
+            </a>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </td>
         <td>
           {% if log.trace_id %}
           <a href="{{ url_for('view_traces', trace_id=log.trace_id, from_ts=from_ts, to_ts=to_ts) }}" class="trace-link text-truncate d-inline-block" style="max-width:110px;" title="{{ log.trace_id }}">
@@ -759,6 +801,214 @@
   } else if (liveRequested) {
     startLive();
   }
+})();
+</script>
+
+<script>
+// SQL Filter Autocomplete
+(() => {
+  const input = document.getElementById("sql-filter-input");
+  const dropdown = document.getElementById("sql-ac-dropdown");
+  if (!input || !dropdown) return;
+
+  let hints = null;          // cached field hints from API
+  let activeIdx = -1;        // keyboard-navigation index
+  let lastItems = [];        // items currently in dropdown
+
+  const fieldHintsUrl = {{ url_for('api_logs_field_hints')|tojson }};
+
+  async function loadHints() {
+    if (hints) return hints;
+    try {
+      const r = await fetch(fieldHintsUrl, { credentials: "same-origin" });
+      if (r.ok) hints = await r.json();
+    } catch (_) {}
+    return hints;
+  }
+
+  function closeDropdown() {
+    dropdown.style.display = "none";
+    dropdown.innerHTML = "";
+    activeIdx = -1;
+    lastItems = [];
+  }
+
+  function openDropdown(items) {
+    if (!items.length) { closeDropdown(); return; }
+    lastItems = items;
+    activeIdx = -1;
+    dropdown.innerHTML = "";
+    items.forEach((item, i) => {
+      const li = document.createElement("li");
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", "false");
+      li.className = "dropdown-item py-1 px-2 cursor-pointer";
+      li.style.cursor = "pointer";
+      li.innerHTML = `<span class="me-1 text-secondary small">${_esc(item.prefix || "")}</span><strong>${_esc(item.label)}</strong>` +
+        (item.hint ? ` <small class="text-muted ms-1">${_esc(item.hint)}</small>` : "");
+      li.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        applyItem(item);
+      });
+      dropdown.appendChild(li);
+    });
+    dropdown.style.display = "block";
+  }
+
+  function setActive(idx) {
+    const lis = dropdown.querySelectorAll("li");
+    lis.forEach((li, i) => {
+      li.classList.toggle("active", i === idx);
+      li.setAttribute("aria-selected", i === idx ? "true" : "false");
+    });
+    activeIdx = idx;
+  }
+
+  function _esc(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  // Parse the input to figure out what we're completing:
+  // - After AND/OR or at start: suggest field names
+  // - After "field=" or "field='...": suggest values for that field
+  // - "has_tag(" or "has_tag('key',": suggest tag keys/values
+  function parseContext(val, cursor) {
+    const text = val.slice(0, cursor);
+    // Check for has_tag(  pattern
+    const hasTagOpen = text.match(/has_tag\s*\(\s*'([^']*)$/i);
+    if (hasTagOpen) {
+      return { type: "tag_key", prefix: hasTagOpen[1] };
+    }
+    const hasTagVal = text.match(/has_tag\s*\(\s*'([^']*)'\s*,\s*'([^']*)$/i);
+    if (hasTagVal) {
+      return { type: "tag_value", tag_key: hasTagVal[1], prefix: hasTagVal[2] };
+    }
+    // Check for field='value' pattern
+    const fieldVal = text.match(/(\w+)\s*=\s*'([^']*)$/i);
+    if (fieldVal) {
+      return { type: "field_value", field: fieldVal[1].toLowerCase(), prefix: fieldVal[2] };
+    }
+    // Check for field name at current position (after AND/OR/( or at start)
+    const fieldName = text.match(/(?:^|[\s(](?:AND|OR)\s+|^\s*)(\w*)$/i);
+    if (fieldName !== null) {
+      return { type: "field_name", prefix: fieldName[1] };
+    }
+    return null;
+  }
+
+  function applyItem(item) {
+    const val = input.value;
+    const cursor = input.selectionStart;
+    const before = val.slice(0, cursor);
+    const after = val.slice(cursor);
+
+    let newBefore;
+    if (item.type === "field_name") {
+      // Replace the partial field name
+      newBefore = before.replace(/(\w*)$/, item.insert);
+    } else if (item.type === "field_value") {
+      // Replace partial value inside quotes
+      newBefore = before.replace(/([^']*)'([^']*)$/, `$1'${item.insert}`);
+    } else if (item.type === "tag_key") {
+      // Replace partial tag key inside has_tag('
+      newBefore = before.replace(/(has_tag\s*\(\s*')([^']*)$/i, `$1${item.insert}`);
+    } else if (item.type === "tag_value") {
+      // Replace partial tag value
+      newBefore = before.replace(/(has_tag\s*\(\s*'[^']*'\s*,\s*')([^']*)$/i, `$1${item.insert}`);
+    } else {
+      newBefore = before;
+    }
+    input.value = newBefore + after;
+    const newCursor = newBefore.length;
+    input.setSelectionRange(newCursor, newCursor);
+    closeDropdown();
+    input.focus();
+    // Trigger another suggest pass in case we need to continue
+    suggest();
+  }
+
+  async function suggest() {
+    const h = await loadHints();
+    if (!h) return;
+    const cursor = input.selectionStart;
+    const ctx = parseContext(input.value, cursor);
+    if (!ctx) { closeDropdown(); return; }
+
+    let items = [];
+    const pfx = (ctx.prefix || "").toLowerCase();
+
+    if (ctx.type === "field_name") {
+      // Suggest field aliases + AND/OR keywords + has_tag
+      const fieldAliases = h.fields.map(f => ({
+        type: "field_name",
+        label: f.name,
+        hint: `(${f.type})`,
+        insert: f.name,
+        prefix: "",
+      }));
+      // Also suggest has_tag() if there are tag keys
+      if (h.tag_keys && h.tag_keys.length) {
+        fieldAliases.push({
+          type: "field_name",
+          label: "has_tag(…)",
+          hint: "tag filter",
+          insert: "has_tag('",
+          prefix: "",
+        });
+      }
+      items = fieldAliases.filter(f => f.label.toLowerCase().startsWith(pfx) || f.insert.toLowerCase().startsWith(pfx));
+    } else if (ctx.type === "field_value") {
+      const field = h.fields.find(f => f.name.toLowerCase() === ctx.field || f.column.toLowerCase() === ctx.field);
+      if (field && field.values.length) {
+        items = field.values
+          .filter(v => v.toLowerCase().startsWith(pfx))
+          .slice(0, 20)
+          .map(v => ({ type: "field_value", label: v, insert: v, prefix: "" }));
+      }
+    } else if (ctx.type === "tag_key") {
+      items = (h.tag_keys || [])
+        .filter(k => k.toLowerCase().startsWith(pfx))
+        .slice(0, 20)
+        .map(k => ({ type: "tag_key", label: k, hint: "tag key", insert: k, prefix: "" }));
+    } else if (ctx.type === "tag_value") {
+      const vals = (h.tag_values || {})[ctx.tag_key] || [];
+      items = vals
+        .filter(v => v.toLowerCase().startsWith(pfx))
+        .slice(0, 20)
+        .map(v => ({ type: "tag_value", label: v, hint: `value for ${ctx.tag_key}`, insert: v, prefix: "" }));
+    }
+
+    openDropdown(items.slice(0, 15));
+  }
+
+  input.addEventListener("input", suggest);
+  input.addEventListener("focus", suggest);
+
+  input.addEventListener("keydown", (e) => {
+    if (dropdown.style.display === "none") return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive(Math.min(activeIdx + 1, lastItems.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive(Math.max(activeIdx - 1, -1));
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      if (activeIdx >= 0 && lastItems[activeIdx]) {
+        e.preventDefault();
+        applyItem(lastItems[activeIdx]);
+      } else {
+        closeDropdown();
+      }
+    } else if (e.key === "Escape") {
+      closeDropdown();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!input.contains(e.target) && !dropdown.contains(e.target)) {
+      closeDropdown();
+    }
+  });
 })();
 </script>
 {% endblock %}
