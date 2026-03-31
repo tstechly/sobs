@@ -678,6 +678,15 @@ CREATE TABLE IF NOT EXISTS sobs_record_tags (
 ) ENGINE = ReplacingMergeTree(Version)
 ORDER BY (RecordType, RecordId, TagKey)
 SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS sobs_log_attr_keys (
+    RecordType LowCardinality(String) CODEC(ZSTD(1)),
+    AttrKey LowCardinality(String) CODEC(ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (RecordType, AttrKey)
+SETTINGS index_granularity = 8192;
 """
 
 
@@ -794,10 +803,14 @@ _schema_ready = False
 _write_queue: queue.Queue["_WriteTask"] | None = None
 _write_thread: threading.Thread | None = None
 _write_worker_lock = threading.Lock()
+_log_attr_keys_lock = threading.Lock()
+_log_attr_keys_cache_loaded = False
+_log_attr_keys_by_record_type: dict[str, set[str]] = {"log": set()}
 
 WRITE_QUEUE_MAX = int(os.environ.get("SOBS_WRITE_QUEUE_MAX", 5000))
 WRITE_BATCH_MAX = int(os.environ.get("SOBS_WRITE_BATCH_MAX", 200))
 WRITE_BATCH_WAIT_MS = int(os.environ.get("SOBS_WRITE_BATCH_WAIT_MS", 20))
+LOG_ATTR_KEYS_MAX = int(os.environ.get("SOBS_LOG_ATTR_KEYS_MAX", 20000))
 
 
 @dataclass
@@ -856,8 +869,84 @@ def ensure_db_schema():
 
 def _ensure_post_schema_state(db: ChDbConnection) -> None:
     _ensure_anomaly_rule_schema(db)
+    _prime_log_attr_key_cache(db)
     if not app.config.get("TESTING"):
         _seed_example_metrics_content(db)
+
+
+def _load_log_attr_keys_from_db(db: ChDbConnection, record_type: str) -> set[str]:
+    rows = db.execute(
+        "SELECT DISTINCT AttrKey FROM sobs_log_attr_keys FINAL " "WHERE RecordType=? AND IsDeleted=0 ORDER BY AttrKey",
+        [record_type],
+    ).fetchall()
+    return {str(r[0]) for r in rows if str(r[0]).strip()}
+
+
+def _prime_log_attr_key_cache(db: ChDbConnection) -> None:
+    global _log_attr_keys_cache_loaded
+    with _log_attr_keys_lock:
+        if _log_attr_keys_cache_loaded:
+            return
+        _log_attr_keys_by_record_type["log"] = _load_log_attr_keys_from_db(db, "log")
+        _log_attr_keys_cache_loaded = True
+
+
+def _get_cached_log_attr_keys(db: ChDbConnection, record_type: str = "log") -> list[str]:
+    _prime_log_attr_key_cache(db)
+    with _log_attr_keys_lock:
+        keys = sorted(_log_attr_keys_by_record_type.get(record_type, set()))
+    return keys
+
+
+def _remember_log_attr_keys(db: ChDbConnection, attrs_maps: list[dict], record_type: str = "log") -> None:
+    if not attrs_maps:
+        return
+    _prime_log_attr_key_cache(db)
+
+    with _log_attr_keys_lock:
+        existing = _log_attr_keys_by_record_type.setdefault(record_type, set())
+        if len(existing) >= LOG_ATTR_KEYS_MAX:
+            return
+
+        candidates: set[str] = set()
+        for attrs in attrs_maps:
+            if not isinstance(attrs, dict):
+                continue
+            for raw_key in attrs.keys():
+                key = str(raw_key).strip()
+                if not key or key in existing or key in candidates:
+                    continue
+                if len(existing) + len(candidates) >= LOG_ATTR_KEYS_MAX:
+                    break
+                candidates.add(key)
+
+        if not candidates:
+            return
+
+        version = int(time.time() * 1000)
+        rows = [
+            {
+                "RecordType": record_type,
+                "AttrKey": key,
+                "IsDeleted": 0,
+                "Version": version + idx,
+            }
+            for idx, key in enumerate(sorted(candidates))
+        ]
+        try:
+            _insert_rows_json_each_row(db, "sobs_log_attr_keys", rows)
+            existing.update(candidates)
+        except Exception:
+            app.logger.exception("failed to persist discovered log attribute keys")
+
+
+def _extract_log_attr_maps(rows: list[dict]) -> list[dict]:
+    maps: list[dict] = []
+    for row in rows:
+        raw_attrs = row.get("LogAttributes", {})
+        if isinstance(raw_attrs, dict):
+            maps.append(raw_attrs)
+    return maps
 
 
 def _ensure_anomaly_rule_schema(db: ChDbConnection) -> None:
@@ -2005,6 +2094,7 @@ def _insert_log_events(db, events: list[LogEvent]) -> int:
             }
         )
     count = _insert_rows_json_each_row(db, "otel_logs", rows)
+    _remember_log_attr_keys(db, _extract_log_attr_maps(rows), record_type="log")
     try:
         rules = _load_tag_rules(db)
         if rules:
@@ -2077,6 +2167,7 @@ def _insert_error_events(db, error_events: list[ErrorEvent]):
             }
         )
     _insert_rows_json_each_row(db, "otel_logs", rows)
+    _remember_log_attr_keys(db, _extract_log_attr_maps(rows), record_type="log")
     try:
         rules = _load_tag_rules(db)
         if rules:
@@ -2363,6 +2454,7 @@ async def ingest_rum():
     def _op(db: ChDbConnection) -> None:
         _insert_rows_json_each_row(db, "hyperdx_sessions", session_rows)
         _insert_rows_json_each_row(db, "otel_logs", error_rows)
+        _remember_log_attr_keys(db, _extract_log_attr_maps(error_rows), record_type="log")
         try:
             rules = _load_tag_rules(db)
             if rules:
@@ -2506,6 +2598,7 @@ async def ingest_errors():
 
     def _op(db: ChDbConnection) -> None:
         _insert_rows_json_each_row(db, "otel_logs", [row])
+        _remember_log_attr_keys(db, _extract_log_attr_maps([row]), record_type="log")
         try:
             rules = _load_tag_rules(db)
             if rules:
@@ -2841,13 +2934,32 @@ async def view_logs():
             safe_sql = re.sub(r"\bspan_id\b", "SpanId", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bts\b", "Timestamp", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bbody\b", "Body", safe_sql, flags=re.IGNORECASE)
+
+            # Translate has_tag('key', 'value') to a correlated subquery.
+            # Supports SQL-escaped quotes inside key/value (e.g. O''Reilly).
+            def _translate_has_tag(m: re.Match) -> str:
+                tag_key = m.group(1).replace("''", "'").replace("'", "''")
+                tag_val = m.group(2).replace("''", "'").replace("'", "''")
+                return (
+                    "MD5(concat(ServiceName,'|',toString(Timestamp),'|',TraceId,'|',SpanId)) IN ("
+                    "SELECT RecordId FROM sobs_record_tags FINAL "
+                    f"WHERE TagKey='{tag_key}' AND TagValue='{tag_val}' "
+                    "AND IsDeleted=0 AND RecordType='log')"
+                )
+
+            safe_sql = re.sub(
+                r"has_tag\s*\(\s*'((?:[^']|'')+)'\s*,\s*'((?:[^']|'')*)'\s*\)",
+                _translate_has_tag,
+                safe_sql,
+                flags=re.IGNORECASE,
+            )
             where = f"WHERE {safe_sql}"
             time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
             if time_conditions:
                 where = f"{where} AND " + " AND ".join(time_conditions)
                 params.extend(time_params)
         except Exception as exc:
-            error_msg = f"SQL error: {exc}"
+            error_msg = f"SQL error: {_public_dashboard_query_error(exc)}"
     else:
         conditions = []
         params = []
@@ -2906,7 +3018,7 @@ async def view_logs():
             stats_generated_age_s = max(0, int((generated_at - snapshot_at).total_seconds()))
         except Exception as exc:
             if sql_where:
-                error_msg = f"SQL error: {exc}"
+                error_msg = f"SQL error: {_public_dashboard_query_error(exc)}"
             else:
                 error_msg = f"Query error: {exc}"
             rows = []
@@ -2915,8 +3027,43 @@ async def view_logs():
             service_stats = {}
             advanced_analysis = None
 
+    # Compute record IDs for visible rows so tags can be batch-fetched
+    row_record_ids = [
+        _record_id_for_log(str(r["Timestamp"]), str(r["ServiceName"]), str(r["TraceId"]), str(r["SpanId"]))
+        for r in rows
+    ]
+    # Batch-fetch tags for all visible rows in one query
+    tags_by_record_id: dict[str, list[dict]] = {}
+    tag_stats_count: dict[tuple[str, str], int] = {}
+    if row_record_ids:
+        try:
+            placeholders = ",".join(["?"] * len(row_record_ids))
+            tag_rows_raw = db.execute(
+                f"SELECT RecordId, TagKey, TagValue, IsAuto "
+                f"FROM sobs_record_tags FINAL "
+                f"WHERE RecordType='log' AND RecordId IN ({placeholders}) AND IsDeleted=0 "
+                f"ORDER BY RecordId, TagKey",
+                row_record_ids,
+            ).fetchall()
+            for tr in tag_rows_raw:
+                rid = str(tr["RecordId"])
+                entry = {"key": str(tr["TagKey"]), "value": str(tr["TagValue"]), "is_auto": bool(tr["IsAuto"])}
+                tags_by_record_id.setdefault(rid, []).append(entry)
+                tag_key = str(tr["TagKey"])
+                tag_value = str(tr["TagValue"])
+                stats_key = (tag_key, tag_value)
+                tag_stats_count[stats_key] = tag_stats_count.get(stats_key, 0) + 1
+        except Exception:
+            pass  # Tags are supplementary; ignore failures
+
+    tag_stats = [
+        {"key": k, "value": v, "count": cnt}
+        for (k, v), cnt in sorted(tag_stats_count.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))
+    ]
+
     for r in rows:
         body = r["Body"]
+        rid = _record_id_for_log(str(r["Timestamp"]), str(r["ServiceName"]), str(r["TraceId"]), str(r["SpanId"]))
         log_rows.append(
             {
                 "ts": str(r["Timestamp"]),
@@ -2925,6 +3072,8 @@ async def view_logs():
                 "body": body,
                 "trace_id": r["TraceId"],
                 "span_id": r["SpanId"],
+                "record_id": rid,
+                "tags": tags_by_record_id.get(rid, []),
             }
         )
 
@@ -2958,6 +3107,7 @@ async def view_logs():
         run_advanced_analysis=run_advanced_analysis,
         level_stats=level_stats,
         service_stats=service_stats,
+        tag_stats=tag_stats,
         advanced_analysis=advanced_analysis,
         stats_generated_at_iso=stats_generated_at_iso,
         stats_generated_at_display=stats_generated_at_display,
@@ -8621,6 +8771,164 @@ async def api_delete_tag(record_type: str, record_id: str, tag_key: str):
         tombstones,
     )
     return jsonify({"ok": True}), 200
+
+
+# ---------------------------------------------------------------------------
+# Log Field Hints API  GET /api/logs/field-hints
+# Returns available otel_logs field names (with user-friendly aliases),
+# sample values for enum-like fields, and active tag keys for the log type.
+# Used by the SQL filter autocomplete on the Logs page.
+# ---------------------------------------------------------------------------
+@app.route("/api/logs/field-hints", methods=["GET"])
+@require_basic_auth
+async def api_logs_field_hints():
+    db = get_db()
+
+    fields = [
+        {"name": "level", "column": "SeverityText", "type": "string", "values": []},
+        {"name": "service", "column": "ServiceName", "type": "string", "values": []},
+        {"name": "body", "column": "Body", "type": "string", "values": []},
+        {"name": "trace_id", "column": "TraceId", "type": "string", "values": []},
+        {"name": "span_id", "column": "SpanId", "type": "string", "values": []},
+        {"name": "ts", "column": "Timestamp", "type": "datetime", "values": []},
+        {"name": "EventName", "column": "EventName", "type": "string", "values": []},
+        {"name": "ScopeName", "column": "ScopeName", "type": "string", "values": []},
+    ]
+
+    attr_keys = _get_cached_log_attr_keys(db, record_type="log")
+
+    # Active tag keys for logs (used in has_tag() suggestions)
+    try:
+        tag_key_rows = db.execute(
+            "SELECT DISTINCT TagKey FROM sobs_record_tags FINAL "
+            "WHERE RecordType='log' AND IsDeleted=0 ORDER BY TagKey LIMIT 100"
+        ).fetchall()
+        tag_keys = [str(r[0]) for r in tag_key_rows]
+        # For each tag key, also fetch distinct values (cap at 20)
+        tag_values: dict[str, list[str]] = {}
+        for tk in tag_keys:
+            val_rows = db.execute(
+                "SELECT DISTINCT TagValue FROM sobs_record_tags FINAL "
+                "WHERE RecordType='log' AND TagKey=? AND IsDeleted=0 ORDER BY TagValue LIMIT 20",
+                [tk],
+            ).fetchall()
+            tag_values[tk] = [str(r[0]) for r in val_rows]
+    except Exception:
+        tag_keys = []
+        tag_values = {}
+
+    operators = ["=", "!=", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE", "IN", "NOT IN", ">", "<", ">=", "<="]
+    keywords = ["AND", "OR", "NOT", "IS NULL", "IS NOT NULL", "TRUE", "FALSE", "NULL"]
+    functions = [
+        {"name": "has_tag", "signature": "has_tag('key','value')", "kind": "tag"},
+        {"name": "match", "signature": "match(body, 'regex')", "kind": "string"},
+        {"name": "positionCaseInsensitive", "signature": "positionCaseInsensitive(body, 'needle')", "kind": "string"},
+        {"name": "startsWith", "signature": "startsWith(service, 'api')", "kind": "string"},
+        {"name": "endsWith", "signature": "endsWith(service, 'worker')", "kind": "string"},
+        {"name": "lower", "signature": "lower(service)", "kind": "string"},
+        {"name": "upper", "signature": "upper(level)", "kind": "string"},
+        {"name": "toString", "signature": "toString(ts)", "kind": "cast"},
+        {"name": "toDateTime", "signature": "toDateTime('2026-03-30 12:00:00')", "kind": "datetime"},
+    ]
+    snippets = [
+        {"label": "level='ERROR'", "insert": "level='ERROR'", "kind": "predicate"},
+        {"label": "service IN ('api','worker')", "insert": "service IN ('api','worker')", "kind": "predicate"},
+        {"label": "has_tag('env','prod')", "insert": "has_tag('env','prod')", "kind": "predicate"},
+        {"label": "match(body, 'timeout')", "insert": "match(body, 'timeout')", "kind": "predicate"},
+        {
+            "label": "ts >= toDateTime('2026-03-30 00:00:00')",
+            "insert": "ts >= toDateTime('2026-03-30 00:00:00')",
+            "kind": "predicate",
+        },
+    ]
+
+    return jsonify(
+        {
+            "fields": fields,
+            "attr_keys": attr_keys,
+            "tag_keys": tag_keys,
+            "tag_values": tag_values,
+            "operators": operators,
+            "keywords": keywords,
+            "functions": functions,
+            "snippets": snippets,
+        }
+    )
+
+
+@app.route("/api/logs/validate-filter", methods=["POST"])
+@require_basic_auth
+async def api_logs_validate_filter():
+    """Validate a SQL WHERE fragment used by /logs?sql=... and return actionable feedback."""
+    payload = await request.get_json(silent=True)
+    sql_where = str((payload or {}).get("sql", "") or "").strip()
+    if not sql_where:
+        return jsonify({"ok": True, "normalized": "", "issues": []})
+
+    issues: list[dict[str, str]] = []
+
+    # Lightweight structural checks for instant, helpful feedback.
+    quote_open = False
+    paren_depth = 0
+    i = 0
+    while i < len(sql_where):
+        ch = sql_where[i]
+        if ch == "'":
+            if i + 1 < len(sql_where) and sql_where[i + 1] == "'":
+                i += 2
+                continue
+            quote_open = not quote_open
+        elif not quote_open:
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth -= 1
+                if paren_depth < 0:
+                    issues.append({"level": "error", "message": "Unexpected ')' in filter."})
+                    break
+        i += 1
+
+    if quote_open:
+        issues.append({"level": "error", "message": "Unclosed single quote in filter."})
+    if paren_depth > 0:
+        issues.append({"level": "error", "message": "Unclosed '(' in filter."})
+    if re.search(r"\b(AND|OR|NOT|IN|LIKE|ILIKE)\s*$", sql_where, re.IGNORECASE):
+        issues.append({"level": "warning", "message": "Filter ends with an operator or keyword."})
+
+    try:
+        safe_sql = sql_where.replace(";", "")
+        safe_sql = re.sub(r"\blevel\b", "SeverityText", safe_sql, flags=re.IGNORECASE)
+        safe_sql = re.sub(r"\bservice\b", "ServiceName", safe_sql, flags=re.IGNORECASE)
+        safe_sql = re.sub(r"\btrace_id\b", "TraceId", safe_sql, flags=re.IGNORECASE)
+        safe_sql = re.sub(r"\bspan_id\b", "SpanId", safe_sql, flags=re.IGNORECASE)
+        safe_sql = re.sub(r"\bts\b", "Timestamp", safe_sql, flags=re.IGNORECASE)
+        safe_sql = re.sub(r"\bbody\b", "Body", safe_sql, flags=re.IGNORECASE)
+
+        def _translate_has_tag(m: re.Match) -> str:
+            tag_key = m.group(1).replace("''", "'").replace("'", "''")
+            tag_val = m.group(2).replace("''", "'").replace("'", "''")
+            return (
+                "MD5(concat(ServiceName,'|',toString(Timestamp),'|',TraceId,'|',SpanId)) IN ("
+                "SELECT RecordId FROM sobs_record_tags FINAL "
+                f"WHERE TagKey='{tag_key}' AND TagValue='{tag_val}' "
+                "AND IsDeleted=0 AND RecordType='log')"
+            )
+
+        safe_sql = re.sub(
+            r"has_tag\s*\(\s*'((?:[^']|'')+)'\s*,\s*'((?:[^']|'')*)'\s*\)",
+            _translate_has_tag,
+            safe_sql,
+            flags=re.IGNORECASE,
+        )
+
+        db = get_db()
+        # Existence probe is much cheaper than aggregate count() for live typing validation.
+        db.execute(f"SELECT 1 FROM otel_logs WHERE {safe_sql} LIMIT 1").fetchone()
+    except Exception as exc:
+        issues.append({"level": "error", "message": _public_dashboard_query_error(exc)})
+        return jsonify({"ok": False, "normalized": "", "issues": issues}), 200
+
+    return jsonify({"ok": True, "normalized": safe_sql, "issues": issues})
 
 
 # ---------------------------------------------------------------------------

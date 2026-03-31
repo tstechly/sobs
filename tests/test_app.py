@@ -936,6 +936,238 @@ class TestUIPages:
         r = await client.get("/logs?sql=level%3D%27INFO%27")
         assert r.status_code == 200
 
+    async def test_logs_field_hints_api(self, client):
+        r = await client.get("/api/logs/field-hints")
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert "fields" in data
+        assert "tag_keys" in data
+        assert "operators" in data
+        assert "keywords" in data
+        assert "functions" in data
+        assert "snippets" in data
+        field_names = [f["name"] for f in data["fields"]]
+        assert "level" in field_names
+        assert "service" in field_names
+        assert "body" in field_names
+        operator_names = [op.upper() for op in data["operators"]]
+        assert "ILIKE" in operator_names
+        function_names = [fn["name"] for fn in data["functions"]]
+        assert "has_tag" in function_names
+
+    async def test_logs_validate_filter_api(self, client):
+        r_ok = await client.post("/api/logs/validate-filter", json={"sql": "level='INFO' AND service='svc-a'"})
+        assert r_ok.status_code == 200
+        ok_data = await r_ok.get_json()
+        assert ok_data["ok"] is True
+        assert "SeverityText='INFO'" in ok_data["normalized"]
+
+        r_bad = await client.post("/api/logs/validate-filter", json={"sql": "level='INFO"})
+        assert r_bad.status_code == 200
+        bad_data = await r_bad.get_json()
+        assert bad_data["ok"] is False
+        assert bad_data["issues"]
+
+    async def test_logs_attr_keys_catalog_and_hints(self, client):
+        import time as _time
+
+        from app import get_db
+
+        ts_ns = int(_time.time() * 1_000_000_000)
+        attr_key = f"http.route.test.{ts_ns}"
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "attr-key-svc"}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": "attr key capture test"},
+                                        "attributes": [
+                                            {"key": attr_key, "value": {"stringValue": "ok"}},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        db = get_db()
+        row = db.execute(
+            "SELECT count() FROM sobs_log_attr_keys FINAL WHERE RecordType='log' AND AttrKey=? AND IsDeleted=0",
+            [attr_key],
+        ).fetchone()
+        assert row is not None and int(row[0]) >= 1
+
+        hints = await client.get("/api/logs/field-hints")
+        assert hints.status_code == 200
+        hints_data = await hints.get_json()
+        assert attr_key in (hints_data.get("attr_keys") or [])
+
+    async def test_logs_has_tag_filter(self, client):
+        """has_tag() in sql WHERE should filter by record tags."""
+        import time as _time
+
+        ts_ns = int(_time.time() * 1_000_000_000)
+        # Use a stable service name to avoid inflating the distinct-services count
+        service_name = "has-tag-test-svc"
+        tag_key = f"env-{ts_ns}"
+        # Create a tag rule that matches this service
+        await client.post(
+            "/settings/tags",
+            form={
+                "name": f"env-rule-{ts_ns}",
+                "record_types": ["log"],
+                "match_field": "service_name",
+                "match_operator": "eq",
+                "match_value": service_name,
+                "match_attr_key": "",
+                "tag_key": tag_key,
+                "tag_value": "prod",
+            },
+        )
+        # Ingest a log so the tag rule fires
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": f"has-tag-body-{ts_ns}"},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        # Use has_tag() SQL filter – should not produce an error
+        import urllib.parse
+
+        sql = f"has_tag('{tag_key}','prod')"
+        r = await client.get(f"/logs?sql={urllib.parse.quote(sql)}")
+        assert r.status_code == 200
+        # Should not show an SQL error
+        data = await r.get_data()
+        assert b"SQL error" not in data
+
+    async def test_logs_has_tag_filter_escaped_quotes(self, client):
+        """has_tag() should support SQL-escaped quotes in key/value arguments."""
+        import time as _time
+        import urllib.parse
+
+        from app import get_db
+
+        ts_ns = int(_time.time() * 1_000_000_000)
+        service_name = f"has-tag-quote-svc-{ts_ns}"
+        tag_key = "team'o"
+        tag_value = "owner's"
+
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": f"has-tag-quote-body-{ts_ns}"},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        db = get_db()
+        db.execute(
+            "INSERT INTO sobs_record_tags (RecordType, RecordId, TagKey, TagValue, IsAuto, IsDeleted, Version) "
+            "SELECT 'log', MD5(concat(ServiceName,'|',toString(Timestamp),'|',TraceId,'|',SpanId)), ?, ?, 0, 0, ? "
+            "FROM otel_logs WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+            [tag_key, tag_value, int(_time.time() * 1_000_000), service_name],
+        )
+
+        # Use SQL-escaped apostrophes in has_tag input to mirror UI-generated SQL.
+        sql = "has_tag('team''o','owner''s')"
+        r = await client.get(f"/logs?sql={urllib.parse.quote(sql)}")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b"SQL error" not in data
+        assert f"has-tag-quote-body-{ts_ns}".encode() in data
+
+    async def test_logs_tag_stats_handles_colon_in_tag_parts(self, client):
+        """Tag stats links should preserve key/value even when either contains ':'."""
+        import time as _time
+
+        from app import _record_id_for_log, get_db
+
+        ts_ns = int(_time.time() * 1_000_000_000)
+        service_name = f"has-tag-colon-svc-{ts_ns}"
+        body = f"has-tag-colon-body-{ts_ns}"
+
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": body},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        db = get_db()
+        row = db.execute(
+            "SELECT Timestamp, TraceId, SpanId FROM otel_logs WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+            [service_name],
+        ).fetchone()
+        assert row is not None
+        rid = _record_id_for_log(str(row["Timestamp"]), service_name, str(row["TraceId"]), str(row["SpanId"]))
+
+        db.execute(
+            "INSERT INTO sobs_record_tags ("
+            "RecordType, RecordId, TagKey, TagValue, IsAuto, IsDeleted, Version"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["log", rid, "k:a", "v:b", 0, 0, int(_time.time() * 1_000_000)],
+        )
+
+        r = await client.get(f"/logs?service={service_name}&stats=1")
+        assert r.status_code == 200
+        html = await r.get_data(as_text=True)
+        assert "k:a=v:b" in html
+
     async def test_errors_page(self, client):
         r = await client.get("/errors")
         assert r.status_code == 200
@@ -1152,7 +1384,7 @@ class TestUIPages:
         }
         await client.post("/v1/logs", json=payload)
 
-        r = await client.get("/logs?stats=1")
+        r = await client.get("/logs?stats=1&service=chip-svc")
         assert r.status_code == 200
         data = await r.get_data()
         assert b"level=ERROR" in data
