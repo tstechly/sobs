@@ -1,0 +1,359 @@
+{% extends "base.html" %}
+{% block title %}Tag Rules{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h4 class="fw-semibold mb-0"><i class="bi bi-tags me-2 text-info"></i>Tag Rules</h4>
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_settings') }}">
+    <i class="bi bi-arrow-left me-1"></i>Back to Settings
+  </a>
+</div>
+
+<p class="text-secondary small mb-3">
+  Tag rules are evaluated at ingest time. Matching records automatically receive the configured
+  tag, stored in <code>sobs_record_tags</code> for use in filtering and anomaly correlation.
+  Tags follow <strong>OTEL attribute</strong> conventions: <code>key=value</code> pairs with
+  one effective value per key per record.
+</p>
+
+<div class="accordion mb-3" id="tagRulesAutoAccordion">
+  <div class="accordion-item border border-secondary">
+    <h2 class="accordion-header" id="autoTagsHeading">
+      <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#autoTagsCollapse" aria-expanded="false" aria-controls="autoTagsCollapse">
+        Auto Make Tag Rules
+      </button>
+    </h2>
+    <div id="autoTagsCollapse" class="accordion-collapse collapse" aria-labelledby="autoTagsHeading" data-bs-parent="#tagRulesAutoAccordion">
+      <div class="accordion-body">
+        <p class="small text-secondary mb-3">Generate baseline tag rules from recent logs, traces, errors, AI spans, and RUM events. Existing rules are skipped automatically. Create is capped at 200 rules per run.</p>
+        <form method="post" action="{{ url_for('auto_tag_rules') }}" class="row g-2 align-items-end">
+          <div class="col-md-2">
+            <label class="form-label small text-secondary">Window (hours)</label>
+            <input type="number" min="1" max="168" name="hours" class="form-control form-control-sm" value="{{ auto_summary.hours if auto_summary else 24 }}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small text-secondary">Min count</label>
+            <input type="number" min="1" max="5000" name="min_count" class="form-control form-control-sm" value="{{ auto_summary.min_count if auto_summary else 30 }}">
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small text-secondary">Service scope</label>
+            <select name="service_filter" class="form-select form-select-sm">
+              <option value="">All services</option>
+              {% for s in services %}
+              <option value="{{ s }}" {% if auto_summary and auto_summary.service_filter == s %}selected{% endif %}>{{ s }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label small text-secondary d-block mb-1">Record types</label>
+            <div class="d-flex flex-wrap gap-2">
+              {% for rt in ('log', 'trace', 'error', 'ai', 'rum') %}
+              <div class="form-check form-check-inline m-0">
+                <input class="form-check-input" type="checkbox" name="auto_record_types" value="{{ rt }}" id="auto_rt_{{ rt }}"
+                  {% if not auto_summary or rt in auto_summary.record_types %}checked{% endif %}>
+                <label class="form-check-label small" for="auto_rt_{{ rt }}">{{ rt }}</label>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="col-md-2 d-flex gap-2">
+            <button type="submit" class="btn btn-outline-info btn-sm flex-grow-1" name="action" value="preview">
+              <i class="bi bi-eye me-1"></i>Preview
+            </button>
+            <button type="submit" class="btn btn-info btn-sm flex-grow-1" name="action" value="create">
+              <i class="bi bi-magic me-1"></i>Create
+            </button>
+          </div>
+        </form>
+
+        {% if auto_summary %}
+        <div class="small text-secondary mt-3">
+          Examined: {{ auto_summary.examined }} · Candidates: {{ auto_summary.candidates }} · Existing skipped: {{ auto_summary.existing }} · Invalid skipped: {{ auto_summary.invalid }}
+          {% if auto_summary.capped %} · Create cap: first {{ auto_summary.create_cap }} only{% endif %}
+        </div>
+        {% endif %}
+
+        {% if auto_preview %}
+        <div class="card border-secondary mt-3 mb-0">
+          <div class="card-header">Preview Candidates ({{ auto_preview|length }})</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead class="table-secondary">
+                <tr>
+                  <th>Name</th>
+                  <th>Record Type</th>
+                  <th>Match</th>
+                  <th>Tag</th>
+                  <th>Points</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for c in auto_preview %}
+                <tr>
+                  <td>{{ c.name }}</td>
+                  <td><span class="badge text-bg-secondary">{{ c.record_types[0] }}</span></td>
+                  <td class="font-monospace small">
+                    {{ c.match_field }} {{ c.match_operator }} {{ c.match_value }}
+                    {% if c.match_attr_key %}<br><span class="text-secondary">attr: {{ c.match_attr_key }}</span>{% endif %}
+                  </td>
+                  <td class="font-monospace small">{{ c.tag_key }}={{ c.tag_value }}</td>
+                  <td>{{ c.point_count }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Rule Form -->
+<div class="card border-secondary mb-4">
+  <div class="card-header">
+    <h6 class="mb-0"><i class="bi bi-plus-circle me-2 text-success"></i>Create Tag Rule</h6>
+  </div>
+  <div class="card-body">
+    <form method="post" action="{{ url_for('create_tag_rule') }}" class="row g-3">
+      <!-- Rule name -->
+      <div class="col-md-4">
+        <label class="form-label small text-secondary">Rule Name <span class="text-danger">*</span></label>
+        <input type="text" name="name" class="form-control form-control-sm" placeholder="e.g. Tag production errors" required>
+      </div>
+
+      <!-- Record types -->
+      <div class="col-md-8">
+        <label class="form-label small text-secondary">Apply to Record Types</label>
+        <div class="d-flex flex-wrap gap-3">
+          {% for rt in record_types %}
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="checkbox" name="record_types" value="{{ rt }}" id="rt_{{ rt }}"
+                   {% if rt == 'all' %}checked{% endif %}>
+            <label class="form-check-label small" for="rt_{{ rt }}">{{ rt }}</label>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="form-text small">Leave all unchecked or check <em>all</em> to match every record type.</div>
+      </div>
+
+      <!-- Match field -->
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Match Field <span class="text-danger">*</span></label>
+        <select name="match_field" id="matchFieldSelect" class="form-select form-select-sm" required>
+          {% for f in match_fields %}
+          <option value="{{ f }}">{{ f.replace('_', ' ').title() }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <!-- Attribute key (shown only when match field = attribute) -->
+      <div class="col-md-3" id="attrKeyGroup" style="display:none">
+        <label class="form-label small text-secondary">Attribute Key</label>
+        <input type="text" name="match_attr_key" id="matchAttrKey" class="form-control form-control-sm"
+               placeholder="e.g. http.status_code">
+      </div>
+
+      <!-- Match operator -->
+      <div class="col-md-2">
+        <label class="form-label small text-secondary">Operator <span class="text-danger">*</span></label>
+        <select name="match_operator" class="form-select form-select-sm" required>
+          {% for op in match_operators %}
+          <option value="{{ op }}">{{ op }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <!-- Match value -->
+      <div class="col-md-4">
+        <label class="form-label small text-secondary">Match Value <span class="text-danger">*</span></label>
+        <input type="text" name="match_value" class="form-control form-control-sm"
+               placeholder="e.g. ERROR or ^timeout.*" required>
+      </div>
+
+      <!-- Tag key -->
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Tag Key <span class="text-danger">*</span></label>
+        <input type="text" name="tag_key" class="form-control form-control-sm"
+               placeholder="e.g. env" required>
+      </div>
+
+      <!-- Tag value -->
+      <div class="col-md-3">
+        <label class="form-label small text-secondary">Tag Value <span class="text-danger">*</span></label>
+        <input type="text" name="tag_value" class="form-control form-control-sm"
+               placeholder="e.g. production" required>
+      </div>
+
+      <div class="col-12">
+        <button type="submit" class="btn btn-success btn-sm">
+          <i class="bi bi-plus-circle me-1"></i>Create Rule
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Existing Rules -->
+{% if rules %}
+<div class="card border-secondary">
+  <div class="card-header d-flex align-items-center justify-content-between">
+    <h6 class="mb-0">Active Tag Rules ({{ rules|length }})</h6>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead class="table-secondary">
+        <tr>
+          <th>Name</th>
+          <th>Record Types</th>
+          <th>Match Field</th>
+          <th>Attr Key</th>
+          <th>Operator</th>
+          <th>Match Value</th>
+          <th>Tag Key</th>
+          <th>Tag Value</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rule in rules %}
+        <tr>
+          <td class="fw-semibold">{{ rule.name }}</td>
+          <td>
+            {% for rt in rule.record_types %}
+            <span class="badge text-bg-secondary me-1">{{ rt }}</span>
+            {% endfor %}
+          </td>
+          <td><code>{{ rule.match_field }}</code></td>
+          <td class="font-monospace small">{{ rule.match_attr_key or '—' }}</td>
+          <td>{{ rule.match_operator }}</td>
+          <td class="font-monospace small text-truncate" style="max-width:180px" title="{{ rule.match_value }}">{{ rule.match_value }}</td>
+          <td><span class="badge text-bg-info text-dark">{{ rule.tag_key }}</span></td>
+          <td><span class="badge text-bg-light border">{{ rule.tag_value }}</span></td>
+          <td>
+            <form method="post" action="{{ url_for('delete_tag_rule', rule_id=rule.id) }}"
+                  onsubmit="return confirm('Delete tag rule \'{{ rule.name }}\'?')">
+              <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-1" title="Delete rule">
+                <i class="bi bi-trash"></i>
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="text-secondary text-center py-4">
+  <i class="bi bi-tags fs-2 d-block mb-2"></i>
+  No tag rules yet. Use the form above to create your first rule.
+</div>
+{% endif %}
+
+<!-- How It Works -->
+<div class="card border-secondary mt-4">
+  <div class="card-header">
+    <h6 class="mb-0"><i class="bi bi-question-circle me-1"></i>How Auto-Tagging Works</h6>
+  </div>
+  <div class="card-body small text-secondary">
+    <p class="mb-2">
+      When a new record is ingested (log, trace span, error, AI call, or RUM event), all active tag
+      rules are evaluated against it. Each matching rule writes a tag row into
+      <code>sobs_record_tags</code> with <code>IsAuto=1</code>.
+    </p>
+    <p class="mb-2">
+      If multiple rules match the same <code>tag_key</code> for one record, the last matching rule
+      wins for that key (deterministic evaluation order).
+    </p>
+    <ul class="mb-2">
+      <li><strong>service_name</strong> — matches against the record's service name.</li>
+      <li><strong>severity</strong> — matches against the log severity level (e.g. <code>ERROR</code>, <code>WARN</code>).</li>
+      <li><strong>body</strong> — matches against the log body or span name text.</li>
+      <li><strong>span_name</strong> — matches against the OTEL span name (trace records only).</li>
+      <li><strong>event_type</strong> — matches against the event/log type name.</li>
+      <li><strong>attribute</strong> — matches against a specific OTEL attribute key's value.</li>
+    </ul>
+    <p class="mb-2">
+      You can also add tags <em>manually</em> to individual records via the
+      <code>POST /api/tags/&lt;type&gt;/&lt;record_id&gt;</code> API. Record IDs are MD5 hashes
+      of key fields and are shown in the record detail views.
+    </p>
+    <p class="mb-2">
+      Deleting via <code>DELETE /api/tags/&lt;type&gt;/&lt;record_id&gt;/&lt;tag_key&gt;</code>
+      removes all active values for that key on the record.
+    </p>
+    <p class="mb-0">
+      Best practice: keep tag keys low-cardinality and bounded (for example
+      <code>env</code>, <code>tier</code>, <code>team</code>). Avoid highly dynamic values like
+      request IDs or user IDs as tag values.
+    </p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var matchFieldSelect = document.getElementById('matchFieldSelect');
+  var attrKeyGroup = document.getElementById('attrKeyGroup');
+  var matchAttrKey = document.getElementById('matchAttrKey');
+
+  function toggleAttrKey() {
+    if (!matchFieldSelect || !attrKeyGroup || !matchAttrKey) return;
+    var show = matchFieldSelect.value === 'attribute';
+    attrKeyGroup.style.display = show ? '' : 'none';
+    matchAttrKey.required = show;
+  }
+
+  if (matchFieldSelect) {
+    matchFieldSelect.addEventListener('change', toggleAttrKey);
+  }
+  toggleAttrKey();
+
+  var autoForm = document.querySelector('form[action="{{ url_for("auto_tag_rules") }}"]');
+  if (autoForm) {
+    autoForm.addEventListener('submit', function (e) {
+      var btn = e.submitter;
+      if (!btn || btn.value !== 'create') return;
+      var total = {{ auto_preview|length if auto_preview else 0 }};
+      var cap = {{ auto_summary.create_cap if auto_summary and auto_summary.create_cap else 200 }};
+      var capped = {{ 'true' if auto_summary and auto_summary.capped else 'false' }};
+      if (total === 0) return;
+      var toCreate = capped ? cap : total;
+      var msg = 'Create ' + toCreate + ' tag rule(s)?';
+      if (capped) msg += '\n\nNote: only the first ' + cap + ' of ' + total + ' candidates will be created.';
+      if (!confirm(msg)) e.preventDefault();
+    });
+  }
+
+  var autoTagsCollapse = document.getElementById('autoTagsCollapse');
+  var accordionStorageKey = 'tagRulesAutoAccordion.openPanel';
+  if (autoTagsCollapse) {
+    var explicitPanel = {{ (auto_open_panel or '')|tojson }};
+    var queryPanel = new URLSearchParams(window.location.search).get('open_panel') || '';
+    var storedPanel = localStorage.getItem(accordionStorageKey) || '';
+    var initialPanel = explicitPanel || queryPanel || storedPanel;
+
+    function restoreAutoPanel() {
+      if (initialPanel !== 'auto-tags' || !window.bootstrap) return;
+      window.bootstrap.Collapse.getOrCreateInstance(autoTagsCollapse, { toggle: false }).show();
+    }
+
+    if (window.bootstrap) {
+      restoreAutoPanel();
+    } else {
+      window.addEventListener('load', restoreAutoPanel, { once: true });
+    }
+
+    autoTagsCollapse.addEventListener('shown.bs.collapse', function () {
+      localStorage.setItem(accordionStorageKey, 'auto-tags');
+    });
+    autoTagsCollapse.addEventListener('hidden.bs.collapse', function () {
+      localStorage.setItem(accordionStorageKey, '');
+    });
+  }
+}());
+</script>
+{% endblock %}
