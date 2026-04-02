@@ -27,6 +27,8 @@ from app import app, compress, compress_json, decompress, decompress_json, init_
 @pytest.fixture(scope="session", autouse=True)
 def setup_db():
     init_db()
+    yield
+    sobs_app._shutdown_db_resources()
 
 
 @pytest.fixture
@@ -2877,6 +2879,28 @@ class TestGenAICompliance:
         # Raw JSON tab should be present
         assert "Raw JSON" in body
         assert "raw_attrs" in body or "Span Attributes" in body
+
+    async def test_ai_view_handles_messages_missing_content(self, client):
+        """AI view should not fail when message objects omit the content field."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "missing-content-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "input_messages": [{"role": "user"}],
+                "output_messages": [{"role": "assistant", "tool_calls": [{"name": "lookup"}]}],
+                "tokens_in": 8,
+                "tokens_out": 2,
+                "duration_ms": 100,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "missing-content-svc" in body
 
     async def test_ai_view_includes_metrics_tab(self, client):
         """AI view should include Metrics tab with token and timing info."""
