@@ -56,8 +56,18 @@
 </div>
 
 <!-- Search / Filter bar -->
-<div class="card border-secondary mb-3">
-  <div class="card-body">
+<div class="accordion mb-3" id="logsFiltersAccordion">
+  <div class="accordion-item border-secondary">
+    <h2 class="accordion-header" id="logsFiltersHeading">
+      <button class="accordion-button py-2" type="button"
+              data-bs-toggle="collapse" data-bs-target="#logsFiltersPanel"
+              aria-expanded="true" aria-controls="logsFiltersPanel">
+        <i class="bi bi-funnel me-2 text-info"></i>
+        <span class="fw-semibold">Filters</span>
+      </button>
+    </h2>
+    <div id="logsFiltersPanel" class="accordion-collapse collapse show" aria-labelledby="logsFiltersHeading" data-bs-parent="#logsFiltersAccordion">
+      <div class="accordion-body py-3">
     <form method="get" class="d-flex flex-wrap gap-2 align-items-end">
       <input type="hidden" name="live" id="liveModeInput" value="{{ '1' if live == '1' else '' }}">
       <input type="hidden" name="analyze" value="{{ analyze }}">
@@ -95,28 +105,6 @@
         </select>
       </div>
       {% endif %}
-      <div style="flex: 2 0 200px">
-        <label class="form-label small text-secondary">SQL WHERE <span class="text-muted">(overrides above)</span></label>
-        <div class="position-relative">
-             <input
-               type="text"
-               name="sql"
-               id="sql-filter-input"
-               class="form-control form-control-sm font-monospace"
-               data-ai-action-id="logs.filter.apply_sql"
-               data-ai-action-type="apply_sql_filter"
-               data-ai-handler="applySqlFilter"
-               data-ai-label="Apply logs SQL filter"
-               data-ai-risk="low"
-               data-ai-confirm="false"
-               data-ai-action-role="sql-where-input"
-                 placeholder="level='ERROR' AND service='api'" value="{{ sql_where }}"
-                 autocomplete="off" aria-autocomplete="list" aria-haspopup="listbox" aria-describedby="sql-filter-feedback">
-          <ul id="sql-ac-dropdown" role="listbox"
-              class="dropdown-menu p-0 font-monospace small"
-              style="display:none;position:absolute;top:100%;left:0;right:0;z-index:1060;max-height:220px;overflow-y:auto;"></ul>
-        </div>
-      </div>
       <div class="filter-date-group">
         <div class="filter-date-fields">
           <div class="filter-date-field">
@@ -139,14 +127,50 @@
           <i class="bi bi-search"></i>
         </button>
         <a href="{{ url_for('view_logs') }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x"></i></a>
+        <div class="btn-group btn-group-sm" id="logs-reports-group">
+          <button type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="Saved reports">
+            <i class="bi bi-bookmark-star"></i>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end" id="logs-reports-menu">
+            <li><span class="dropdown-item text-secondary small">Loading…</span></li>
+          </ul>
+        </div>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="logs-save-report-btn" title="Save as report">
+          <i class="bi bi-bookmark-plus"></i>
+        </button>
+      </div>
+      <div class="w-100"></div>
+      <div style="flex: 1 1 100%">
+        <label class="form-label small text-secondary">SQL WHERE <span class="text-muted">(overrides above)</span></label>
+        <div class="position-relative">
+             <input
+               type="text"
+               name="sql"
+               id="sql-filter-input"
+               class="form-control form-control-sm font-monospace"
+               data-ai-action-id="logs.filter.apply_sql"
+               data-ai-action-type="apply_sql_filter"
+               data-ai-handler="applySqlFilter"
+               data-ai-label="Apply logs SQL filter"
+               data-ai-risk="low"
+               data-ai-confirm="false"
+               data-ai-action-role="sql-where-input"
+                 placeholder="level='ERROR' AND service='api'" value="{{ sql_where }}"
+                 autocomplete="off" aria-autocomplete="list" aria-haspopup="listbox" aria-describedby="sql-filter-feedback">
+          <ul id="sql-ac-dropdown" role="listbox"
+              class="dropdown-menu p-0 font-monospace small"
+              style="display:none;position:absolute;top:100%;left:0;right:0;z-index:1060;max-height:220px;overflow-y:auto;"></ul>
+        </div>
+        <div id="sql-filter-feedback" class="form-text small text-secondary mt-1 sql-feedback" title="{{ error_msg if (error_msg and sql_where) else '' }}">
+          {{ (error_msg if (error_msg and sql_where) else "Use fields, SQL operators, or functions like has_tag().") }}
+        </div>
       </div>
     </form>
-    <div id="sql-filter-feedback" class="form-text small text-secondary mt-1 sql-feedback" title="{{ error_msg if (error_msg and sql_where) else '' }}">
-      {{ (error_msg if (error_msg and sql_where) else "Use fields, SQL operators, or functions like has_tag().") }}
-    </div>
     {% if error_msg and not sql_where %}
     <div class="alert alert-danger mt-2 mb-0 py-1 small">{{ error_msg }}</div>
     {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1277,6 +1301,58 @@
   // Initial validation state for pre-filled sql query params.
   const initial = localValidate(input.value);
   setFeedback(initial.level, initial.message);
+})();
+
+// ── Saved Reports: logs page ──────────────────────────────────────────────
+(function () {
+  const group = document.getElementById('logs-reports-group');
+  const saveBtn = document.getElementById('logs-save-report-btn');
+  if (!group || !saveBtn) return;
+  const menu = group.querySelector('ul');
+  const pageBaseUrl = {{ url_for('view_logs') | tojson }};
+
+  function escHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  group.addEventListener('show.bs.dropdown', function () {
+    fetch('/api/reports?page_type=logs')
+      .then(r => r.json())
+      .then(reports => {
+        if (!reports.length) {
+          menu.innerHTML = '<li><span class="dropdown-item text-secondary small">No saved reports</span></li>';
+          return;
+        }
+        menu.innerHTML = reports.map(rep => {
+          const params = new URLSearchParams(rep.filters);
+          const url = pageBaseUrl + '?' + params.toString();
+          return `<li><a class="dropdown-item small" href="${url}" title="${escHtml(rep.description)}">${escHtml(rep.name)}</a></li>`;
+        }).join('') +
+          '<li><hr class="dropdown-divider my-1"></li>' +
+          `<li><a class="dropdown-item small text-secondary" href="{{ url_for('list_reports') }}"><i class="bi bi-gear me-1"></i>Manage reports</a></li>`;
+      })
+      .catch(() => {
+        menu.innerHTML = '<li><span class="dropdown-item text-danger small">Failed to load</span></li>';
+      });
+  });
+
+  saveBtn.addEventListener('click', function () {
+    const form = document.querySelector('form[method="get"]');
+    const data = new FormData(form);
+    const filters = {};
+    for (const [k, v] of data.entries()) {
+      // Exclude transient UI state params that should not be part of a saved filter set
+      if (v && k !== 'live' && k !== 'analyze' && k !== 'stats') filters[k] = v;
+    }
+    if (window.sobsReportSaveModal && typeof window.sobsReportSaveModal.open === 'function') {
+      window.sobsReportSaveModal.open({ pageType: 'logs', filters });
+    }
+  });
 })();
 </script>
 {% endblock %}

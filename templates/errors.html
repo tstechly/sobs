@@ -9,8 +9,18 @@
 </div>
 
 <!-- Filter bar -->
-<div class="card border-secondary mb-3">
-  <div class="card-body">
+<div class="accordion mb-3" id="errorsFiltersAccordion">
+  <div class="accordion-item border-secondary">
+    <h2 class="accordion-header" id="errorsFiltersHeading">
+      <button class="accordion-button py-2" type="button"
+              data-bs-toggle="collapse" data-bs-target="#errorsFiltersPanel"
+              aria-expanded="true" aria-controls="errorsFiltersPanel">
+        <i class="bi bi-funnel me-2 text-danger"></i>
+        <span class="fw-semibold">Filters</span>
+      </button>
+    </h2>
+    <div id="errorsFiltersPanel" class="accordion-collapse collapse show" aria-labelledby="errorsFiltersHeading" data-bs-parent="#errorsFiltersAccordion">
+      <div class="accordion-body py-3">
     <form method="get" class="d-flex flex-wrap gap-2 align-items-end">
       <div style="flex: 1 0 140px">
         <label class="form-label small text-secondary">Service</label>
@@ -70,11 +80,24 @@
           data-ai-confirm="false"
           data-ai-action-role="filter-submit"><i class="bi bi-search"></i></button>
         <a href="{{ url_for('view_errors') }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x"></i></a>
+        <div class="btn-group btn-group-sm" id="errors-reports-group">
+          <button type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="Saved reports">
+            <i class="bi bi-bookmark-star"></i>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end" id="errors-reports-menu">
+            <li><span class="dropdown-item text-secondary small">Loading…</span></li>
+          </ul>
+        </div>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="errors-save-report-btn" title="Save as report">
+          <i class="bi bi-bookmark-plus"></i>
+        </button>
       </div>
     </form>
     {% if error_msg %}
     <div class="alert alert-danger mt-2 mb-0 py-1 small">{{ error_msg }}</div>
     {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
@@ -241,5 +264,56 @@ document.querySelectorAll('.ai-help-btn').forEach(btn => {
     }
   });
 });
+
+// ── Saved Reports: errors page ────────────────────────────────────────────
+(function () {
+  const group = document.getElementById('errors-reports-group');
+  const saveBtn = document.getElementById('errors-save-report-btn');
+  if (!group || !saveBtn) return;
+  const menu = group.querySelector('ul');
+  const pageBaseUrl = {{ url_for('view_errors') | tojson }};
+
+  function escHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  group.addEventListener('show.bs.dropdown', function () {
+    fetch('/api/reports?page_type=errors')
+      .then(r => r.json())
+      .then(reports => {
+        if (!reports.length) {
+          menu.innerHTML = '<li><span class="dropdown-item text-secondary small">No saved reports</span></li>';
+          return;
+        }
+        menu.innerHTML = reports.map(rep => {
+          const params = new URLSearchParams(rep.filters);
+          const url = pageBaseUrl + '?' + params.toString();
+          return `<li><a class="dropdown-item small" href="${url}" title="${escHtml(rep.description)}">${escHtml(rep.name)}</a></li>`;
+        }).join('') +
+          '<li><hr class="dropdown-divider my-1"></li>' +
+          `<li><a class="dropdown-item small text-secondary" href="{{ url_for('list_reports') }}"><i class="bi bi-gear me-1"></i>Manage reports</a></li>`;
+      })
+      .catch(() => {
+        menu.innerHTML = '<li><span class="dropdown-item text-danger small">Failed to load</span></li>';
+      });
+  });
+
+  saveBtn.addEventListener('click', function () {
+    const form = document.querySelector('form[method="get"]');
+    const data = new FormData(form);
+    const filters = {};
+    for (const [k, v] of data.entries()) {
+      if (v) filters[k] = v;
+    }
+    if (window.sobsReportSaveModal && typeof window.sobsReportSaveModal.open === 'function') {
+      window.sobsReportSaveModal.open({ pageType: 'errors', filters });
+    }
+  });
+})();
 </script>
 {% endblock %}
