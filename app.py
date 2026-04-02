@@ -933,6 +933,7 @@ CREATE TABLE IF NOT EXISTS sobs_reports (
 ) ENGINE = ReplacingMergeTree(Version)
 ORDER BY Id
 SETTINGS index_granularity = 8192;
+
 """
 
 
@@ -1439,12 +1440,25 @@ def _query_page_enabled(settings: dict[str, str] | None = None) -> bool:
     return bool(settings.get("ai.endpoint_url", "").strip() and settings.get("ai.model", "").strip())
 
 
+def _kubernetes_enabled() -> bool:
+    """Return True when the Kubernetes health view is enabled in settings."""
+    try:
+        db = get_db()
+        value = _get_app_setting(db, "kubernetes.enabled")
+        return value == "1"
+    except Exception:
+        return False
+
+
 @app.context_processor
 def inject_feature_flags() -> dict[str, bool]:
     try:
-        return {"query_enabled": _query_page_enabled()}
+        return {
+            "query_enabled": _query_page_enabled(),
+            "kubernetes_enabled": _kubernetes_enabled(),
+        }
     except Exception:
-        return {"query_enabled": False}
+        return {"query_enabled": False, "kubernetes_enabled": False}
 
 
 # ---------------------------------------------------------------------------
@@ -10375,6 +10389,12 @@ async def auto_metrics_rules_help():
     return await render_template("auto_metrics_rules_help.html")
 
 
+@app.route("/kubernetes/help")
+@require_basic_auth
+async def kubernetes_help():
+    return await render_template("kubernetes_help.html")
+
+
 @app.route("/dashboards/<dashboard_id>/delete", methods=["POST"])
 @require_basic_auth
 async def delete_dashboard(dashboard_id: str):
@@ -11152,6 +11172,7 @@ async def view_settings():
     ai_settings = _load_all_ai_settings(db)
     notification_channels = _load_notification_channels(db)
     notification_rules = _load_notification_rules(db)
+    k8s_settings = _load_k8s_settings(db)
     return await render_template(
         "settings.html",
         tag_rule_count=len(tag_rules),
@@ -11160,6 +11181,7 @@ async def view_settings():
         ai_configured=bool(ai_settings.get("ai.endpoint_url") and ai_settings.get("ai.model")),
         notification_channel_count=len(notification_channels),
         notification_rule_count=len(notification_rules),
+        kubernetes_view_enabled=k8s_settings.get("kubernetes.enabled") == "1",
     )
 
 
@@ -16643,6 +16665,399 @@ async def api_chart_types():
             jsonify({"ok": False, "error": f"Failed to load chart types: {str(e)}"}),
             500,
         )
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes Health View  GET /kubernetes
+# Settings               GET/POST /settings/kubernetes
+# API                    GET /api/kubernetes/status
+# ---------------------------------------------------------------------------
+
+_K8S_SETTING_KEYS = ("kubernetes.enabled",)
+
+
+def _load_k8s_settings(db: "ChDbConnection") -> dict[str, str]:
+    """Load Kubernetes health settings from sobs_app_settings."""
+    result: dict[str, str] = {k: "" for k in _K8S_SETTING_KEYS}
+    for key in _K8S_SETTING_KEYS:
+        raw = _get_app_setting(db, key)
+        if raw:
+            result[key] = raw
+    return result
+
+
+def _k8s_settings_from_form(form: "dict[str, str]") -> dict[str, str]:
+    """Extract Kubernetes settings from a submitted form."""
+    return {"kubernetes.enabled": "1" if form.get("enabled") == "1" else "0"}
+
+
+def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build Kubernetes status from OTEL metric tables only."""
+    query = query or {}
+
+    def _to_int(value: Any, default: int, lo: int, hi: int) -> int:
+        try:
+            parsed = int(str(value).strip())
+        except Exception:
+            return default
+        return max(lo, min(hi, parsed))
+
+    def _count_query(sql: str, params: list[Any]) -> int:
+        row = db.execute(sql, params).fetchone()
+        if row is None:
+            return 0
+        if isinstance(row, dict):
+            v = row.get("cnt")
+            return int(v or 0)
+        return int(row[0] or 0)
+
+    name_filter = str(query.get("name", "")).strip()
+    namespace_filter = str(query.get("namespace", "")).strip()
+
+    table_defaults: dict[str, dict[str, Any]] = {
+        "nodes": {"sort": "name", "page": 1, "page_size": 25},
+        "deployments": {"sort": "namespace", "page": 1, "page_size": 25},
+        "pods": {"sort": "namespace", "page": 1, "page_size": 25},
+    }
+    sort_columns: dict[str, dict[str, str]] = {
+        "nodes": {
+            "name": "name",
+            "status": "status",
+            "version": "version",
+            "created": "last_seen",
+        },
+        "deployments": {
+            "namespace": "namespace",
+            "name": "name",
+            "desired": "desired",
+            "ready": "ready",
+            "available": "available",
+            "created": "last_seen",
+        },
+        "pods": {
+            "namespace": "namespace",
+            "name": "name",
+            "phase": "phase",
+            "ready": "ready_signal",
+            "restarts": "restarts",
+            "node": "node",
+            "created": "last_seen",
+        },
+    }
+
+    table_opts: dict[str, dict[str, Any]] = {}
+    for table in ("nodes", "deployments", "pods"):
+        default_sort = str(table_defaults[table]["sort"])
+        req_sort = str(query.get(f"{table}_sort", default_sort)).strip()
+        sort_key = req_sort if req_sort in sort_columns[table] else default_sort
+        req_dir = str(query.get(f"{table}_dir", "asc")).strip().lower()
+        sort_dir = "desc" if req_dir == "desc" else "asc"
+        page = _to_int(query.get(f"{table}_page"), 1, 1, 1_000_000)
+        page_size = _to_int(query.get(f"{table}_page_size"), 25, 1, 200)
+        table_opts[table] = {
+            "sort_key": sort_key,
+            "sort_col": sort_columns[table][sort_key],
+            "sort_dir": sort_dir,
+            "page": page,
+            "page_size": page_size,
+            "offset": (page - 1) * page_size,
+        }
+
+    result: dict[str, Any] = {
+        "pods": [],
+        "deployments": [],
+        "nodes": [],
+        "namespaces": [],
+        "meta": {
+            "nodes": {"total": 0, **table_opts["nodes"]},
+            "deployments": {"total": 0, **table_opts["deployments"]},
+            "pods": {"total": 0, **table_opts["pods"]},
+        },
+        "summary": {
+            "nodes_total": 0,
+            "nodes_ready": 0,
+            "pods_total": 0,
+            "pods_running": 0,
+            "pods_failed": 0,
+            "deployments_total": 0,
+            "deployments_unhealthy": 0,
+            "namespaces_total": 0,
+        },
+        "error": "",
+        "source": "otel",
+    }
+    errors: list[str] = []
+
+    try:
+        node_conditions = ["Attributes['k8s.node.name'] != ''"]
+        node_params: list[Any] = []
+        if name_filter:
+            node_conditions.append("positionCaseInsensitive(Attributes['k8s.node.name'], ?) > 0")
+            node_params.append(name_filter)
+
+        node_base_sql = f"""
+            SELECT
+                Attributes['k8s.node.name'] AS name,
+                maxIf(Value, MetricName = 'k8s.node.condition_ready') AS ready_signal,
+                if(maxIf(Value, MetricName = 'k8s.node.condition_ready') > 0, 'Ready', 'NotReady') AS status,
+                any(Attributes['k8s.kubelet.version']) AS version,
+                max(TimeUnix) AS last_seen
+            FROM otel_metrics_gauge
+            WHERE {' AND '.join(node_conditions)}
+            GROUP BY name
+        """
+        node_total = _count_query(f"SELECT count(*) AS cnt FROM ({node_base_sql})", node_params)
+        result["meta"]["nodes"]["total"] = node_total
+        result["summary"]["nodes_total"] = node_total
+        result["summary"]["nodes_ready"] = _count_query(
+            f"SELECT count(*) AS cnt FROM ({node_base_sql}) WHERE ready_signal > 0",
+            node_params,
+        )
+        node_sql = (
+            f"SELECT * FROM ({node_base_sql}) "
+            f"ORDER BY {table_opts['nodes']['sort_col']} {table_opts['nodes']['sort_dir'].upper()} "
+            "LIMIT ? OFFSET ?"
+        )
+        node_rows = db.execute(
+            node_sql,
+            node_params + [table_opts["nodes"]["page_size"], table_opts["nodes"]["offset"]],
+        ).fetchall()
+        result["nodes"] = [
+            {
+                "name": str(row["name"]),
+                "status": "Ready" if float(row["ready_signal"] or 0) > 0 else "NotReady",
+                "version": str(row["version"] or ""),
+                "created": str(row["last_seen"]),
+            }
+            for row in node_rows
+        ]
+    except Exception as exc:
+        errors.append(f"nodes: {exc}")
+
+    try:
+        pod_conditions = ["Attributes['k8s.pod.name'] != ''"]
+        pod_params: list[Any] = []
+        if namespace_filter:
+            pod_conditions.append("Attributes['k8s.namespace.name'] = ?")
+            pod_params.append(namespace_filter)
+        if name_filter:
+            pod_conditions.append("positionCaseInsensitive(Attributes['k8s.pod.name'], ?) > 0")
+            pod_params.append(name_filter)
+
+        pod_base_sql = f"""
+            SELECT
+                Attributes['k8s.namespace.name'] AS namespace,
+                Attributes['k8s.pod.name'] AS name,
+                any(Attributes['k8s.pod.phase']) AS phase,
+                maxIf(Value, MetricName = 'k8s.pod.status_ready') AS ready_signal,
+                maxIf(toInt64(Value), MetricName = 'k8s.container.restart_count') AS restarts,
+                any(Attributes['k8s.node.name']) AS node,
+                max(TimeUnix) AS last_seen
+            FROM otel_metrics_gauge
+            WHERE {' AND '.join(pod_conditions)}
+            GROUP BY namespace, name
+        """
+        pod_total = _count_query(f"SELECT count(*) AS cnt FROM ({pod_base_sql})", pod_params)
+        result["meta"]["pods"]["total"] = pod_total
+        result["summary"]["pods_total"] = pod_total
+        result["summary"]["pods_running"] = _count_query(
+            f"SELECT count(*) AS cnt FROM ({pod_base_sql}) WHERE phase = 'Running'",
+            pod_params,
+        )
+        result["summary"]["pods_failed"] = _count_query(
+            f"SELECT count(*) AS cnt FROM ({pod_base_sql}) WHERE phase = 'Failed'",
+            pod_params,
+        )
+        pod_sql = (
+            f"SELECT * FROM ({pod_base_sql}) "
+            f"ORDER BY {table_opts['pods']['sort_col']} {table_opts['pods']['sort_dir'].upper()} "
+            "LIMIT ? OFFSET ?"
+        )
+        pod_rows = db.execute(
+            pod_sql,
+            pod_params + [table_opts["pods"]["page_size"], table_opts["pods"]["offset"]],
+        ).fetchall()
+        result["pods"] = [
+            {
+                "namespace": str(row["namespace"] or "default"),
+                "name": str(row["name"]),
+                "phase": str(row["phase"] or "Unknown"),
+                "ready": float(row["ready_signal"] or 0) > 0,
+                "restarts": int(row["restarts"] or 0),
+                "node": str(row["node"] or ""),
+                "created": str(row["last_seen"]),
+            }
+            for row in pod_rows
+        ]
+    except Exception as exc:
+        errors.append(f"pods: {exc}")
+
+    try:
+        deploy_conditions = ["Attributes['k8s.deployment.name'] != ''"]
+        deploy_params: list[Any] = []
+        if namespace_filter:
+            deploy_conditions.append("Attributes['k8s.namespace.name'] = ?")
+            deploy_params.append(namespace_filter)
+        if name_filter:
+            deploy_conditions.append("positionCaseInsensitive(Attributes['k8s.deployment.name'], ?) > 0")
+            deploy_params.append(name_filter)
+
+        deploy_base_sql = f"""
+            SELECT
+                Attributes['k8s.namespace.name'] AS namespace,
+                Attributes['k8s.deployment.name'] AS name,
+                maxIf(toInt64(Value), MetricName = 'k8s.deployment.desired') AS desired,
+                maxIf(toInt64(Value), MetricName = 'k8s.deployment.ready') AS ready,
+                maxIf(toInt64(Value), MetricName = 'k8s.deployment.available') AS available,
+                maxIf(toInt64(Value), MetricName = 'k8s.deployment.updated') AS updated,
+                max(TimeUnix) AS last_seen
+            FROM otel_metrics_gauge
+            WHERE {' AND '.join(deploy_conditions)}
+            GROUP BY namespace, name
+        """
+        deploy_total = _count_query(f"SELECT count(*) AS cnt FROM ({deploy_base_sql})", deploy_params)
+        result["meta"]["deployments"]["total"] = deploy_total
+        result["summary"]["deployments_total"] = deploy_total
+        result["summary"]["deployments_unhealthy"] = _count_query(
+            f"SELECT count(*) AS cnt FROM ({deploy_base_sql}) WHERE ready < desired",
+            deploy_params,
+        )
+        deploy_sql = (
+            f"SELECT * FROM ({deploy_base_sql}) "
+            f"ORDER BY {table_opts['deployments']['sort_col']} {table_opts['deployments']['sort_dir'].upper()} "
+            "LIMIT ? OFFSET ?"
+        )
+        deploy_rows = db.execute(
+            deploy_sql,
+            deploy_params + [table_opts["deployments"]["page_size"], table_opts["deployments"]["offset"]],
+        ).fetchall()
+        result["deployments"] = [
+            {
+                "namespace": str(row["namespace"] or "default"),
+                "name": str(row["name"]),
+                "desired": int(row["desired"] or 0),
+                "ready": int(row["ready"] or 0),
+                "available": int(row["available"] or 0),
+                "updated": int(row["updated"] or 0),
+                "created": str(row["last_seen"]),
+            }
+            for row in deploy_rows
+        ]
+    except Exception as exc:
+        errors.append(f"deployments: {exc}")
+
+    try:
+        namespace_rows = db.execute("""
+            SELECT
+                Attributes['k8s.namespace.name'] AS name,
+                max(TimeUnix) AS last_seen
+            FROM otel_metrics_gauge
+            WHERE Attributes['k8s.namespace.name'] != ''
+            GROUP BY name
+            ORDER BY name
+            """).fetchall()
+        result["namespaces"] = [
+            {
+                "name": str(row["name"]),
+                "status": "Active",
+                "created": str(row["last_seen"]),
+            }
+            for row in namespace_rows
+        ]
+        result["summary"]["namespaces_total"] = len(result["namespaces"])
+    except Exception as exc:
+        errors.append(f"namespaces: {exc}")
+
+    if errors:
+        result["error"] = "; ".join(errors)
+    elif not (result["pods"] or result["deployments"] or result["nodes"] or result["namespaces"]):
+        result["error"] = (
+            "No Kubernetes OTEL data found yet. Deploy the reference OTEL Kubernetes collectors to populate this view."
+        )
+
+    return result
+
+
+@app.route("/settings/kubernetes", methods=["GET"])
+@require_basic_auth
+async def view_k8s_settings():
+    """Kubernetes health view settings page."""
+    db = get_db()
+    settings = _load_k8s_settings(db)
+    flash_msg = request.args.get("msg", "")
+    flash_type = request.args.get("msg_type", "success")
+    return await render_template(
+        "settings_kubernetes.html",
+        k8s_settings=settings,
+        flash_msg=flash_msg,
+        flash_type=flash_type,
+    )
+
+
+@app.route("/settings/kubernetes", methods=["POST"])
+@require_basic_auth
+async def save_k8s_settings():
+    """Save Kubernetes health view settings."""
+    form = await request.form
+    new_settings = _k8s_settings_from_form(dict(form))
+    db = get_db()
+    for key, value in new_settings.items():
+        if value:
+            _set_app_setting(db, key, value)
+        else:
+            _del_app_setting(db, key)
+    redirect_url = url_for("view_k8s_settings") + "?msg=Settings+saved&msg_type=success"
+    return redirect(redirect_url)
+
+
+@app.route("/kubernetes")
+@require_basic_auth
+async def view_kubernetes():
+    """Kubernetes health dashboard page."""
+    if not _kubernetes_enabled():
+        return (
+            "Kubernetes health view is disabled. Enable it in Settings → Kubernetes.",
+            404,
+        )
+    return await render_template("kubernetes.html")
+
+
+@app.route("/api/kubernetes/status", methods=["GET"])
+@require_basic_auth
+async def api_kubernetes_status():
+    """Return current Kubernetes health data from OTEL tables."""
+    if not _kubernetes_enabled():
+        return jsonify({"ok": False, "error": "Kubernetes health view is disabled."}), 404
+
+    def _q_int(name: str, default: int, lo: int, hi: int) -> int:
+        raw = request.args.get(name, str(default)).strip()
+        try:
+            parsed = int(raw)
+        except Exception:
+            parsed = default
+        return max(lo, min(hi, parsed))
+
+    query_opts: dict[str, Any] = {
+        "namespace": request.args.get("namespace", "").strip(),
+        "name": request.args.get("name", "").strip(),
+        "nodes_sort": request.args.get("nodes_sort", "name").strip(),
+        "nodes_dir": request.args.get("nodes_dir", "asc").strip().lower(),
+        "nodes_page": _q_int("nodes_page", 1, 1, 1_000_000),
+        "nodes_page_size": _q_int("nodes_page_size", 25, 1, 200),
+        "deployments_sort": request.args.get("deployments_sort", "namespace").strip(),
+        "deployments_dir": request.args.get("deployments_dir", "asc").strip().lower(),
+        "deployments_page": _q_int("deployments_page", 1, 1, 1_000_000),
+        "deployments_page_size": _q_int("deployments_page_size", 25, 1, 200),
+        "pods_sort": request.args.get("pods_sort", "namespace").strip(),
+        "pods_dir": request.args.get("pods_dir", "asc").strip().lower(),
+        "pods_page": _q_int("pods_page", 1, 1, 1_000_000),
+        "pods_page_size": _q_int("pods_page_size", 25, 1, 200),
+    }
+
+    db = get_db()
+    data = _fetch_k8s_from_otel(db, query_opts)
+    data["ok"] = True
+    return jsonify(data)
 
 
 if __name__ == "__main__":

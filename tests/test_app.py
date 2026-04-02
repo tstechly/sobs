@@ -7648,3 +7648,127 @@ class TestChartSpecHelpers:
         assert "LLM JSON repair failed" in err or "still invalid" in err
         assert stats == {}
         assert calls["n"] == 2
+
+
+class TestKubernetesRoutes:
+    """Integration tests for Kubernetes health view routes."""
+
+    async def test_kubernetes_disabled_by_default(self, client, monkeypatch):
+        """The /kubernetes page returns 404 when feature is not enabled."""
+        monkeypatch.setattr(sobs_app, "_kubernetes_enabled", lambda: False)
+        r = await client.get("/kubernetes")
+        assert r.status_code == 404
+
+    async def test_kubernetes_status_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_kubernetes_enabled", lambda: False)
+        r = await client.get("/api/kubernetes/status")
+        assert r.status_code == 404
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+
+    async def test_kubernetes_ingest_route_removed(self, client):
+        r = await client.post("/api/kubernetes/ingest", json={"pods": []})
+        assert r.status_code == 404
+
+    async def test_kubernetes_page_enabled(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_kubernetes_enabled", lambda: True)
+        r = await client.get("/kubernetes")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "Kubernetes Health" in text
+        assert "api/kubernetes/status" in text
+
+    async def test_kubernetes_settings_page(self, client):
+        r = await client.get("/settings/kubernetes")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "Kubernetes Health View" in text
+        assert "OTEL tables only" in text
+
+    async def test_kubernetes_settings_save(self, client):
+        r = await client.post(
+            "/settings/kubernetes",
+            form={"enabled": "1"},
+        )
+        assert r.status_code in (200, 302)
+
+    async def test_kubernetes_status_from_otel(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_kubernetes_enabled", lambda: True)
+        monkeypatch.setattr(
+            sobs_app,
+            "_fetch_k8s_from_otel",
+            lambda _db, _query: {
+                "pods": [
+                    {
+                        "namespace": "default",
+                        "name": "my-pod-abc",
+                        "phase": "Running",
+                        "ready": True,
+                        "restarts": 0,
+                        "node": "node-1",
+                        "created": "2024-01-01T00:00:00Z",
+                    }
+                ],
+                "deployments": [
+                    {
+                        "namespace": "default",
+                        "name": "my-deploy",
+                        "desired": 2,
+                        "ready": 2,
+                        "available": 2,
+                        "updated": 2,
+                        "created": "2024-01-01T00:00:00Z",
+                    }
+                ],
+                "nodes": [
+                    {
+                        "name": "node-1",
+                        "status": "Ready",
+                        "version": "v1.29.0",
+                        "created": "2024-01-01T00:00:00Z",
+                    }
+                ],
+                "namespaces": [{"name": "default", "status": "Active", "created": "2024-01-01T00:00:00Z"}],
+                "error": "",
+                "source": "otel",
+            },
+        )
+
+        status_r = await client.get("/api/kubernetes/status")
+        assert status_r.status_code == 200
+        status_data = json.loads(await status_r.get_data())
+        assert status_data["ok"] is True
+        assert status_data["source"] == "otel"
+        assert len(status_data["pods"]) == 1
+        assert status_data["pods"][0]["name"] == "my-pod-abc"
+        assert len(status_data["deployments"]) == 1
+        assert len(status_data["nodes"]) == 1
+
+    async def test_kubernetes_status_no_data(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_kubernetes_enabled", lambda: True)
+        monkeypatch.setattr(
+            sobs_app,
+            "_fetch_k8s_from_otel",
+            lambda _db, _query: {
+                "pods": [],
+                "deployments": [],
+                "nodes": [],
+                "namespaces": [],
+                "error": "No Kubernetes OTEL data found yet.",
+                "source": "otel",
+            },
+        )
+        r = await client.get("/api/kubernetes/status")
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        assert data["pods"] == []
+        assert data["source"] == "otel"
+
+    async def test_kubernetes_settings_hub_card(self, client, monkeypatch):
+        """Settings hub shows the Kubernetes card."""
+        r = await client.get("/settings")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "Kubernetes Health View" in text
+        assert "view_k8s_settings" in text or "settings/kubernetes" in text
