@@ -10,6 +10,7 @@ import atexit
 import base64
 import copy
 import hashlib
+import hmac
 import html
 import inspect
 import json
@@ -295,15 +296,27 @@ app.asgi_app = BasePathMiddleware(app.asgi_app, BASE_PATH)  # type: ignore[metho
 
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 DB_PATH = os.path.join(DATA_DIR, "sobs.chdb")
+RUM_ASSET_DIR = os.path.join(DATA_DIR, "rum_assets")
 API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
 BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
 BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
 EXTERNAL_AUTH_URL = os.environ.get("SOBS_EXTERNAL_AUTH_URL", "")  # empty = disabled
+RUM_ASSET_SIGNING_KEY = os.environ.get("SOBS_RUM_ASSET_SIGNING_KEY", "")
+RUM_ASSET_SIGN_WINDOW_SEC = int(os.environ.get("SOBS_RUM_ASSET_SIGN_WINDOW_SEC", "300"))
+RUM_ASSET_MAX_BYTES = int(os.environ.get("SOBS_RUM_ASSET_MAX_BYTES", str(8 * 1024 * 1024)))
+RUM_CLIENT_AUTH_MODE = os.environ.get("SOBS_RUM_CLIENT_AUTH_MODE", "none").strip().lower()
+RUM_CLIENT_SIGNING_KEY = os.environ.get("SOBS_RUM_CLIENT_SIGNING_KEY", "")
+RUM_CLIENT_TOKEN_TTL_SEC = int(os.environ.get("SOBS_RUM_CLIENT_TOKEN_TTL_SEC", "900"))
+SOURCE_MAP_DIR = os.environ.get("SOBS_SOURCE_MAP_DIR", "").strip()
+SOURCE_MAP_ENABLE = _env_flag("SOBS_SOURCE_MAP_ENABLE", False)
+APP_REGISTRY_SEED_JSON_ENV = "SOBS_APP_REGISTRY_SEED_JSON"
+APP_REGISTRY_SEED_JSON_FILE_ENV = "SOBS_APP_REGISTRY_SEED_JSON_FILE"
 CHDB_CONFIG_FILE_ENV = "SOBS_CLICKHOUSE_CONFIG_FILE"
 CHDB_EXPECT_DISK_ENV = "SOBS_CHDB_EXPECT_DISK"
 CHDB_EXPECT_POLICY_ENV = "SOBS_CHDB_EXPECT_STORAGE_POLICY"
 
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(RUM_ASSET_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("sobs")
@@ -635,7 +648,7 @@ WINDOW w AS (
     ROWS BETWEEN 59 PRECEDING AND CURRENT ROW
 );
 
-CREATE VIEW IF NOT EXISTS v_derived_signals_1m AS
+CREATE OR REPLACE VIEW v_derived_signals_1m AS
 SELECT
     ServiceName,
     'logs' AS SignalSource,
@@ -712,6 +725,84 @@ SELECT
     count() AS SampleCount
 FROM otel_logs
 WHERE EventName = 'exception'
+GROUP BY ServiceName, MinuteBucket
+UNION ALL
+SELECT
+        ServiceName,
+        'rum_vitals' AS SignalSource,
+        'LCP' AS SignalName,
+        substring(lower(hex(MD5(concat(ServiceName, '|rum_vitals|LCP')))), 1, 16) AS AttrFingerprint,
+        toStartOfMinute(Timestamp) AS MinuteBucket,
+        toFloat64(quantileExact(0.75)(JSONExtractFloat(Body, 'value'))) AS Value,
+        count() AS SampleCount
+FROM hyperdx_sessions
+WHERE EventName = 'web-vital'
+    AND JSONExtractString(Body, 'name') = 'LCP'
+GROUP BY ServiceName, MinuteBucket
+UNION ALL
+SELECT
+        ServiceName,
+        'rum_vitals' AS SignalSource,
+        'INP' AS SignalName,
+        substring(lower(hex(MD5(concat(ServiceName, '|rum_vitals|INP')))), 1, 16) AS AttrFingerprint,
+        toStartOfMinute(Timestamp) AS MinuteBucket,
+        toFloat64(quantileExact(0.75)(JSONExtractFloat(Body, 'value'))) AS Value,
+        count() AS SampleCount
+FROM hyperdx_sessions
+WHERE EventName = 'web-vital'
+    AND JSONExtractString(Body, 'name') = 'INP'
+GROUP BY ServiceName, MinuteBucket
+UNION ALL
+SELECT
+        ServiceName,
+        'rum_vitals' AS SignalSource,
+        'CLS' AS SignalName,
+        substring(lower(hex(MD5(concat(ServiceName, '|rum_vitals|CLS')))), 1, 16) AS AttrFingerprint,
+        toStartOfMinute(Timestamp) AS MinuteBucket,
+        toFloat64(quantileExact(0.75)(JSONExtractFloat(Body, 'value'))) AS Value,
+        count() AS SampleCount
+FROM hyperdx_sessions
+WHERE EventName = 'web-vital'
+    AND JSONExtractString(Body, 'name') = 'CLS'
+GROUP BY ServiceName, MinuteBucket
+UNION ALL
+SELECT
+        ServiceName,
+        'rum_vitals' AS SignalSource,
+        'TTFB' AS SignalName,
+        substring(lower(hex(MD5(concat(ServiceName, '|rum_vitals|TTFB')))), 1, 16) AS AttrFingerprint,
+        toStartOfMinute(Timestamp) AS MinuteBucket,
+        toFloat64(quantileExact(0.75)(JSONExtractFloat(Body, 'value'))) AS Value,
+        count() AS SampleCount
+FROM hyperdx_sessions
+WHERE EventName = 'web-vital'
+    AND JSONExtractString(Body, 'name') = 'TTFB'
+GROUP BY ServiceName, MinuteBucket
+UNION ALL
+SELECT
+        ServiceName,
+        'rum_vitals' AS SignalSource,
+        'FCP' AS SignalName,
+        substring(lower(hex(MD5(concat(ServiceName, '|rum_vitals|FCP')))), 1, 16) AS AttrFingerprint,
+        toStartOfMinute(Timestamp) AS MinuteBucket,
+        toFloat64(quantileExact(0.75)(JSONExtractFloat(Body, 'value'))) AS Value,
+        count() AS SampleCount
+FROM hyperdx_sessions
+WHERE EventName = 'web-vital'
+    AND JSONExtractString(Body, 'name') = 'FCP'
+GROUP BY ServiceName, MinuteBucket
+UNION ALL
+SELECT
+        ServiceName,
+        'rum_vitals' AS SignalSource,
+        'FID' AS SignalName,
+        substring(lower(hex(MD5(concat(ServiceName, '|rum_vitals|FID')))), 1, 16) AS AttrFingerprint,
+        toStartOfMinute(Timestamp) AS MinuteBucket,
+        toFloat64(quantileExact(0.75)(JSONExtractFloat(Body, 'value'))) AS Value,
+        count() AS SampleCount
+FROM hyperdx_sessions
+WHERE EventName = 'web-vital'
+    AND JSONExtractString(Body, 'name') = 'FID'
 GROUP BY ServiceName, MinuteBucket;
 
 CREATE VIEW IF NOT EXISTS v_derived_signals_anomaly AS
@@ -963,6 +1054,57 @@ CREATE TABLE IF NOT EXISTS sobs_reports (
 ORDER BY Id
 SETTINGS index_granularity = 8192;
 
+CREATE TABLE IF NOT EXISTS sobs_apps (
+    Id String CODEC(ZSTD(1)),
+    Name String CODEC(ZSTD(1)),
+    Slug String CODEC(ZSTD(1)),
+    OwnerTeam String CODEC(ZSTD(1)),
+    RepoUrl String CODEC(ZSTD(1)),
+    DefaultEnvironment String CODEC(ZSTD(1)),
+    Enabled UInt8 DEFAULT 1 CODEC(T64, ZSTD(1)),
+    MetadataJson String CODEC(ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    CreatedAt DateTime64(3) DEFAULT now64(3) CODEC(Delta(8), ZSTD(1)),
+    UpdatedAt DateTime64(3) DEFAULT now64(3) CODEC(Delta(8), ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (Slug, Id)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS sobs_app_releases (
+    Id String CODEC(ZSTD(1)),
+    AppId String CODEC(ZSTD(1)),
+    ReleaseVersion String CODEC(ZSTD(1)),
+    CommitSha String CODEC(ZSTD(1)),
+    BuildId String CODEC(ZSTD(1)),
+    Environment String CODEC(ZSTD(1)),
+    ReleasedAt DateTime64(3) DEFAULT now64(3) CODEC(Delta(8), ZSTD(1)),
+    MetadataJson String CODEC(ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (AppId, ReleaseVersion, Id)
+SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS sobs_release_artifacts (
+    Id String CODEC(ZSTD(1)),
+    ReleaseId String CODEC(ZSTD(1)),
+    ArtifactType LowCardinality(String) CODEC(ZSTD(1)),
+    Name String CODEC(ZSTD(1)),
+    ContentType String CODEC(ZSTD(1)),
+    Size UInt64 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    StorageRef String CODEC(ZSTD(1)),
+    ChecksumSha256 String CODEC(ZSTD(1)),
+    Platform String CODEC(ZSTD(1)),
+    Architecture String CODEC(ZSTD(1)),
+    MetadataJson String CODEC(ZSTD(1)),
+    UploadedAt DateTime64(3) DEFAULT now64(3) CODEC(Delta(8), ZSTD(1)),
+    IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+    Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+) ENGINE = ReplacingMergeTree(Version)
+ORDER BY (ReleaseId, ArtifactType, Name, Id)
+SETTINGS index_granularity = 8192;
+
 """
 
 
@@ -1042,10 +1184,12 @@ class ChDbConnection:
         log.info("chDB connect target: %s", connect_target)
         self._conn = chdb_driver.connect(connect_target)
         self._lock = threading.Lock()
+        self._closed = False
         try:
             _validate_chdb_startup_configuration(self)
         except Exception:
             self._conn.close()
+            self._closed = True
             raise
 
     def execute(self, query: str, params=None):
@@ -1070,7 +1214,11 @@ class ChDbConnection:
         return None  # ClickHouse auto-commits
 
     def close(self):
-        self._conn.close()
+        with self._lock:
+            if self._closed:
+                return
+            self._conn.close()
+            self._closed = True
 
 
 _global_db: ChDbConnection | None = None
@@ -1151,6 +1299,8 @@ def _ensure_post_schema_state(db: ChDbConnection) -> None:
     _ensure_notification_schema(db)
     _ensure_ai_memory_schema(db)
     _prime_log_attr_key_cache(db)
+    _seed_app_release_registry_from_env(db)
+    _seed_cwv_anomaly_rules(db)
     if not app.config.get("TESTING"):
         _seed_example_metrics_content(db)
 
@@ -3659,6 +3809,45 @@ def _seed_example_metrics_content(db: ChDbConnection) -> None:
     _soft_delete_seed_chart_by_title(db, dashboard_id, "Trace latency")
 
 
+_CWV_RULES: list[tuple[str, str, str, float, float]] = [
+    ("CWV LCP", "LCP", "gt", 2500.0, 4000.0),
+    ("CWV INP", "INP", "gt", 200.0, 500.0),
+    ("CWV CLS", "CLS", "gt", 0.1, 0.25),
+    ("CWV TTFB", "TTFB", "gt", 800.0, 1800.0),
+    ("CWV FCP", "FCP", "gt", 1800.0, 3000.0),
+    ("CWV FID", "FID", "gt", 100.0, 300.0),
+]
+
+
+def _seed_cwv_anomaly_rules(db: ChDbConnection) -> None:
+    """Seed default Core Web Vitals threshold rules into sobs_anomaly_rules."""
+    version = int(time.time() * 1000)
+    for name, signal, comparator, warn, crit in _CWV_RULES:
+        _seed_rule_if_missing(
+            db,
+            {
+                "Id": str(uuid.uuid4()),
+                "Name": name,
+                "RuleType": "threshold",
+                "SignalSource": "rum_vitals",
+                "SignalName": signal,
+                "ServiceName": "",
+                "AttrFingerprint": "",
+                "Comparator": comparator,
+                "WarningThreshold": warn,
+                "CriticalThreshold": crit,
+                "SecondarySignalSource": "",
+                "SecondarySignalName": "",
+                "SecondaryComparator": "gt",
+                "SecondaryWarningThreshold": 0.0,
+                "SecondaryCriticalThreshold": 0.0,
+                "MinSampleCount": 5,
+                "IsDeleted": 0,
+                "Version": version,
+            },
+        )
+
+
 def _run_write_batch(tasks: list[_WriteTask]) -> None:
     db = get_db()
     for task in tasks:
@@ -3860,6 +4049,224 @@ def require_api_key(f):
     return decorated
 
 
+def _sanitize_rum_asset_name(value: str) -> str:
+    raw = os.path.basename(str(value or "").strip())
+    if not raw:
+        return "asset"
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-._")
+    return cleaned or "asset"
+
+
+def _sanitize_rum_asset_type(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "asset"
+    cleaned = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-._")
+    return cleaned or "asset"
+
+
+def _asset_extension(asset_name: str, content_type: str) -> str:
+    _, ext = os.path.splitext(asset_name)
+    if ext and re.fullmatch(r"\.[a-zA-Z0-9]{1,8}", ext):
+        return ext.lstrip(".").lower()
+    mapping = {
+        "application/json": "json",
+        "application/octet-stream": "bin",
+        "text/plain": "txt",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+        "video/webm": "webm",
+    }
+    return mapping.get(content_type.split(";", 1)[0].strip().lower(), "bin")
+
+
+def _rum_asset_signature_payload(
+    method: str,
+    path: str,
+    timestamp: str,
+    body_sha256: str,
+    content_type: str,
+    asset_type: str,
+    asset_name: str,
+) -> str:
+    return "\n".join(
+        [
+            str(method or "").upper(),
+            str(path or ""),
+            str(timestamp or ""),
+            str(body_sha256 or ""),
+            str(content_type or "").strip().lower(),
+            str(asset_type or "").strip().lower(),
+            str(asset_name or ""),
+        ]
+    )
+
+
+def _rum_asset_signature(secret: str, payload: str) -> str:
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _verify_rum_asset_signature(
+    *,
+    body: bytes,
+    method: str,
+    path: str,
+    content_type: str,
+    asset_type: str,
+    asset_name: str,
+) -> tuple[bool, str]:
+    if not RUM_ASSET_SIGNING_KEY:
+        return False, "Asset upload signing key is not configured"
+
+    timestamp = (request.headers.get("X-SOBS-Asset-Timestamp") or "").strip()
+    signature = (request.headers.get("X-SOBS-Asset-Signature") or "").strip().lower()
+    if not timestamp or not signature:
+        return False, "Missing asset signature headers"
+
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False, "Invalid asset signature timestamp"
+
+    now = int(time.time())
+    if abs(now - ts) > max(1, RUM_ASSET_SIGN_WINDOW_SEC):
+        return False, "Asset signature timestamp outside allowed window"
+
+    body_sha = hashlib.sha256(body).hexdigest()
+    payload = _rum_asset_signature_payload(
+        method=method,
+        path=path,
+        timestamp=timestamp,
+        body_sha256=body_sha,
+        content_type=content_type,
+        asset_type=asset_type,
+        asset_name=asset_name,
+    )
+    expected = _rum_asset_signature(RUM_ASSET_SIGNING_KEY, payload)
+    if not secrets.compare_digest(signature, expected):
+        return False, "Invalid asset signature"
+    return True, ""
+
+
+def _rum_b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _rum_b64url_decode(value: str) -> bytes:
+    text = str(value or "").strip()
+    if not text:
+        return b""
+    pad_len = (-len(text)) % 4
+    return base64.urlsafe_b64decode(text + ("=" * pad_len))
+
+
+def _normalize_origin(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _request_origin() -> str:
+    origin = _normalize_origin(request.headers.get("Origin", ""))
+    if origin:
+        return origin
+    referer = request.headers.get("Referer", "")
+    parsed = urllib.parse.urlparse(str(referer or "").strip())
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+    return ""
+
+
+def _rum_client_sign(payload: str) -> str:
+    return hmac.new(RUM_CLIENT_SIGNING_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _rum_client_token_encode(claims: dict[str, Any]) -> str:
+    encoded_payload = _rum_b64url_encode(json.dumps(claims, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    signature = _rum_client_sign(encoded_payload)
+    return f"{encoded_payload}.{signature}"
+
+
+def _rum_client_token_decode(token: str) -> tuple[dict[str, Any] | None, str]:
+    parts = str(token or "").strip().split(".")
+    if len(parts) != 2:
+        return None, "Invalid RUM client token format"
+    payload_b64, signature = parts[0], parts[1].lower()
+    expected = _rum_client_sign(payload_b64)
+    if not secrets.compare_digest(signature, expected):
+        return None, "Invalid RUM client token signature"
+    try:
+        claims = json.loads(_rum_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return None, "Invalid RUM client token payload"
+    if not isinstance(claims, dict):
+        return None, "Invalid RUM client token payload"
+    return claims, ""
+
+
+def _verify_rum_client_auth(events: list[Any]) -> tuple[bool, int, str]:
+    mode = (RUM_CLIENT_AUTH_MODE or "none").strip().lower()
+    if mode in ("", "none", "off", "disabled"):
+        return True, 200, ""
+
+    if mode not in ("origin", "origin-session"):
+        return False, 500, "Invalid SOBS_RUM_CLIENT_AUTH_MODE"
+
+    if not RUM_CLIENT_SIGNING_KEY:
+        return False, 503, "RUM client signing key is not configured"
+
+    token = (request.headers.get("X-SOBS-RUM-Token") or "").strip()
+    if not token:
+        for event in events:
+            if isinstance(event, dict):
+                token = str(event.get("clientAuthToken", "")).strip()
+                if token:
+                    break
+    if not token:
+        return False, 401, "Missing RUM client auth token"
+
+    claims, err = _rum_client_token_decode(token)
+    if claims is None:
+        return False, 401, err
+
+    now = int(time.time())
+    try:
+        exp = int(claims.get("exp", 0) or 0)
+    except (TypeError, ValueError):
+        return False, 401, "Invalid RUM client token expiry"
+    if exp <= now:
+        return False, 401, "RUM client token expired"
+
+    bound_origin = _normalize_origin(str(claims.get("origin", "")))
+    req_origin = _request_origin()
+    if not bound_origin:
+        return False, 401, "RUM client token missing origin binding"
+    if not req_origin:
+        return False, 401, "Missing Origin/Referer for RUM client auth"
+    if req_origin != bound_origin:
+        return False, 401, "RUM client token origin mismatch"
+
+    bound_app = str(claims.get("app", "")).strip()
+    if bound_app:
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_app = str(event.get("appName", "")).strip()
+            if event_app and event_app != bound_app:
+                return False, 401, "RUM client token app mismatch"
+
+    return True, 200, ""
+
+
+def _rum_asset_meta_path(asset_id: str) -> str:
+    return os.path.join(RUM_ASSET_DIR, f"{asset_id}.meta.json")
+
+
 # ---------------------------------------------------------------------------
 # Auth decorator (optional Basic Auth for Web UI)
 # ---------------------------------------------------------------------------
@@ -3932,6 +4339,125 @@ def _ns_to_iso(nanos: int) -> str:
         return _now_iso()
 
 
+_STACK_FRAME_RE = re.compile(
+    r"(?P<prefix>.*?)"
+    r"(?P<url>https?://[^\s\)]+|/[^\s\):]+\.js(?:\?[^\s\)]*)?)"
+    r"(?::(?P<line>\d+))"
+    r"(?::(?P<col>\d+))"
+    r"(?P<suffix>.*)$"
+)
+_SOURCE_MAP_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _sourcemap_lookup_for_file(js_url: str, line: int, col: int) -> tuple[str, int, int, str] | None:
+    if not SOURCE_MAP_ENABLE or not SOURCE_MAP_DIR:
+        return None
+    if not os.path.isdir(SOURCE_MAP_DIR):
+        return None
+
+    parsed = urllib.parse.urlparse(str(js_url or ""))
+    rel_path = parsed.path.lstrip("/")
+    basename = os.path.basename(parsed.path)
+    candidates = []
+    if rel_path:
+        candidates.append(os.path.join(SOURCE_MAP_DIR, rel_path + ".map"))
+    if basename:
+        candidates.append(os.path.join(SOURCE_MAP_DIR, basename + ".map"))
+        if basename.endswith(".min.js"):
+            candidates.append(os.path.join(SOURCE_MAP_DIR, basename.replace(".min.js", ".js.map")))
+        if basename.endswith(".js"):
+            candidates.append(os.path.join(SOURCE_MAP_DIR, basename[:-3] + ".js.map"))
+
+    map_path = ""
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            map_path = candidate
+            break
+    if not map_path:
+        return None
+
+    try:
+        mtime = os.path.getmtime(map_path)
+    except OSError:
+        return None
+
+    cache_entry = _SOURCE_MAP_CACHE.get(map_path)
+    index = None
+    if cache_entry and cache_entry[0] == mtime:
+        index = cache_entry[1]
+    else:
+        try:
+            import sourcemap  # type: ignore
+
+            with open(map_path, encoding="utf-8") as handle:
+                index = sourcemap.loads(handle.read())
+            _SOURCE_MAP_CACHE[map_path] = (mtime, index)
+        except Exception:
+            return None
+
+    try:
+        token = index.lookup(max(0, line - 1), max(0, col - 1))
+    except Exception:
+        return None
+    if not token:
+        return None
+
+    src = str(getattr(token, "src", "") or "")
+    src_line = int(getattr(token, "src_line", 0) or 0)
+    src_col = int(getattr(token, "src_col", 0) or 0)
+    name = str(getattr(token, "name", "") or "")
+    return (src, src_line + 1, src_col + 1, name)
+
+
+def _maybe_demangle_js_stack(stack_text: str) -> str:
+    text = str(stack_text or "")
+    if not text or not SOURCE_MAP_ENABLE:
+        return text
+
+    mapped_lines = []
+    for raw_line in text.splitlines():
+        match = _STACK_FRAME_RE.match(raw_line)
+        if not match:
+            mapped_lines.append(raw_line)
+            continue
+
+        url = str(match.group("url") or "")
+        try:
+            line = int(match.group("line") or "0")
+            col = int(match.group("col") or "0")
+        except ValueError:
+            mapped_lines.append(raw_line)
+            continue
+
+        mapped = _sourcemap_lookup_for_file(url, line, col)
+        if not mapped:
+            mapped_lines.append(raw_line)
+            continue
+
+        src, src_line, src_col, name = mapped
+        mapped_target = f"{src}:{src_line}:{src_col}" if src else f"{url}:{line}:{col}"
+        if name:
+            mapped_target = f"{name} ({mapped_target})"
+        mapped_lines.append(f"{match.group('prefix')}[mapped] {mapped_target}{match.group('suffix')}")
+
+    return "\n".join(mapped_lines)
+
+
+def _remap_rum_console_stacks(event: dict[str, Any]) -> None:
+    breadcrumbs = event.get("breadcrumbs")
+    if not isinstance(breadcrumbs, dict):
+        return
+    console_entries = breadcrumbs.get("console")
+    if not isinstance(console_entries, list):
+        return
+    for entry in console_entries:
+        if not isinstance(entry, dict):
+            continue
+        stack = str(entry.get("stack", ""))
+        if stack:
+            entry["stack"] = _maybe_demangle_js_stack(stack)
+
+
 def _parse_limit(default=200) -> int:
     try:
         return max(1, min(int(request.args.get("limit", default)), 5000))
@@ -3995,6 +4521,57 @@ def _time_window_conditions(column: str, from_ts: str, to_ts: str) -> tuple[list
         conditions.append(f"{column} < parseDateTime64BestEffort(?, 9)")
         params.append(to_ts)
     return conditions, params
+
+
+_RUM_SESSION_KEY_SQL = (
+    "if(LogAttributes['sessionId'] != '', LogAttributes['sessionId'], "
+    "if(LogAttributes['session.id'] != '', LogAttributes['session.id'], "
+    "concat('anon:', substring(lower(hex(MD5(concat(toString(Timestamp), '|', Body)))), 1, 16))))"
+)
+
+
+def _rum_session_key_from_attrs(attrs: dict[str, str], ts: str, body_raw: str) -> str:
+    session_id = str(attrs.get("sessionId", attrs.get("session.id", ""))).strip()
+    if session_id:
+        return session_id
+    return f"anon:{hashlib.md5(f'{ts}|{body_raw}'.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _build_rum_event_item(row: Any) -> dict[str, Any]:
+    attrs = _map_to_dict(row["LogAttributes"])
+    body_raw = str(row["Body"] or "")
+    try:
+        body_data = json.loads(body_raw) if body_raw else {}
+    except json.JSONDecodeError:
+        body_data = {}
+
+    data = body_data if isinstance(body_data, dict) else {"value": body_data}
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+    trace_id = str(row["TraceId"]) if "TraceId" in keys else str(data.get("traceId", ""))
+    span_id = str(row["SpanId"]) if "SpanId" in keys else str(data.get("spanId", ""))
+    if trace_id and not data.get("traceId"):
+        data["traceId"] = trace_id
+    if span_id and not data.get("spanId"):
+        data["spanId"] = span_id
+
+    ts = str(row["Timestamp"])
+    session_key = _rum_session_key_from_attrs(attrs, ts, body_raw)
+    artifact_raw = data.get("artifact")
+    replay_raw = data.get("replay")
+    artifact: dict[str, Any] = artifact_raw if isinstance(artifact_raw, dict) else {}
+    replay: dict[str, Any] = replay_raw if isinstance(replay_raw, dict) else {}
+    return {
+        "ts": ts,
+        "session_key": session_key,
+        "session_id": session_key[:8],
+        "event_type": str(row["EventName"]),
+        "url": str(attrs.get("url", attrs.get("url.full", ""))),
+        "data": data,
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "has_artifact": bool(artifact.get("url") or artifact.get("id")),
+        "has_replay": bool(replay.get("url") or replay.get("id")),
+    }
 
 
 def _hex(b) -> str:
@@ -4106,7 +4683,7 @@ def _error_id(ts: str, service: str, err_type: str, message: str, trace_id: str,
 def _insert_rows_json_each_row(db, table_name: str, rows: list[dict]) -> int:
     if not rows:
         return 0
-    dt_keys = {"Timestamp", "TimeUnix", "UpdatedAt", "CreatedAt", "CompletedAt"}
+    dt_keys = {"Timestamp", "TimeUnix", "UpdatedAt", "CreatedAt", "CompletedAt", "ReleasedAt", "UploadedAt"}
     normalized_rows = []
     for row in rows:
         item = dict(row)
@@ -4138,6 +4715,235 @@ def _normalize_ch_timestamp(value) -> str:
             if dt.tzinfo:
                 dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def _safe_json_dumps(value: Any) -> str:
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "{}"
+        try:
+            parsed = json.loads(stripped)
+            return json.dumps(parsed, ensure_ascii=False)
+        except Exception:
+            return "{}"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return "{}"
+
+
+def _safe_json_loads(value: object, default: object) -> object:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return default
+    if isinstance(default, dict) and isinstance(parsed, dict):
+        return parsed
+    if isinstance(default, list) and isinstance(parsed, list):
+        return parsed
+    return default
+
+
+def _app_slug(value: str, fallback: str = "app") -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+    return (slug or fallback)[:80]
+
+
+def _find_app_by_id(db: ChDbConnection, app_id: str) -> dict[str, Any] | None:
+    row = db.execute(
+        "SELECT * FROM sobs_apps FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
+        [app_id],
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _find_release_by_id(db: ChDbConnection, release_id: str) -> dict[str, Any] | None:
+    row = db.execute(
+        "SELECT * FROM sobs_app_releases FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
+        [release_id],
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _serialize_app_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("Id", "")),
+        "name": str(row.get("Name", "")),
+        "slug": str(row.get("Slug", "")),
+        "ownerTeam": str(row.get("OwnerTeam", "")),
+        "repoUrl": str(row.get("RepoUrl", "")),
+        "defaultEnvironment": str(row.get("DefaultEnvironment", "")),
+        "enabled": bool(int(row.get("Enabled", 1) or 0)),
+        "metadata": _safe_json_loads(row.get("MetadataJson", ""), {}),
+        "createdAt": str(row.get("CreatedAt", "")),
+        "updatedAt": str(row.get("UpdatedAt", "")),
+    }
+
+
+def _serialize_release_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("Id", "")),
+        "appId": str(row.get("AppId", "")),
+        "version": str(row.get("ReleaseVersion", "")),
+        "commitSha": str(row.get("CommitSha", "")),
+        "buildId": str(row.get("BuildId", "")),
+        "environment": str(row.get("Environment", "")),
+        "releasedAt": str(row.get("ReleasedAt", "")),
+        "metadata": _safe_json_loads(row.get("MetadataJson", ""), {}),
+    }
+
+
+def _serialize_artifact_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("Id", "")),
+        "releaseId": str(row.get("ReleaseId", "")),
+        "artifactType": str(row.get("ArtifactType", "")),
+        "name": str(row.get("Name", "")),
+        "contentType": str(row.get("ContentType", "")),
+        "size": int(row.get("Size", 0) or 0),
+        "storageRef": str(row.get("StorageRef", "")),
+        "checksumSha256": str(row.get("ChecksumSha256", "")),
+        "platform": str(row.get("Platform", "")),
+        "architecture": str(row.get("Architecture", "")),
+        "metadata": _safe_json_loads(row.get("MetadataJson", ""), {}),
+        "uploadedAt": str(row.get("UploadedAt", "")),
+    }
+
+
+def _seed_app_release_registry_from_env(db: ChDbConnection) -> None:
+    seed_raw = _read_file_or_env(APP_REGISTRY_SEED_JSON_ENV, APP_REGISTRY_SEED_JSON_FILE_ENV)
+    if not seed_raw:
+        return
+
+    try:
+        parsed = json.loads(seed_raw)
+    except Exception as exc:
+        app.logger.warning("Failed to parse app registry seed JSON: %s", exc)
+        return
+
+    if isinstance(parsed, dict):
+        apps = parsed.get("apps", [])
+    elif isinstance(parsed, list):
+        apps = parsed
+    else:
+        app.logger.warning("Ignoring app registry seed: expected object with 'apps' or an array")
+        return
+
+    if not isinstance(apps, list):
+        app.logger.warning("Ignoring app registry seed: 'apps' must be an array")
+        return
+
+    now_version = int(time.time() * 1000)
+    app_rows: list[dict[str, Any]] = []
+    release_rows: list[dict[str, Any]] = []
+    artifact_rows: list[dict[str, Any]] = []
+
+    for app_item in apps:
+        if not isinstance(app_item, dict):
+            continue
+        name = str(app_item.get("name", "")).strip()
+        if not name:
+            continue
+
+        slug = _app_slug(str(app_item.get("slug", "")).strip() or name)
+        existing = db.execute(
+            "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 LIMIT 1",
+            [slug],
+        ).fetchone()
+        app_id = str(app_item.get("id", "")).strip() or (str(existing[0]) if existing else uuid.uuid4().hex)
+
+        app_rows.append(
+            {
+                "Id": app_id,
+                "Name": name,
+                "Slug": slug,
+                "OwnerTeam": str(app_item.get("ownerTeam", "")).strip(),
+                "RepoUrl": str(app_item.get("repoUrl", "")).strip(),
+                "DefaultEnvironment": str(app_item.get("defaultEnvironment", "")).strip(),
+                "Enabled": 1 if _parse_bool(app_item.get("enabled", True), True) else 0,
+                "MetadataJson": _safe_json_dumps(app_item.get("metadata", {})),
+                "IsDeleted": 0,
+                "Version": now_version,
+                "CreatedAt": _now_iso(),
+                "UpdatedAt": _now_iso(),
+            }
+        )
+
+        releases = app_item.get("releases", [])
+        if not isinstance(releases, list):
+            continue
+        for rel in releases:
+            if not isinstance(rel, dict):
+                continue
+            rel_version = str(rel.get("version", "")).strip()
+            if not rel_version:
+                continue
+
+            existing_rel = db.execute(
+                "SELECT Id FROM sobs_app_releases FINAL "
+                "WHERE AppId=? AND ReleaseVersion=? AND CommitSha=? AND Environment=? AND IsDeleted=0 LIMIT 1",
+                [
+                    app_id,
+                    rel_version,
+                    str(rel.get("commitSha", "")).strip(),
+                    str(rel.get("environment", "")).strip(),
+                ],
+            ).fetchone()
+            rel_id = str(rel.get("id", "")).strip() or (str(existing_rel[0]) if existing_rel else uuid.uuid4().hex)
+
+            release_rows.append(
+                {
+                    "Id": rel_id,
+                    "AppId": app_id,
+                    "ReleaseVersion": rel_version,
+                    "CommitSha": str(rel.get("commitSha", "")).strip(),
+                    "BuildId": str(rel.get("buildId", "")).strip(),
+                    "Environment": str(rel.get("environment", "")).strip(),
+                    "ReleasedAt": str(rel.get("releasedAt", "")).strip() or _now_iso(),
+                    "MetadataJson": _safe_json_dumps(rel.get("metadata", {})),
+                    "IsDeleted": 0,
+                    "Version": now_version,
+                }
+            )
+
+            artifacts = rel.get("artifacts", [])
+            if not isinstance(artifacts, list):
+                continue
+            for art in artifacts:
+                if not isinstance(art, dict):
+                    continue
+                artifact_type = str(art.get("artifactType", "")).strip()
+                artifact_name = str(art.get("name", "")).strip()
+                if not artifact_type or not artifact_name:
+                    continue
+
+                artifact_rows.append(
+                    {
+                        "Id": str(art.get("id", "")).strip() or uuid.uuid4().hex,
+                        "ReleaseId": rel_id,
+                        "ArtifactType": artifact_type,
+                        "Name": artifact_name,
+                        "ContentType": str(art.get("contentType", "")).strip(),
+                        "Size": int(art.get("size", 0) or 0),
+                        "StorageRef": str(art.get("storageRef", "")).strip(),
+                        "ChecksumSha256": str(art.get("checksumSha256", "")).strip(),
+                        "Platform": str(art.get("platform", "")).strip(),
+                        "Architecture": str(art.get("architecture", "")).strip(),
+                        "MetadataJson": _safe_json_dumps(art.get("metadata", {})),
+                        "UploadedAt": str(art.get("uploadedAt", "")).strip() or _now_iso(),
+                        "IsDeleted": 0,
+                        "Version": now_version,
+                    }
+                )
+
+    _insert_rows_json_each_row(db, "sobs_apps", app_rows)
+    _insert_rows_json_each_row(db, "sobs_app_releases", release_rows)
+    _insert_rows_json_each_row(db, "sobs_release_artifacts", artifact_rows)
 
 
 def _attr_list_to_dict(attr_list: list) -> dict:
@@ -4660,6 +5466,138 @@ async def ingest_logs():
     return jsonify({"accepted": count}), 200
 
 
+@app.route("/v1/rum/assets", methods=["POST"])
+@require_api_key
+async def ingest_rum_asset():
+    asset_type = _sanitize_rum_asset_type(request.args.get("type", "asset"))
+    asset_name = _sanitize_rum_asset_name(request.args.get("name", "asset"))
+    content_type = (request.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip()
+    body = await request.get_data(cache=False)
+
+    if not body:
+        return jsonify({"error": "asset body is required"}), 400
+    if len(body) > max(1024, RUM_ASSET_MAX_BYTES):
+        return jsonify({"error": "asset exceeds max allowed size"}), 413
+
+    ok, err = _verify_rum_asset_signature(
+        body=body,
+        method=request.method,
+        path=request.path,
+        content_type=content_type,
+        asset_type=asset_type,
+        asset_name=asset_name,
+    )
+    if not ok:
+        if "not configured" in err:
+            return jsonify({"error": err}), 503
+        return jsonify({"error": err}), 401
+
+    asset_id = uuid.uuid4().hex
+    ext = _asset_extension(asset_name, content_type)
+    storage_name = f"{asset_id}.{ext}"
+    asset_path = os.path.join(RUM_ASSET_DIR, storage_name)
+    meta_path = _rum_asset_meta_path(asset_id)
+
+    with open(asset_path, "wb") as handle:
+        handle.write(body)
+
+    metadata = {
+        "id": asset_id,
+        "type": asset_type,
+        "original_name": asset_name,
+        "storage_name": storage_name,
+        "content_type": content_type,
+        "size": len(body),
+        "uploaded_at": _now_iso(),
+    }
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False)
+
+    return (
+        jsonify(
+            {
+                "id": asset_id,
+                "type": asset_type,
+                "name": asset_name,
+                "contentType": content_type,
+                "size": len(body),
+                "url": url_for("rum_asset_download", asset_id=asset_id),
+            }
+        ),
+        201,
+    )
+
+
+@app.route("/v1/rum/assets/<asset_id>", methods=["GET"])
+@require_basic_auth
+async def rum_asset_download(asset_id: str):
+    if not re.fullmatch(r"[a-f0-9]{32}", asset_id):
+        return jsonify({"error": "invalid asset id"}), 400
+    meta_path = _rum_asset_meta_path(asset_id)
+    if not os.path.exists(meta_path):
+        return jsonify({"error": "not found"}), 404
+    try:
+        with open(meta_path, encoding="utf-8") as handle:
+            metadata = json.load(handle)
+    except Exception:
+        return jsonify({"error": "asset metadata unavailable"}), 500
+
+    storage_name = str(metadata.get("storage_name", ""))
+    if not storage_name or "/" in storage_name or "\\" in storage_name:
+        return jsonify({"error": "invalid asset metadata"}), 500
+
+    file_path = os.path.join(RUM_ASSET_DIR, storage_name)
+    if not os.path.exists(file_path):
+        return jsonify({"error": "not found"}), 404
+
+    return await send_from_directory(
+        RUM_ASSET_DIR,
+        storage_name,
+        mimetype=str(metadata.get("content_type", "application/octet-stream")),
+        as_attachment=False,
+    )
+
+
+@app.route("/v1/rum/client-token", methods=["POST"])
+@require_api_key
+async def issue_rum_client_token():
+    mode = (RUM_CLIENT_AUTH_MODE or "none").strip().lower()
+    if mode in ("", "none", "off", "disabled"):
+        return jsonify({"enabled": False, "token": "", "error": "RUM client auth is disabled"}), 200
+
+    if mode not in ("origin", "origin-session"):
+        return jsonify({"error": "Invalid SOBS_RUM_CLIENT_AUTH_MODE"}), 500
+
+    if not RUM_CLIENT_SIGNING_KEY:
+        return jsonify({"error": "RUM client signing key is not configured"}), 503
+
+    payload = await request.get_json(force=True, silent=True) or {}
+    app_name = str(payload.get("appName") or payload.get("app") or "").strip()
+    requested_origin = str(payload.get("origin") or "").strip()
+    origin = _normalize_origin(requested_origin) or _request_origin()
+    if not origin:
+        return jsonify({"error": "origin is required"}), 400
+
+    ttl_raw = payload.get("ttlSec", RUM_CLIENT_TOKEN_TTL_SEC)
+    try:
+        ttl_sec = int(ttl_raw)
+    except (TypeError, ValueError):
+        ttl_sec = RUM_CLIENT_TOKEN_TTL_SEC
+    ttl_sec = max(30, min(ttl_sec, 24 * 60 * 60))
+
+    now = int(time.time())
+    claims = {
+        "iss": "sobs-rum",
+        "app": app_name,
+        "origin": origin,
+        "iat": now,
+        "exp": now + ttl_sec,
+        "jti": uuid.uuid4().hex,
+    }
+    token = _rum_client_token_encode(claims)
+    return jsonify({"enabled": True, "token": token, "expiresAt": claims["exp"], "origin": origin, "app": app_name})
+
+
 # ---------------------------------------------------------------------------
 # OTLP Ingest – Traces  POST /v1/traces
 # ---------------------------------------------------------------------------
@@ -4742,6 +5680,36 @@ async def ingest_metrics():
 # ---------------------------------------------------------------------------
 # RUM Ingest  POST /v1/rum
 # ---------------------------------------------------------------------------
+_TRACEPARENT_RE = re.compile(r"^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-([0-9a-fA-F]{2})$")
+
+
+def _extract_trace_fields(event: dict[str, Any]) -> tuple[str, str, int]:
+    trace_id = str(event.get("traceId", "") or "").strip().lower()
+    span_id = str(event.get("spanId", "") or "").strip().lower()
+    trace_flags = 0
+
+    raw_flags = event.get("traceFlags")
+    if raw_flags is not None and str(raw_flags).strip() != "":
+        try:
+            trace_flags = int(str(raw_flags), 16) if isinstance(raw_flags, str) else int(raw_flags)
+        except (TypeError, ValueError):
+            trace_flags = 0
+
+    if trace_id and span_id:
+        return trace_id, span_id, trace_flags
+
+    traceparent = str(event.get("traceparent", "") or "").strip()
+    match = _TRACEPARENT_RE.match(traceparent)
+    if not match:
+        return trace_id, span_id, trace_flags
+
+    parsed_trace_id = match.group(1).lower()
+    parsed_span_id = match.group(2).lower()
+    parsed_flags = int(match.group(3), 16)
+
+    return parsed_trace_id or trace_id, parsed_span_id or span_id, parsed_flags
+
+
 @app.route("/v1/rum", methods=["POST"])
 @require_api_key
 async def ingest_rum():
@@ -4752,20 +5720,33 @@ async def ingest_rum():
         events = payload
     else:
         events = payload.get("events", [payload])
+
+    ok, status_code, auth_err = _verify_rum_client_auth(events)
+    if not ok:
+        return jsonify({"error": auth_err}), status_code
+
     session_rows = []
     error_rows = []
     for event in events:
+        if not isinstance(event, dict):
+            continue
+        event = dict(event)
+        event.pop("clientAuthToken", None)
+        if event.get("stack"):
+            event["stack"] = _maybe_demangle_js_stack(str(event.get("stack", "")))
+        _remap_rum_console_stacks(event)
         ts = event.get("timestamp", _now_iso())
         session_id = event.get("sessionId", "")
         event_type = event.get("type", "unknown")
         url = event.get("url", "")
+        trace_id, span_id, trace_flags = _extract_trace_fields(event)
         attrs = _stringify_attrs(event)
         session_rows.append(
             {
                 "Timestamp": ts,
-                "TraceId": str(event.get("traceId", "")),
-                "SpanId": str(event.get("spanId", "")),
-                "TraceFlags": 0,
+                "TraceId": trace_id,
+                "SpanId": span_id,
+                "TraceFlags": trace_flags,
                 "SeverityText": "ERROR" if event_type in ("error", "unhandledrejection") else "INFO",
                 "SeverityNumber": _severity_number(
                     "ERROR" if event_type in ("error", "unhandledrejection") else "INFO"
@@ -4793,12 +5774,31 @@ async def ingest_rum():
             }
             if event.get("stack"):
                 err_attrs["exception.stacktrace"] = str(event.get("stack"))
+            if event.get("errorSource"):
+                err_attrs["error.source"] = str(event.get("errorSource"))
+            page = event.get("page") if isinstance(event.get("page"), dict) else {}
+            if page.get("title"):
+                err_attrs["browser.page.title"] = str(page.get("title"))
+            if page.get("viewport"):
+                err_attrs["browser.viewport"] = str(page.get("viewport"))
+            artifact = event.get("artifact") if isinstance(event.get("artifact"), dict) else {}
+            if artifact.get("type"):
+                err_attrs["artifact.type"] = str(artifact.get("type"))
+            if artifact.get("id"):
+                err_attrs["artifact.id"] = str(artifact.get("id"))
+            if artifact.get("url"):
+                err_attrs["artifact.url"] = str(artifact.get("url"))
+            replay = event.get("replay") if isinstance(event.get("replay"), dict) else {}
+            if replay.get("id"):
+                err_attrs["replay.id"] = str(replay.get("id"))
+            if replay.get("url"):
+                err_attrs["replay.url"] = str(replay.get("url"))
             error_rows.append(
                 {
                     "Timestamp": ts,
-                    "TraceId": str(event.get("traceId", "")),
-                    "SpanId": str(event.get("spanId", "")),
-                    "TraceFlags": 0,
+                    "TraceId": trace_id,
+                    "SpanId": span_id,
+                    "TraceFlags": trace_flags,
                     "SeverityText": "ERROR",
                     "SeverityNumber": _severity_number("ERROR"),
                     "ServiceName": "rum",
@@ -4939,7 +5939,7 @@ async def ingest_errors():
     attrs["exception.type"] = str(payload.get("type", "Error"))
     attrs["exception.message"] = str(payload.get("message", ""))
     if payload.get("stack"):
-        attrs["exception.stacktrace"] = str(payload.get("stack"))
+        attrs["exception.stacktrace"] = _maybe_demangle_js_stack(str(payload.get("stack")))
     row = {
         "Timestamp": ts,
         "TraceId": str(payload.get("trace_id", "")),
@@ -4980,6 +5980,228 @@ async def ingest_errors():
     return jsonify({"ok": True}), 200
 
 
+# ---------------------------------------------------------------------------
+# App / Release / Artifact Registry APIs (Phase 1 scaffolding)
+# ---------------------------------------------------------------------------
+@app.route("/v1/apps", methods=["GET"])
+@require_api_key
+async def list_apps():
+    db = get_db()
+    q = (request.args.get("q") or "").strip().lower()
+    rows = [dict(r) for r in db.execute("SELECT * FROM sobs_apps FINAL WHERE IsDeleted=0 ORDER BY Name ASC").fetchall()]
+    apps = [_serialize_app_row(row) for row in rows]
+    if q:
+        apps = [item for item in apps if q in item["name"].lower() or q in item["slug"].lower()]
+    return jsonify(apps), 200
+
+
+@app.route("/v1/apps", methods=["POST"])
+@require_api_key
+async def create_app_registry_entry():
+    db = get_db()
+    payload = await request.get_json(force=True, silent=True) or {}
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    slug = _app_slug(str(payload.get("slug", "")).strip() or name)
+    existing = db.execute(
+        "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 LIMIT 1",
+        [slug],
+    ).fetchone()
+    if existing:
+        return jsonify({"error": "app slug already exists"}), 409
+
+    version = int(time.time() * 1000)
+    app_id = str(payload.get("id", "")).strip() or uuid.uuid4().hex
+    row = {
+        "Id": app_id,
+        "Name": name,
+        "Slug": slug,
+        "OwnerTeam": str(payload.get("ownerTeam", "")).strip(),
+        "RepoUrl": str(payload.get("repoUrl", "")).strip(),
+        "DefaultEnvironment": str(payload.get("defaultEnvironment", "")).strip(),
+        "Enabled": 1 if _parse_bool(payload.get("enabled", True), True) else 0,
+        "MetadataJson": _safe_json_dumps(payload.get("metadata", {})),
+        "IsDeleted": 0,
+        "Version": version,
+        "CreatedAt": _now_iso(),
+        "UpdatedAt": _now_iso(),
+    }
+    _insert_rows_json_each_row(db, "sobs_apps", [row])
+    return jsonify(_serialize_app_row(row)), 201
+
+
+@app.route("/v1/apps/<app_id>", methods=["GET"])
+@require_api_key
+async def get_app_registry_entry(app_id: str):
+    db = get_db()
+    row = _find_app_by_id(db, app_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(_serialize_app_row(row)), 200
+
+
+@app.route("/v1/apps/<app_id>", methods=["PATCH"])
+@require_api_key
+async def update_app_registry_entry(app_id: str):
+    db = get_db()
+    current = _find_app_by_id(db, app_id)
+    if not current:
+        return jsonify({"error": "not found"}), 404
+
+    payload = await request.get_json(force=True, silent=True) or {}
+    name = str(payload.get("name", current.get("Name", ""))).strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    slug = _app_slug(str(payload.get("slug", current.get("Slug", ""))).strip() or name)
+    conflict = db.execute(
+        "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 AND Id!=? LIMIT 1",
+        [slug, app_id],
+    ).fetchone()
+    if conflict:
+        return jsonify({"error": "app slug already exists"}), 409
+
+    version = int(time.time() * 1000)
+    row = {
+        "Id": app_id,
+        "Name": name,
+        "Slug": slug,
+        "OwnerTeam": str(payload.get("ownerTeam", current.get("OwnerTeam", ""))).strip(),
+        "RepoUrl": str(payload.get("repoUrl", current.get("RepoUrl", ""))).strip(),
+        "DefaultEnvironment": str(payload.get("defaultEnvironment", current.get("DefaultEnvironment", ""))).strip(),
+        "Enabled": 1 if _parse_bool(payload.get("enabled", int(current.get("Enabled", 1))), True) else 0,
+        "MetadataJson": _safe_json_dumps(
+            payload.get("metadata", _safe_json_loads(current.get("MetadataJson", ""), {}))
+        ),
+        "IsDeleted": 0,
+        "Version": version,
+        "CreatedAt": str(current.get("CreatedAt", "")) or _now_iso(),
+        "UpdatedAt": _now_iso(),
+    }
+    _insert_rows_json_each_row(db, "sobs_apps", [row])
+    return jsonify(_serialize_app_row(row)), 200
+
+
+@app.route("/v1/apps/<app_id>/releases", methods=["GET"])
+@require_api_key
+async def list_app_releases(app_id: str):
+    db = get_db()
+    app_row = _find_app_by_id(db, app_id)
+    if not app_row:
+        return jsonify({"error": "app not found"}), 404
+    rows = [
+        _serialize_release_row(dict(r))
+        for r in db.execute(
+            "SELECT * FROM sobs_app_releases FINAL WHERE AppId=? AND IsDeleted=0 ORDER BY ReleasedAt DESC",
+            [app_id],
+        ).fetchall()
+    ]
+    return jsonify(rows), 200
+
+
+@app.route("/v1/apps/<app_id>/releases", methods=["POST"])
+@require_api_key
+async def create_app_release(app_id: str):
+    db = get_db()
+    app_row = _find_app_by_id(db, app_id)
+    if not app_row:
+        return jsonify({"error": "app not found"}), 404
+
+    payload = await request.get_json(force=True, silent=True) or {}
+    release_version = str(payload.get("version", "")).strip()
+    if not release_version:
+        return jsonify({"error": "version is required"}), 400
+
+    version = int(time.time() * 1000)
+    row = {
+        "Id": str(payload.get("id", "")).strip() or uuid.uuid4().hex,
+        "AppId": app_id,
+        "ReleaseVersion": release_version,
+        "CommitSha": str(payload.get("commitSha", "")).strip(),
+        "BuildId": str(payload.get("buildId", "")).strip(),
+        "Environment": str(payload.get("environment", "")).strip(),
+        "ReleasedAt": str(payload.get("releasedAt", "")).strip() or _now_iso(),
+        "MetadataJson": _safe_json_dumps(payload.get("metadata", {})),
+        "IsDeleted": 0,
+        "Version": version,
+    }
+    _insert_rows_json_each_row(db, "sobs_app_releases", [row])
+    return jsonify(_serialize_release_row(row)), 201
+
+
+@app.route("/v1/releases/<release_id>", methods=["GET"])
+@require_api_key
+async def get_release(release_id: str):
+    db = get_db()
+    row = _find_release_by_id(db, release_id)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+
+    release = _serialize_release_row(row)
+    artifacts = [
+        _serialize_artifact_row(dict(r))
+        for r in db.execute(
+            "SELECT * FROM sobs_release_artifacts FINAL WHERE ReleaseId=? AND IsDeleted=0 ORDER BY UploadedAt DESC",
+            [release_id],
+        ).fetchall()
+    ]
+    return jsonify({"release": release, "artifacts": artifacts}), 200
+
+
+@app.route("/v1/releases/<release_id>/artifacts", methods=["GET"])
+@require_api_key
+async def list_release_artifacts(release_id: str):
+    db = get_db()
+    row = _find_release_by_id(db, release_id)
+    if not row:
+        return jsonify({"error": "release not found"}), 404
+    artifacts = [
+        _serialize_artifact_row(dict(r))
+        for r in db.execute(
+            "SELECT * FROM sobs_release_artifacts FINAL WHERE ReleaseId=? AND IsDeleted=0 ORDER BY UploadedAt DESC",
+            [release_id],
+        ).fetchall()
+    ]
+    return jsonify(artifacts), 200
+
+
+@app.route("/v1/releases/<release_id>/artifacts/meta", methods=["POST"])
+@require_api_key
+async def create_release_artifact_meta(release_id: str):
+    db = get_db()
+    release = _find_release_by_id(db, release_id)
+    if not release:
+        return jsonify({"error": "release not found"}), 404
+
+    payload = await request.get_json(force=True, silent=True) or {}
+    artifact_type = str(payload.get("artifactType", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    if not artifact_type or not name:
+        return jsonify({"error": "artifactType and name are required"}), 400
+
+    version = int(time.time() * 1000)
+    row = {
+        "Id": str(payload.get("id", "")).strip() or uuid.uuid4().hex,
+        "ReleaseId": release_id,
+        "ArtifactType": artifact_type,
+        "Name": name,
+        "ContentType": str(payload.get("contentType", "")).strip(),
+        "Size": int(payload.get("size", 0) or 0),
+        "StorageRef": str(payload.get("storageRef", "")).strip(),
+        "ChecksumSha256": str(payload.get("checksumSha256", "")).strip(),
+        "Platform": str(payload.get("platform", "")).strip(),
+        "Architecture": str(payload.get("architecture", "")).strip(),
+        "MetadataJson": _safe_json_dumps(payload.get("metadata", {})),
+        "UploadedAt": str(payload.get("uploadedAt", "")).strip() or _now_iso(),
+        "IsDeleted": 0,
+        "Version": version,
+    }
+    _insert_rows_json_each_row(db, "sobs_release_artifacts", [row])
+    return jsonify(_serialize_artifact_row(row)), 201
+
+
 ERROR_SOURCES_SQL = """
 SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes
 FROM otel_logs
@@ -4997,13 +6219,120 @@ WHERE EventName IN ('error', 'unhandledrejection', 'exception')
 """
 
 
+def _compact_text(value: str, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _try_pretty_json_text(value: str) -> tuple[bool, str]:
+    raw = str(value or "").strip()
+    if not raw or raw[:1] not in ("{", "["):
+        return False, ""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, ""
+    return True, json.dumps(parsed, ensure_ascii=False, indent=2)
+
+
+def _extract_structured_error_summary(message: str, raw_body: str) -> tuple[str, bool]:
+    text_keys = {
+        "message",
+        "error",
+        "error_message",
+        "errormessage",
+        "detail",
+        "description",
+        "reason",
+        "body",
+        "msg",
+    }
+    code_keys = {"code", "status", "status_code", "error_code", "errorcode"}
+    type_keys = {"type", "error_type", "exception", "name"}
+
+    def _first_scalar(value: Any, keyset: set[str], depth: int = 0) -> str:
+        if depth > 5:
+            return ""
+        if isinstance(value, dict):
+            # Prefer direct matches before descending.
+            for key, inner in value.items():
+                if str(key).lower() in keyset and isinstance(inner, (str, int, float, bool)):
+                    return str(inner).strip()
+            for inner in value.values():
+                found = _first_scalar(inner, keyset, depth + 1)
+                if found:
+                    return found
+            return ""
+        if isinstance(value, list):
+            for inner in value:
+                found = _first_scalar(inner, keyset, depth + 1)
+                if found:
+                    return found
+            return ""
+        if isinstance(value, (str, int, float, bool)):
+            return str(value).strip()
+        return ""
+
+    def _to_summary(parsed: Any) -> str:
+        if isinstance(parsed, list):
+            parsed = parsed[0] if parsed else {}
+        if not isinstance(parsed, dict):
+            return ""
+
+        message_text = _first_scalar(parsed, text_keys)
+        code_text = _first_scalar(parsed, code_keys)
+        type_text = _first_scalar(parsed, type_keys)
+
+        if message_text:
+            summary = message_text
+            extras = []
+            if type_text and type_text.lower() not in summary.lower():
+                extras.append(type_text)
+            if code_text and code_text.lower() not in summary.lower():
+                extras.append("code " + code_text)
+            if extras:
+                summary = summary + " [" + ", ".join(extras) + "]"
+            return _compact_text(summary)
+        if type_text and code_text:
+            return _compact_text(type_text + " (code " + code_text + ")")
+        if type_text:
+            return _compact_text(type_text)
+        if code_text:
+            return _compact_text("code " + code_text)
+        return ""
+
+    for candidate in (message, raw_body):
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        if raw[:1] not in ("{", "["):
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        summary = _to_summary(parsed)
+        if summary:
+            return summary, True
+        return _compact_text(json.dumps(parsed, ensure_ascii=False)), True
+
+    return _compact_text(message or raw_body), False
+
+
 def _build_error_item(row: dict) -> dict:
     attrs = _map_to_dict(row.get("LogAttributes"))
     ts = str(row.get("Timestamp", ""))
     service = str(row.get("ServiceName", ""))
     err_type = str(attrs.get("exception.type", "Error"))
     message = str(attrs.get("exception.message", row.get("Body", "")))
-    stack = str(attrs.get("exception.stacktrace", ""))
+    raw_body = str(row.get("Body", ""))
+    message_summary, summary_from_json = _extract_structured_error_summary(message, raw_body)
+    message_is_json, message_pretty_json = _try_pretty_json_text(message)
+    body_is_json, body_pretty_json = _try_pretty_json_text(raw_body)
+    stack = _maybe_demangle_js_stack(str(attrs.get("exception.stacktrace", "")))
+    stack_is_json, stack_pretty_json = _try_pretty_json_text(stack)
     trace_id = str(row.get("TraceId", ""))
     span_id = str(row.get("SpanId", ""))
     eid = _error_id(ts, service, err_type, message, trace_id, span_id)
@@ -5013,9 +6342,27 @@ def _build_error_item(row: dict) -> dict:
         "service": service,
         "err_type": err_type,
         "message": message,
+        "message_summary": message_summary,
+        "summary_from_json": summary_from_json,
+        "message_is_json": message_is_json,
+        "message_pretty_json": message_pretty_json,
+        "raw_body": raw_body,
+        "raw_body_is_json": body_is_json,
+        "raw_body_pretty_json": body_pretty_json,
         "stack": stack,
+        "stack_is_json": stack_is_json,
+        "stack_pretty_json": stack_pretty_json,
         "trace_id": trace_id,
         "span_id": span_id,
+        "url": str(attrs.get("url.full", "")),
+        "error_source": str(attrs.get("error.source", "")),
+        "page_title": str(attrs.get("browser.page.title", "")),
+        "viewport": str(attrs.get("browser.viewport", "")),
+        "artifact_type": str(attrs.get("artifact.type", "")),
+        "artifact_id": str(attrs.get("artifact.id", "")),
+        "artifact_url": str(attrs.get("artifact.url", "")),
+        "replay_id": str(attrs.get("replay.id", "")),
+        "replay_url": str(attrs.get("replay.url", "")),
     }
 
 
@@ -7520,6 +8867,102 @@ def _build_span_tree(spans: list[dict]) -> list[dict]:
     return result
 
 
+def _compute_active_timeline_ms(spans: list[dict]) -> float:
+    """Return merged active time across span intervals in milliseconds."""
+    merged = _merge_span_intervals(spans)
+    return sum(max(0.0, end_ms - start_ms) for start_ms, end_ms in merged)
+
+
+def _merge_span_intervals(spans: list[dict]) -> list[tuple[float, float]]:
+    """Merge span start/end intervals sorted by start time."""
+    if not spans:
+        return []
+    intervals: list[tuple[float, float]] = []
+    for span in spans:
+        start_ms = float(span.get("start_ms", 0.0) or 0.0)
+        duration_ms = max(float(span.get("duration_ms", 0.0) or 0.0), 0.0)
+        end_ms = start_ms + duration_ms
+        intervals.append((start_ms, end_ms))
+    intervals.sort(key=lambda item: item[0])
+    merged: list[tuple[float, float]] = []
+    for start_ms, end_ms in intervals:
+        if not merged or start_ms > merged[-1][1]:
+            merged.append((start_ms, end_ms))
+        else:
+            prev_start, prev_end = merged[-1]
+            merged[-1] = (prev_start, max(prev_end, end_ms))
+    return merged
+
+
+def _build_trace_timeline_segments(
+    spans: list[dict], activity_ts_ms: list[float]
+) -> list[dict[str, float | str | bool]]:
+    """Return active/gap segments over the trace window with optional gap-signal flags."""
+    if not spans:
+        return []
+
+    trace_start_ms = min(float(s.get("start_ms", 0.0) or 0.0) for s in spans)
+    trace_end_ms = max(
+        (float(s.get("start_ms", 0.0) or 0.0) + max(float(s.get("duration_ms", 0.0) or 0.0), 0.0)) for s in spans
+    )
+    trace_total_ms = max(trace_end_ms - trace_start_ms, 1.0)
+
+    merged = _merge_span_intervals(spans)
+    activity_sorted = sorted(float(ts) for ts in activity_ts_ms)
+    segments: list[dict[str, float | str | bool]] = []
+
+    def _to_pct(value_ms: float) -> float:
+        return (value_ms - trace_start_ms) / trace_total_ms * 100.0
+
+    def _has_gap_activity(start_ms: float, end_ms: float) -> bool:
+        for ts in activity_sorted:
+            if ts < start_ms:
+                continue
+            if ts > end_ms:
+                break
+            return True
+        return False
+
+    cursor = trace_start_ms
+    for start_ms, end_ms in merged:
+        if start_ms > cursor:
+            gap_width_pct = _to_pct(start_ms) - _to_pct(cursor)
+            if gap_width_pct > 0:
+                segments.append(
+                    {
+                        "kind": "gap",
+                        "start_pct": round(_to_pct(cursor), 3),
+                        "width_pct": round(gap_width_pct, 3),
+                        "potential": _has_gap_activity(cursor, start_ms),
+                    }
+                )
+        active_width_pct = _to_pct(end_ms) - _to_pct(start_ms)
+        if active_width_pct > 0:
+            segments.append(
+                {
+                    "kind": "active",
+                    "start_pct": round(_to_pct(start_ms), 3),
+                    "width_pct": round(active_width_pct, 3),
+                    "potential": False,
+                }
+            )
+        cursor = max(cursor, end_ms)
+
+    if cursor < trace_end_ms:
+        gap_width_pct = _to_pct(trace_end_ms) - _to_pct(cursor)
+        if gap_width_pct > 0:
+            segments.append(
+                {
+                    "kind": "gap",
+                    "start_pct": round(_to_pct(cursor), 3),
+                    "width_pct": round(gap_width_pct, 3),
+                    "potential": _has_gap_activity(cursor, trace_end_ms),
+                }
+            )
+
+    return segments
+
+
 @app.route("/traces")
 @require_basic_auth
 async def view_traces():
@@ -7622,6 +9065,9 @@ async def view_traces():
             trace_start_ms = min(s["start_ms"] for s in all_trace_spans)
             trace_end_ms = max(s["start_ms"] + s["duration_ms"] for s in all_trace_spans)
             trace_total_ms = max(trace_end_ms - trace_start_ms, 1.0)
+            trace_active_ms = _compute_active_timeline_ms(all_trace_spans)
+            trace_coverage_pct = min(100.0, max(0.0, (trace_active_ms / trace_total_ms) * 100.0))
+            trace_span_sum_ms = sum(max(0.0, float(s.get("duration_ms", 0.0) or 0.0)) for s in all_trace_spans)
             for span in all_trace_spans:
                 span["offset_pct"] = round((span["start_ms"] - trace_start_ms) / trace_total_ms * 100, 2)
                 # 0.5 minimum keeps very short spans visible in the timeline bar
@@ -7631,6 +9077,7 @@ async def view_traces():
             _TRACE_ERROR_LIMIT = 50
             trace_errors: list[dict] = []
             errors_truncated = False
+            trace_activity_ts_ms: list[float] = []
             try:
                 err_rows = db.execute(
                     "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
@@ -7645,6 +9092,9 @@ async def view_traces():
                     item = _build_error_item(dict(row))
                     item["resolved"] = item["id"] in resolved_ids
                     trace_errors.append(item)
+                    ts_raw = str(item.get("ts") or "")
+                    if ts_raw:
+                        trace_activity_ts_ms.append(_ts_str_to_epoch_ms(ts_raw))
             except Exception as exc:
                 log.warning("view_traces: failed to fetch errors for trace %s: %s", trace_id, exc)
 
@@ -7659,8 +9109,20 @@ async def view_traces():
                 ).fetchall()
                 for r in log_rows:
                     log_counts[str(r["SpanId"])] = int(r["cnt"])
+
+                log_ts_rows = db.execute(
+                    "SELECT Timestamp FROM otel_logs WHERE TraceId=? LIMIT 2000",
+                    [trace_id],
+                ).fetchall()
+                for r in log_ts_rows:
+                    trace_activity_ts_ms.append(_ts_str_to_epoch_ms(str(r["Timestamp"])))
             except Exception as exc:
                 log.warning("view_traces: failed to fetch log counts for trace %s: %s", trace_id, exc)
+
+            timeline_segments = _build_trace_timeline_segments(all_trace_spans, trace_activity_ts_ms)
+            has_potential_gap = any(
+                seg.get("kind") == "gap" and bool(seg.get("potential")) for seg in timeline_segments
+            )
 
             # Fetch anomaly state for the primary service.
             trace_anomaly_state: str | None = None
@@ -7686,6 +9148,11 @@ async def view_traces():
                 "log_counts": log_counts,
                 "anomaly_state": trace_anomaly_state,
                 "total_ms": round(trace_total_ms, 2),
+                "active_ms": round(trace_active_ms, 2),
+                "coverage_pct": round(trace_coverage_pct, 2),
+                "span_sum_ms": round(trace_span_sum_ms, 2),
+                "timeline_segments": timeline_segments,
+                "has_potential_gap": has_potential_gap,
             }
 
     return await render_template(
@@ -7713,13 +9180,28 @@ async def view_traces():
 @require_basic_auth
 async def view_rum():
     db = get_db()
+    view_mode = request.args.get("view", "sessions").strip().lower()
+    if view_mode not in ("sessions", "events"):
+        view_mode = "sessions"
     event_type = request.args.get("type", "").strip()
+    error_source = request.args.get("error_source", "").strip()
     limit = _parse_limit(200)
     offset = _parse_offset()
-    sort_by, sort_col, sort_dir = _parse_sort(
-        {"Timestamp": "Timestamp", "EventName": "EventName"},
-        "Timestamp",
-    )
+    if view_mode == "sessions":
+        sort_by, sort_col, sort_dir = _parse_sort(
+            {
+                "severity": "severity_rank",
+                "last_seen": "last_ts",
+                "events": "event_count",
+                "errors": "error_count",
+            },
+            "severity",
+        )
+    else:
+        sort_by, sort_col, sort_dir = _parse_sort(
+            {"Timestamp": "Timestamp", "EventName": "EventName"},
+            "Timestamp",
+        )
     order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
     from_ts, to_ts, time_error = _parse_time_window_args()
 
@@ -7728,79 +9210,292 @@ async def view_rum():
     if event_type:
         conditions.append("EventName=?")
         params.append(event_type)
+    if error_source:
+        conditions.append("LogAttributes['errorSource']=?")
+        params.append(error_source)
     time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
     conditions.extend(time_conditions)
     params.extend(time_params)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    total = 0
+    events: list[dict[str, Any]] = []
+    session_groups: list[dict[str, Any]] = []
+    if view_mode == "sessions":
+        total = db.execute(
+            "SELECT count() FROM ("
+            f"SELECT {_RUM_SESSION_KEY_SQL} AS session_key "
+            f"FROM hyperdx_sessions {where} GROUP BY session_key)",
+            params,
+        ).fetchone()[0]
+        summary_rows = db.execute(
+            "SELECT "
+            f"  {_RUM_SESSION_KEY_SQL} AS session_key,"
+            "  max(Timestamp) AS last_ts,"
+            "  count() AS event_count,"
+            "  countIf(EventName IN ('error', 'unhandledrejection')) AS error_count,"
+            "  countIf(EventName = 'web-vital' "
+            "AND JSONExtractString(Body, 'rating') = 'poor') AS poor_vital_count,"
+            "  countIf(EventName = 'web-vital' "
+            "AND JSONExtractString(Body, 'rating') = 'needs-improvement') AS warn_vital_count,"
+            "  countIf(TraceId != '') AS traced_count,"
+            "  multiIf("
+            "    countIf(EventName IN ('error', 'unhandledrejection')) > 0, 3,"
+            "    countIf(EventName = 'web-vital' "
+            "AND JSONExtractString(Body, 'rating') = 'poor') > 0, 2,"
+            "    countIf(EventName = 'web-vital' "
+            "AND JSONExtractString(Body, 'rating') = 'needs-improvement') > 0, 1,"
+            "    0"
+            "  ) AS severity_rank,"
+            "  argMax(if(LogAttributes['url'] != '', LogAttributes['url'], "
+            "LogAttributes['url.full']), Timestamp) AS last_url,"
+            "  argMax(EventName, Timestamp) AS last_event_type"
+            f" FROM hyperdx_sessions {where}"
+            " GROUP BY session_key "
+            f" ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}, last_ts DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
 
-    total = db.execute(f"SELECT COUNT(*) FROM hyperdx_sessions {where}", params).fetchone()[0]
-    rows = db.execute(
-        f"SELECT Timestamp, EventName, Body, LogAttributes FROM hyperdx_sessions {where} "
-        f"{order_clause} LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+        if summary_rows:
+            session_keys = [str(row["session_key"]) for row in summary_rows]
+            placeholders = ",".join(["?"] * len(session_keys))
+            detail_conditions = list(conditions)
+            detail_conditions.append(f"{_RUM_SESSION_KEY_SQL} IN ({placeholders})")
+            detail_where = "WHERE " + " AND ".join(detail_conditions)
+            detail_rows = db.execute(
+                "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId "
+                f"FROM hyperdx_sessions {detail_where} "
+                f"ORDER BY {_RUM_SESSION_KEY_SQL} ASC, Timestamp DESC",
+                params + session_keys,
+            ).fetchall()
+            events_by_session: dict[str, list[dict[str, Any]]] = {}
+            for row in detail_rows:
+                item = _build_rum_event_item(row)
+                events_by_session.setdefault(str(item["session_key"]), []).append(item)
 
-    events = []
-    for r in rows:
-        attrs = _map_to_dict(r["LogAttributes"])
-        try:
-            body_data = json.loads(r["Body"]) if r["Body"] else {}
-        except json.JSONDecodeError:
-            body_data = {}
-        data = body_data if isinstance(body_data, dict) else {"value": body_data}
-        events.append(
-            {
-                "ts": str(r["Timestamp"]),
-                "session_id": str(attrs.get("sessionId", attrs.get("session.id", "")))[:8],
-                "event_type": r["EventName"],
-                "url": str(attrs.get("url", attrs.get("url.full", ""))),
-                "data": data,
-            }
-        )
+            for row in summary_rows:
+                session_key = str(row["session_key"])
+                session_events = events_by_session.get(session_key, [])
+                session_trace_id = next(
+                    (str(ev.get("trace_id", "")) for ev in session_events if ev.get("trace_id")), ""
+                )
+                session_groups.append(
+                    {
+                        "session_key": session_key,
+                        "session_id": session_key[:8],
+                        "last_ts": str(row["last_ts"]),
+                        "last_url": str(row["last_url"] or ""),
+                        "last_event_type": str(row["last_event_type"] or ""),
+                        "event_count": int(row["event_count"]),
+                        "error_count": int(row["error_count"]),
+                        "poor_vital_count": int(row["poor_vital_count"]),
+                        "warn_vital_count": int(row["warn_vital_count"]),
+                        "severity_rank": int(row["severity_rank"]),
+                        "traced_count": int(row["traced_count"]),
+                        "trace_id": session_trace_id,
+                        "has_replay": any(bool(ev.get("has_replay")) for ev in session_events),
+                        "has_artifact": any(bool(ev.get("has_artifact")) for ev in session_events),
+                        "events": session_events,
+                    }
+                )
+    else:
+        total = db.execute(f"SELECT COUNT(*) FROM hyperdx_sessions {where}", params).fetchone()[0]
+        rows = db.execute(
+            f"SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId FROM hyperdx_sessions {where} "
+            f"{order_clause} LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        events = [_build_rum_event_item(row) for row in rows]
 
     event_types = [
         row[0] for row in db.execute("SELECT DISTINCT EventName FROM hyperdx_sessions ORDER BY EventName").fetchall()
     ]
+    error_sources = [
+        row[0]
+        for row in db.execute(
+            "SELECT DISTINCT LogAttributes['errorSource'] FROM hyperdx_sessions "
+            "WHERE LogAttributes['errorSource']!='' ORDER BY LogAttributes['errorSource']"
+        ).fetchall()
+    ]
 
-    # Web vitals summary
-    vitals_rows = db.execute(
-        "SELECT Body, LogAttributes FROM hyperdx_sessions WHERE EventName='web-vital' "
-        "ORDER BY Timestamp DESC LIMIT 500"
-    ).fetchall()
-    vitals = {}
-    for vr in vitals_rows:
-        attrs = _map_to_dict(vr["LogAttributes"])
-        try:
-            d = json.loads(vr["Body"]) if vr["Body"] else {}
-        except json.JSONDecodeError:
-            d = {}
-        if not isinstance(d, dict):
-            d = {}
-        name = d.get("name", "")
-        val = d.get("value", attrs.get("value"))
-        try:
-            val = float(val) if val is not None else None
-        except (TypeError, ValueError):
-            val = None
-        if name and val is not None:
-            vitals.setdefault(name, []).append(val)
-    vitals_summary = {}
-    for name, vals in vitals.items():
-        vitals_summary[name] = {
-            "avg": round(sum(vals) / len(vals), 1),
-            "p75": round(sorted(vals)[int(len(vals) * 0.75)], 1),
-            "count": len(vals),
-        }
+    # Web vitals — anomaly state + sparklines + hotspot via rule-backed derived signals
+    vitals_summary: dict[str, dict[str, object]] = {}
+    vitals_sparklines: dict[str, list[dict[str, object]]] = {}
+    vitals_hotspot: dict[str, list[dict[str, object]]] = {}
+    try:
+        anom_rows = db.execute(
+            "SELECT SignalName,"
+            " argMax(value, time) AS latest_value,"
+            " argMax(anomaly_state, time) AS latest_state,"
+            " toUInt64(argMax(SampleCount, time)) AS latest_count"
+            " FROM v_derived_signals_anomaly"
+            " WHERE SignalSource = 'rum_vitals'"
+            "   AND time >= now() - INTERVAL 60 MINUTE"
+            " GROUP BY SignalName"
+        ).fetchall()
+        for row in anom_rows:
+            nm = str(row["SignalName"])
+            val = float(row["latest_value"])
+            state = str(row["latest_state"])
+            cnt = int(row["latest_count"])
+            vitals_summary[nm] = {
+                "p75": round(val, 3) if nm == "CLS" else round(val, 0),
+                "count": cnt,
+                "anomaly_state": state,
+            }
+        spark_rows = db.execute(
+            "SELECT SignalName, MinuteBucket, Value, SampleCount"
+            " FROM v_derived_signals_1m"
+            " WHERE SignalSource = 'rum_vitals'"
+            "   AND MinuteBucket >= now() - INTERVAL 60 MINUTE"
+            " ORDER BY SignalName, MinuteBucket"
+        ).fetchall()
+        for row in spark_rows:
+            nm = str(row["SignalName"])
+            vitals_sparklines.setdefault(nm, []).append(
+                {
+                    "t": str(row["MinuteBucket"]),
+                    "v": round(float(row["Value"]), 3) if nm == "CLS" else round(float(row["Value"]), 1),
+                }
+            )
+        hotspot_rows = db.execute(
+            "SELECT"
+            "  JSONExtractString(Body, 'name') AS metric,"
+            "  LogAttributes['url'] AS url,"
+            "  count() AS total,"
+            "  countIf(JSONExtractString(Body, 'rating') = 'poor') AS poor_count,"
+            "  round(toFloat64(poor_count) / toFloat64(total), 3) AS poor_rate,"
+            "  round(quantileExact(0.75)(JSONExtractFloat(Body, 'value')), 1) AS p75"
+            " FROM hyperdx_sessions"
+            " WHERE EventName = 'web-vital'"
+            "   AND Timestamp >= now() - INTERVAL 24 HOUR"
+            " GROUP BY metric, url"
+            " HAVING total >= 3"
+            " ORDER BY metric ASC, poor_rate DESC, total DESC"
+            " LIMIT 60"
+        ).fetchall()
+        for row in hotspot_rows:
+            metric = str(row["metric"])
+            if not metric:
+                continue
+            vitals_hotspot.setdefault(metric, []).append(
+                {
+                    "url": str(row["url"]),
+                    "total": int(row["total"]),
+                    "poor_count": int(row["poor_count"]),
+                    "poor_rate": float(row["poor_rate"]),
+                    "p75": float(row["p75"]),
+                }
+            )
+        for metric in vitals_hotspot:
+            vitals_hotspot[metric] = vitals_hotspot[metric][:5]
+    except Exception:
+        app.logger.exception("vitals derived-signal query failed")
+
+    # Error trend — sparkline + direction + top messages + top URLs (vs now())
+    error_stats: dict[str, Any] = {
+        "total": 0,
+        "by_type": {},
+        "trend": "stable",
+        "recent": 0,
+        "prior": 0,
+        "sparkline": [],
+        "top_messages": [],
+        "top_urls": [],
+    }
+    try:
+        trend_row = db.execute(
+            "SELECT"
+            " countIf(Timestamp >= now() - INTERVAL 30 MINUTE) AS recent,"
+            " countIf("
+            "   Timestamp >= now() - INTERVAL 60 MINUTE"
+            "   AND Timestamp < now() - INTERVAL 30 MINUTE"
+            " ) AS prior"
+            " FROM hyperdx_sessions"
+            " WHERE EventName IN ('error', 'unhandledrejection')"
+            "   AND Timestamp >= now() - INTERVAL 60 MINUTE"
+        ).fetchone()
+        if trend_row:
+            recent_cnt = int(trend_row["recent"])
+            prior_cnt = int(trend_row["prior"])
+            error_stats["recent"] = recent_cnt
+            error_stats["prior"] = prior_cnt
+            if prior_cnt == 0:
+                err_trend = "stable" if recent_cnt == 0 else "up"
+            elif recent_cnt > prior_cnt * 1.25:
+                err_trend = "up"
+            elif recent_cnt < prior_cnt * 0.75:
+                err_trend = "down"
+            else:
+                err_trend = "stable"
+            error_stats["trend"] = err_trend
+        type_rows = db.execute(
+            "SELECT EventName, count() AS cnt"
+            " FROM hyperdx_sessions"
+            " WHERE EventName IN ('error', 'unhandledrejection')"
+            "   AND Timestamp >= now() - INTERVAL 24 HOUR"
+            " GROUP BY EventName"
+        ).fetchall()
+        total_24h = 0
+        by_type: dict[str, int] = {}
+        for row in type_rows:
+            cnt = int(row["cnt"])
+            total_24h += cnt
+            by_type[str(row["EventName"])] = cnt
+        error_stats["total"] = total_24h
+        error_stats["by_type"] = by_type
+        spark_rows = db.execute(
+            "SELECT mb, cnt"
+            " FROM ("
+            "   SELECT toStartOfMinute(Timestamp) AS mb, count() AS cnt"
+            "   FROM hyperdx_sessions"
+            "   WHERE EventName IN ('error', 'unhandledrejection')"
+            "     AND Timestamp >= now() - INTERVAL 180 MINUTE"
+            "   GROUP BY mb"
+            " )"
+            " ORDER BY mb"
+            " WITH FILL"
+            " FROM toStartOfMinute(now() - INTERVAL 180 MINUTE)"
+            " TO toStartOfMinute(now())"
+            " STEP toIntervalMinute(1)"
+        ).fetchall()
+        error_stats["sparkline"] = [{"t": str(row["mb"]), "v": int(row["cnt"])} for row in spark_rows]
+        msg_rows = db.execute(
+            "SELECT JSONExtractString(Body, 'message') AS message, count() AS cnt"
+            " FROM hyperdx_sessions"
+            " WHERE EventName IN ('error', 'unhandledrejection')"
+            "   AND Timestamp >= now() - INTERVAL 24 HOUR"
+            "   AND JSONExtractString(Body, 'message') != ''"
+            " GROUP BY message ORDER BY cnt DESC LIMIT 8"
+        ).fetchall()
+        error_stats["top_messages"] = [{"message": str(row["message"]), "count": int(row["cnt"])} for row in msg_rows]
+        url_rows = db.execute(
+            "SELECT LogAttributes['url'] AS url, count() AS cnt"
+            " FROM hyperdx_sessions"
+            " WHERE EventName IN ('error', 'unhandledrejection')"
+            "   AND Timestamp >= now() - INTERVAL 24 HOUR"
+            "   AND LogAttributes['url'] != ''"
+            " GROUP BY url ORDER BY cnt DESC LIMIT 5"
+        ).fetchall()
+        error_stats["top_urls"] = [{"url": str(row["url"]), "count": int(row["cnt"])} for row in url_rows]
+    except Exception:
+        app.logger.exception("error stats query failed")
 
     return await render_template(
         "rum.html",
         events=events,
+        session_groups=session_groups,
         total=total,
         limit=limit,
         offset=offset,
+        view_mode=view_mode,
         event_type=event_type,
         event_types=event_types,
+        error_source=error_source,
+        error_sources=error_sources,
         vitals_summary=vitals_summary,
+        vitals_sparklines=vitals_sparklines,
+        vitals_hotspot=vitals_hotspot,
+        error_stats=error_stats,
         sort_by=sort_by,
         sort_dir=sort_dir,
         from_ts=from_ts,
@@ -17205,4 +18900,8 @@ if __name__ == "__main__":
     config.workers = 1
     config.use_reloader = False
 
-    asyncio.run(hypercorn_serve(app, config))
+    try:
+        asyncio.run(hypercorn_serve(app, config))
+    finally:
+        # Safety net for abrupt exits where lifecycle hooks may not complete.
+        _shutdown_db_resources()

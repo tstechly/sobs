@@ -117,11 +117,142 @@ details, security considerations, and limitations.
 ### Client-side RUM
 
 ```html
-<script src="http://YOUR_SOBS_HOST/static/rum.js"></script>
+<!-- One-line auto-init (endpoint inferred from script host) -->
+<script src="http://YOUR_SOBS_HOST/static/rum.js?app=my-app"></script>
+
+<!-- Feature-complete init (auth token, SPA nav, trace propagation, replay/screenshot hooks) -->
+<script
+  src="http://YOUR_SOBS_HOST/static/rum.js"
+  data-sobs-app="shop-web"
+  data-sobs-endpoint="http://YOUR_SOBS_HOST/v1/rum"
+  data-sobs-client-token-url="/internal/sobs/rum-client-token">
+</script>
+
 <script>
-  SOBS.init({ endpoint: 'http://YOUR_SOBS_HOST/v1/rum', appName: 'my-app' });
+  SOBS.init({
+    endpoint: 'http://YOUR_SOBS_HOST/v1/rum',
+    appName: 'shop-web',
+    clientAuthTokenUrl: '/internal/sobs/rum-client-token',
+    trackSPA: true,
+
+    // Optional trace defaults (or call setTraceParent/setTraceContext at runtime)
+    traceparent: window.__TRACEPARENT__ || '',
+    tracePropagationOrigins: ['https://api.example.com'],
+
+    // Optional breadcrumb buffer sizing
+    consoleBufferSize: 20,
+    breadcrumbBufferSize: 40,
+
+    // Optional replay + screenshot capture for enriched error events
+    replay: {
+      enabled: true,
+      scriptUrl: 'https://cdn.jsdelivr.net/npm/rrweb@latest/dist/record/rrweb-record.min.js',
+      maxEvents: 500,
+      screenshot: {
+        enabled: true,
+        scriptUrl: 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+        mimeType: 'image/jpeg',
+        quality: 0.75,
+        maxEdge: 1400
+      },
+      upload: async function (envelope) {
+        // Your backend uploads replay/screenshot and returns metadata refs.
+        const resp = await fetch('/api/replay/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(envelope)
+        });
+        if (!resp.ok) throw new Error('Replay upload failed');
+        // Expected shape:
+        // { replay: { id, url, provider }, artifact: { type, id, url } }
+        return resp.json();
+      }
+    }
+  });
+
+  // Add app-level breadcrumbs and custom events.
+  SOBS.addBreadcrumb('checkout', 'User clicked Place Order', { step: 'payment' });
+  SOBS.track('feature-flag', { flag: 'new-checkout', variant: 'B' });
+
+  // Attach visual context to the NEXT captured error event.
+  SOBS.setVisualContext({
+    replay: { id: 'replay-123', url: 'https://example.com/replays/replay-123', provider: 'rrweb' },
+    artifact: { type: 'screenshot', id: 'shot-123', url: 'https://example.com/artifacts/shot-123.png' },
+    ttlMs: 15000,
+    consumeOnce: true
+  });
+
+  // Manual capture path (in addition to auto window.onerror/unhandledrejection capture).
+  try {
+    throw new Error('Checkout confirmation failed');
+  } catch (err) {
+    SOBS.captureException(err, { errorSource: 'checkout-flow' });
+  }
+
+  // Runtime helpers:
+  // SOBS.setTraceParent('00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01');
+  // SOBS.setTraceContext('<trace-id-32-hex>', '<span-id-16-hex>');
+  // SOBS.setReplayContext({ id: 'replay-123', url: 'https://.../replay-123', provider: 'rrweb' }, { ttlMs: 15000 });
+  // SOBS.setArtifactContext({ type: 'screenshot', id: 'shot-123', url: 'https://.../shot-123.png' }, { ttlMs: 15000 });
+  // SOBS.clearVisualContext();
+  // SOBS.enableReplay({ enabled: true, scriptUrl: 'https://cdn.../rrweb-record.min.js' });
+  // SOBS.disableReplay();
+  // SOBS.setReplayUpload(async (envelope) => ({ replay: { id: 'r1', url: 'https://...', provider: 'rrweb' } }));
+  // SOBS.setClientAuthToken('<short-lived-rum-token>');
 </script>
 ```
+
+React compatibility:
+
+- Yes, it works with React apps. The RUM script hooks browser-level signals (`window.onerror`, `unhandledrejection`, fetch failures, performance observers), so framework internals do not block capture.
+- For best results in React, still add an Error Boundary and call `SOBS.captureException(error, { errorSource: 'react-error-boundary' })` from `componentDidCatch`.
+- In SPA routing (React Router), leave `trackSPA` enabled (default) so route changes are tracked via History API.
+
+Replay and screenshot payload contract:
+
+```json
+{
+  "replay": {
+    "id": "replay-123",
+    "url": "https://example.com/replays/replay-123",
+    "provider": "rrweb"
+  },
+  "artifact": {
+    "type": "screenshot",
+    "id": "shot-123",
+    "url": "https://example.com/artifacts/shot-123.png"
+  }
+}
+```
+
+For an integration sketch, see [examples/rum/rrweb_replay_example.js](examples/rum/rrweb_replay_example.js).
+
+Signed asset upload endpoint:
+
+- `POST /v1/rum/assets?type=<replay|screenshot|...>&name=<filename>`
+- Body: raw bytes (`application/json`, `image/png`, etc.)
+- Required headers:
+  - `X-SOBS-Asset-Timestamp` (unix epoch seconds)
+  - `X-SOBS-Asset-Signature` (`hex(hmac_sha256(signing_key, canonical_payload))`)
+
+Canonical payload format:
+
+```text
+POST
+/v1/rum/assets
+<timestamp>
+<sha256_body_hex>
+<content_type_lowercase>
+<asset_type_lowercase>
+<asset_name>
+```
+
+Optional browser RUM auth endpoint:
+
+- `POST /v1/rum/client-token`
+- Body: `{ "appName": "my-app", "origin": "https://app.example.com", "ttlSec": 900 }`
+- Requires `SOBS_API_KEY` when API key auth is enabled.
+- Returns a short-lived token bound to app + origin, for use in browser RUM events.
 
 ## OTLP Endpoints
 
@@ -358,6 +489,170 @@ The stream sends a `retry: 5000` directive on connect and a `: keepalive` commen
 
 `/tail` uses the same Web UI auth mode as all other UI routes. Supply credentials the same way you would for the Web UI:
 
+
+Optional browser RUM client auth (origin-bound tokens):
+
+- `SOBS_RUM_CLIENT_AUTH_MODE=none|origin` (default `none`)
+- `SOBS_RUM_CLIENT_SIGNING_KEY=<secret>` (required when mode is `origin`)
+- `SOBS_RUM_CLIENT_TOKEN_TTL_SEC=900` (optional)
+
+Recommended flow:
+
+1. Your backend calls `POST /v1/rum/client-token` (with API key if enabled).
+2. Your backend returns the token to your own web app.
+3. Browser sends token via `data-sobs-client-token-url` or `SOBS.setClientAuthToken(...)`.
+4. SOBS accepts RUM only when token origin matches request origin/referer.
+
+Optional server-side JS stack source-map remapping:
+
+- `SOBS_SOURCE_MAP_ENABLE=true`
+- `SOBS_SOURCE_MAP_DIR=/path/to/source-maps`
+
+When enabled, SOBS attempts to remap JavaScript stack frames (RUM + direct `/v1/errors`) to original source locations using `.map` files in `SOBS_SOURCE_MAP_DIR`.
+
+App/release/artifact registry (Phase 1 scaffolding):
+
+- `POST /v1/apps`
+- `GET /v1/apps`
+- `GET /v1/apps/{app_id}`
+- `PATCH /v1/apps/{app_id}`
+- `POST /v1/apps/{app_id}/releases`
+- `GET /v1/apps/{app_id}/releases`
+- `GET /v1/releases/{release_id}`
+- `POST /v1/releases/{release_id}/artifacts/meta`
+- `GET /v1/releases/{release_id}/artifacts`
+
+Environment seed support for app/release/artifact registry:
+
+- `SOBS_APP_REGISTRY_SEED_JSON` (inline JSON)
+- `SOBS_APP_REGISTRY_SEED_JSON_FILE` (path to JSON file)
+
+Seed JSON shape:
+
+```json
+{
+  "apps": [
+    {
+      "name": "checkout-web",
+      "slug": "checkout-web",
+      "ownerTeam": "frontend",
+      "releases": [
+        {
+          "version": "1.2.3",
+          "commitSha": "abc123",
+          "environment": "prod",
+          "artifacts": [
+            {
+              "artifactType": "js_sourcemap",
+              "name": "app.min.js.map",
+              "storageRef": "s3://symbols/checkout/1.2.3/app.min.js.map"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+CI helper script for registry onboarding:
+
+```bash
+python scripts/register_release_artifacts.py \
+  --base-url "${SOBS_BASE_URL:-http://127.0.0.1:44317}" \
+  --api-key "$SOBS_API_KEY" \
+  --app-name checkout-web \
+  --app-slug checkout-web \
+  --release-version "${RELEASE_VERSION}" \
+  --commit-sha "${GITHUB_SHA}" \
+  --environment prod \
+  --artifacts-file ./build/sobs-artifacts.json
+```
+
+Equivalent bash entrypoint (same behavior, delegates to Python helper):
+
+```bash
+bash scripts/register_release_artifacts.sh \
+  --base-url "${SOBS_BASE_URL:-http://127.0.0.1:44317}" \
+  --api-key "$SOBS_API_KEY" \
+  --app-name checkout-web \
+  --release-version "${RELEASE_VERSION}" \
+  --commit-sha "${GITHUB_SHA}" \
+  --environment prod \
+  --artifacts-file ./build/sobs-artifacts.json
+```
+
+The helper is idempotent-oriented:
+
+- Reuses existing app by slug/name.
+- Reuses existing release by version+commit+environment+build.
+- Skips artifact metadata already present by `(artifactType, name, storageRef)`.
+
+Environment-first usage is also supported (useful in CI):
+
+- `SOBS_BASE_URL`
+- `SOBS_API_KEY`
+- `SOBS_APP_NAME`
+- `SOBS_APP_SLUG`
+- `SOBS_OWNER_TEAM`
+- `SOBS_APP_REPO_URL`
+- `SOBS_DEFAULT_ENVIRONMENT`
+- `SOBS_RELEASE_VERSION`
+- `SOBS_RELEASE_COMMIT_SHA`
+- `SOBS_RELEASE_BUILD_ID`
+- `SOBS_RELEASE_ENVIRONMENT`
+- `SOBS_RELEASED_AT`
+- `SOBS_RELEASE_METADATA_JSON`
+- `SOBS_RELEASE_ARTIFACTS_JSON` or `SOBS_RELEASE_ARTIFACTS_JSON_FILE`
+
+Artifacts JSON array example (`sobs-artifacts.json`):
+
+```json
+[
+  {
+    "artifactType": "js_sourcemap",
+    "name": "app.min.js.map",
+    "contentType": "application/json",
+    "size": 3210,
+    "storageRef": "s3://symbols/checkout/1.2.3/app.min.js.map",
+    "checksumSha256": "..."
+  }
+]
+```
+
+GitHub Actions example step:
+
+```yaml
+- name: Register SOBS release artifacts
+  env:
+    SOBS_BASE_URL: ${{ secrets.SOBS_BASE_URL }}
+    SOBS_API_KEY: ${{ secrets.SOBS_API_KEY }}
+    SOBS_APP_NAME: checkout-web
+    SOBS_APP_SLUG: checkout-web
+    SOBS_OWNER_TEAM: frontend
+    SOBS_APP_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+    SOBS_DEFAULT_ENVIRONMENT: prod
+    SOBS_RELEASE_VERSION: ${{ github.ref_name }}
+    SOBS_RELEASE_COMMIT_SHA: ${{ github.sha }}
+    SOBS_RELEASE_BUILD_ID: ${{ github.run_id }}
+    SOBS_RELEASE_ENVIRONMENT: prod
+  run: |
+    cat > sobs-artifacts.json <<'JSON'
+    [
+      {
+        "artifactType": "js_sourcemap",
+        "name": "app.min.js.map",
+        "contentType": "application/json",
+        "size": 3210,
+        "storageRef": "s3://symbols/checkout/${{ github.sha }}/app.min.js.map"
+      }
+    ]
+    JSON
+
+    bash scripts/register_release_artifacts.sh \
+      --artifacts-file ./sobs-artifacts.json
+```
+
 ```bash
 # Basic auth
 curl -N http://localhost:44317/tail \
@@ -443,6 +738,10 @@ SOBS_AI_GUARD_MODEL=qwen2.5:7b-instruct \
 ```
 
 The script validates Ollama availability at `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`), exports `SOBS_AI_*` env vars, and runs your command (default: `python app.py`).
+
+By default it also starts a local browser demo app for RUM/replay testing at `http://127.0.0.1:5005`.
+You can disable it with `START_EXAMPLE_APP=0`.
+It also exports `SOBS_RUM_ASSET_SIGNING_KEY` so the demo app can upload replay/screenshot assets using signed auth.
 
 This local Ollama path does not use Kubernetes and does not require `kubectl`.
 
