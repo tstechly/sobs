@@ -3358,6 +3358,25 @@ class TestGenAICompliance:
         result2 = app_module._extract_messages_text(msgs2)
         assert "Describe this" in result2
 
+        msgs3 = json.dumps(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": '{"city":"Paris"}',
+                            }
+                        }
+                    ],
+                }
+            ]
+        )
+        result3 = app_module._extract_messages_text(msgs3)
+        assert "tool_call:lookup_weather" in result3
+        assert "Paris" in result3
+
     async def test_ai_view_shows_error_type(self, client):
         """AI view should display error.type badge when present."""
         r = await client.post(
@@ -3619,6 +3638,147 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "missing-content-svc" in body
+        assert "tool_call:lookup" in body
+
+    async def test_ai_trace_view_treats_message_only_span_as_llm_call(self, client):
+        """Trace AI view should render full conversation tabs for conversational spans even with zero tokens."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "trace_id": "message-only-trace-123",
+                "service": "message-only-trace-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "operation": "chat",
+                "input_messages": [{"role": "user", "content": "Zero-token question"}],
+                "output_messages": [{"role": "assistant", "content": "Zero-token answer"}],
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "duration_ms": 25,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai?view=trace")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "message-only-trace-svc" in body
+        assert "Zero-token question" in body
+        assert "Zero-token answer" in body
+        assert "Conversation" in body
+        assert 'data-ai-call="1"' in body
+        assert 'data-model="gpt-4o"' in body
+
+    async def test_ai_trace_view_shows_turn_timeline_for_helper_spans(self, client):
+        """Trace AI view should synthesize helper spans into a turn timeline summary."""
+        import app as app_module
+
+        chat_id = f"timeline-chat-{time.time_ns()}"
+        turn_id = f"timeline-turn-{time.time_ns()}"
+
+        app_module._emit_ai_helper_log_event(
+            event_name="turn.start",
+            chat_id=chat_id,
+            turn_id=turn_id,
+            page="/ai",
+            model="gpt-4o",
+            guard_model="guard-test",
+            thinking_level="off",
+            body="turn started",
+            attrs={
+                "gen_ai.input.question": "Why is my chat slow?",
+                "gen_ai.input.messages": json.dumps(
+                    [{"role": "user", "content": "Why is my chat slow?"}], ensure_ascii=False
+                ),
+            },
+        )
+        app_module._emit_ai_helper_log_event(
+            event_name="guard.result",
+            chat_id=chat_id,
+            turn_id=turn_id,
+            page="/ai",
+            model="gpt-4o",
+            guard_model="guard-test",
+            thinking_level="off",
+            body="Guard verdict: safe",
+            attrs={
+                "gen_ai.guard.allowed": True,
+                "gen_ai.guard.reason": "safe",
+            },
+        )
+        app_module._emit_ai_helper_log_event(
+            event_name="tool.proposed",
+            chat_id=chat_id,
+            turn_id=turn_id,
+            page="/ai",
+            model="gpt-4o",
+            guard_model="guard-test",
+            thinking_level="off",
+            body="Tool proposed",
+            attrs={
+                "gen_ai.tool.name": "propose_ui_action",
+                "sobs.ai.action.status": "proposed",
+                "sobs.ai.tool.summary": "Open the traces page filtered to this chat",
+            },
+        )
+        app_module._emit_ai_helper_log_event(
+            event_name="turn.complete",
+            chat_id=chat_id,
+            turn_id=turn_id,
+            page="/ai",
+            model="gpt-4o",
+            guard_model="guard-test",
+            thinking_level="off",
+            body="turn complete",
+            attrs={
+                "gen_ai.usage.input_tokens": 123,
+                "gen_ai.usage.output_tokens": 45,
+                "gen_ai.response.latency_ms": 987,
+                "gen_ai.output.messages": json.dumps(
+                    [{"role": "assistant", "content": "Your guard check and tool proposal both succeeded."}],
+                    ensure_ascii=False,
+                ),
+                "gen_ai.turn.summary.action": "Inspect trace telemetry",
+                "gen_ai.turn.summary.result": "Guard passed and a follow-up action was proposed.",
+            },
+        )
+
+        r = await client.get(f"/ai?view=trace&service={app_module._AI_HELPER_SERVICE_NAME}")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Turn Timeline" in body
+        assert "Why is my chat slow?" in body
+        assert "Your guard check and tool proposal both succeeded." in body
+        assert "Guard passed" in body
+        assert "Open the traces page filtered to this chat" in body
+        assert "Related telemetry" in body
+        assert "data-ai-related-turn-id" in body
+
+    async def test_ai_trace_view_preserves_selected_span_filter(self, client):
+        """Trace AI view should not overwrite selected span_name filter with last row span."""
+        import app as app_module
+
+        chat_id = f"span-filter-chat-{time.time_ns()}"
+        turn_id = f"span-filter-turn-{time.time_ns()}"
+        app_module._emit_ai_helper_log_event(
+            event_name="guard.result",
+            chat_id=chat_id,
+            turn_id=turn_id,
+            page="/ai",
+            model="gpt-4o",
+            guard_model="guard-test",
+            thinking_level="off",
+            body="Guard verdict: allowed",
+            attrs={
+                "gen_ai.guard.allowed": True,
+                "gen_ai.guard.reason": "allowed",
+            },
+        )
+
+        r2 = await client.get("/ai?view=trace&span_name=ai.guard.result")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert '<option value="ai.guard.result" selected' in body
 
     async def test_ai_view_includes_metrics_tab(self, client):
         """AI view should include Metrics tab with token and timing info."""
@@ -3784,10 +3944,678 @@ class TestGenAICompliance:
         body = await r.get_data(as_text=True)
         assert "Some AI metadata failed to load" in body
 
+    async def test_semconv_operation_name_only_span_detected_as_ai(self, client):
+        """Spans with only gen_ai.operation.name (no provider) should appear in AI view."""
+        import app as app_module
 
-# ---------------------------------------------------------------------------
-# Custom Dashboards (eChart)
-# ---------------------------------------------------------------------------
+        db = app_module.get_db()
+        app_module._insert_rows_json_each_row(
+            db,
+            "otel_traces",
+            [
+                {
+                    "Timestamp": "2024-02-01T00:00:00",
+                    "TraceId": "semcv001" * 4,
+                    "SpanId": "semspan1" * 2,
+                    "ParentSpanId": "",
+                    "TraceState": "",
+                    "SpanName": "chat gpt-4o",
+                    "SpanKind": "CLIENT",
+                    "ServiceName": "semconv-only-svc",
+                    "ResourceAttributes": {},
+                    "ScopeName": "test",
+                    "ScopeVersion": "",
+                    "SpanAttributes": {
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.request.model": "gpt-4o",
+                        "gen_ai.usage.input_tokens": "15",
+                        "gen_ai.usage.output_tokens": "8",
+                        "gen_ai.input.messages": json.dumps([{"role": "user", "content": "Semconv-only query"}]),
+                        "gen_ai.output.messages": json.dumps([{"role": "assistant", "content": "Semconv-only answer"}]),
+                    },
+                    "Duration": 200000000,
+                    "StatusCode": "STATUS_CODE_OK",
+                    "StatusMessage": "",
+                    "Events": {"Timestamp": [], "Name": [], "Attributes": []},
+                    "Links": {"TraceId": [], "SpanId": [], "TraceState": [], "Attributes": []},
+                }
+            ],
+        )
+
+        r = await client.get("/ai")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "semconv-only-svc" in body
+        assert "Semconv-only query" in body
+
+    async def test_semconv_operation_name_with_semconv_span_name(self, client):
+        """Spans using semconv span naming '{operation} {model}' should be detected and parsed."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "semconv-span-svc",
+                "provider": "groq",
+                "model": "llama3-8b-8192",
+                "operation": "chat",
+                "input_messages": [{"role": "user", "content": "Semconv span name test"}],
+                "output_messages": [{"role": "assistant", "content": "Passed"}],
+                "tokens_in": 12,
+                "tokens_out": 4,
+                "duration_ms": 180,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        # Span name should follow semconv: "chat llama3-8b-8192"
+        assert "semconv-span-svc" in body
+        assert "Semconv span name test" in body
+
+    async def test_semconv_mixed_providers_via_provider_name(self, client):
+        """Mixed providers (groq, openai) identified via gen_ai.provider.name should both appear."""
+        for provider, model, content in [
+            ("groq", "llama3-70b", "Groq user message"),
+            ("openai", "gpt-4o-mini", "OpenAI user message"),
+        ]:
+            r = await client.post(
+                "/v1/ai",
+                json={
+                    "service": f"mixed-{provider}-svc",
+                    "provider": provider,
+                    "model": model,
+                    "input_messages": [{"role": "user", "content": content}],
+                    "output_messages": [{"role": "assistant", "content": "ok"}],
+                    "tokens_in": 10,
+                    "tokens_out": 2,
+                    "duration_ms": 100,
+                },
+            )
+            assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "Groq user message" in body
+        assert "OpenAI user message" in body
+
+    async def test_semconv_messages_as_json_string_attribute(self, client):
+        """gen_ai.input.messages stored as a JSON string should be parsed and displayed."""
+        import app as app_module
+
+        db = app_module.get_db()
+        messages_json = json.dumps([{"role": "user", "content": "JSON string attribute content"}])
+        app_module._insert_rows_json_each_row(
+            db,
+            "otel_traces",
+            [
+                {
+                    "Timestamp": "2024-02-02T00:00:00",
+                    "TraceId": "jsonstr1" * 4,
+                    "SpanId": "jstrspn1" * 2,
+                    "ParentSpanId": "",
+                    "TraceState": "",
+                    "SpanName": "chat gpt-4o",
+                    "SpanKind": "CLIENT",
+                    "ServiceName": "json-str-svc",
+                    "ResourceAttributes": {},
+                    "ScopeName": "test",
+                    "ScopeVersion": "",
+                    "SpanAttributes": {
+                        "gen_ai.provider.name": "openai",
+                        "gen_ai.operation.name": "chat",
+                        "gen_ai.request.model": "gpt-4o",
+                        "gen_ai.usage.input_tokens": "10",
+                        "gen_ai.usage.output_tokens": "5",
+                        # Stored as a JSON string (not a structured object) per semconv guidance
+                        "gen_ai.input.messages": messages_json,
+                    },
+                    "Duration": 150000000,
+                    "StatusCode": "STATUS_CODE_OK",
+                    "StatusMessage": "",
+                    "Events": {"Timestamp": [], "Name": [], "Attributes": []},
+                    "Links": {"TraceId": [], "SpanId": [], "TraceState": [], "Attributes": []},
+                }
+            ],
+        )
+
+        r = await client.get("/ai")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "JSON string attribute content" in body
+
+    async def test_semconv_parts_messages_render_all_turn_roles(self, client):
+        """Parts-based OTel messages should render system/user/tool/assistant turns in AI view."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "parts-turns-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "operation": "chat",
+                "input_messages": [
+                    {
+                        "role": "system",
+                        "parts": [{"type": "text", "content": "Follow safety rules."}],
+                    },
+                    {
+                        "role": "user",
+                        "parts": [{"type": "text", "content": "Weather in Paris?"}],
+                    },
+                    {
+                        "role": "tool",
+                        "parts": [
+                            {
+                                "type": "tool_call_response",
+                                "id": "call_weather_1",
+                                "response": "rainy, 57F",
+                            }
+                        ],
+                    },
+                ],
+                "output_messages": [
+                    {
+                        "role": "assistant",
+                        "parts": [
+                            {
+                                "type": "text",
+                                "content": "It is rainy in Paris and about 57F.",
+                            }
+                        ],
+                    }
+                ],
+                "tokens_in": 30,
+                "tokens_out": 12,
+                "duration_ms": 210,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "parts-turns-svc" in body
+        assert "Follow safety rules." in body
+        assert "Weather in Paris?" in body
+        assert "rainy, 57F" in body
+        assert "It is rainy in Paris and about 57F." in body
+        assert ">system instruction<" in body
+        assert ">user<" in body
+        assert ">tool<" in body
+        assert ">assistant<" in body
+
+    async def test_semconv_parts_tool_call_payloads_are_rendered(self, client):
+        """Tool call style message parts should surface readable details in AI conversation view."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "parts-toolcall-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "operation": "chat",
+                "input_messages": [
+                    {
+                        "role": "assistant",
+                        "parts": [
+                            {
+                                "type": "tool_call",
+                                "id": "call_weather_22",
+                                "name": "get_weather",
+                                "arguments": {"location": "Paris"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "parts": [
+                            {
+                                "type": "server_tool_call",
+                                "id": "srv_code_1",
+                                "name": "code_interpreter",
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "parts": [
+                            {
+                                "type": "tool_call_response",
+                                "id": "call_weather_22",
+                                "response": "rainy, 57F",
+                            }
+                        ],
+                    },
+                ],
+                "output_messages": [
+                    {
+                        "role": "assistant",
+                        "parts": [
+                            {
+                                "type": "text",
+                                "content": "The weather in Paris is rainy.",
+                            }
+                        ],
+                    }
+                ],
+                "tokens_in": 25,
+                "tokens_out": 9,
+                "duration_ms": 175,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "parts-toolcall-svc" in body
+        assert "tool_call:get_weather" in body
+        assert "Paris" in body
+        assert "tool_call:code_interpreter" in body
+        assert "rainy, 57F" in body
+
+    async def test_reasoning_content_is_rendered_in_ai_view(self, client):
+        """AI view should render model thinking text when output message includes reasoning content."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "reasoning-visible-svc",
+                "provider": "openai",
+                "model": "gpt-oss-120b",
+                "operation": "chat",
+                "input_messages": [{"role": "user", "content": "Why is p95 latency up?"}],
+                "output_messages": [
+                    {
+                        "role": "assistant",
+                        "content": "Likely due to increased DB wait time.",
+                        "reasoning_content": "Correlated spikes in db.client.duration with p95 latency.",
+                    }
+                ],
+                "tokens_in": 40,
+                "tokens_out": 15,
+                "duration_ms": 220,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "reasoning-visible-svc" in body
+        assert "Likely due to increased DB wait time." in body
+        assert "Thinking" in body
+        assert "Correlated spikes in db.client.duration with p95 latency." in body
+
+    async def test_semconv_message_content_preferred_over_parts(self, client):
+        """When both content and parts are present, explicit content should remain authoritative."""
+        import app as app_module
+
+        normalized_input = app_module._normalize_genai_messages_for_display(
+            [
+                {
+                    "role": "user",
+                    "content": "Preferred content text",
+                    "parts": [{"type": "text", "content": "Fallback parts text should not win"}],
+                }
+            ]
+        )
+        normalized_output = app_module._normalize_genai_messages_for_display(
+            [
+                {
+                    "role": "assistant",
+                    "content": "Assistant preferred text",
+                    "parts": [{"type": "text", "content": "Assistant fallback parts text"}],
+                }
+            ]
+        )
+        assert normalized_input[0]["content"] == "Preferred content text"
+        assert normalized_output[0]["content"] == "Assistant preferred text"
+
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "mixed-content-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "operation": "chat",
+                "input_messages": [
+                    {
+                        "role": "user",
+                        "content": "Preferred content text",
+                        "parts": [{"type": "text", "content": "Fallback parts text should not win"}],
+                    }
+                ],
+                "output_messages": [
+                    {
+                        "role": "assistant",
+                        "content": "Assistant preferred text",
+                        "parts": [{"type": "text", "content": "Assistant fallback parts text"}],
+                    }
+                ],
+                "tokens_in": 10,
+                "tokens_out": 4,
+                "duration_ms": 90,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "mixed-content-svc" in body
+        assert "Preferred content text" in body
+        assert "Assistant preferred text" in body
+
+    async def test_system_instructions_displayed_in_ai_view(self, client):
+        """gen_ai.system_instructions should be displayed in the AI view conversation tab."""
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "sys-instr-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "operation": "chat",
+                "system_instructions": "You are a helpful assistant that speaks only in haiku.",
+                "input_messages": [{"role": "user", "content": "Tell me about trees"}],
+                "output_messages": [{"role": "assistant", "content": "Leaves fall gently down"}],
+                "tokens_in": 20,
+                "tokens_out": 8,
+                "duration_ms": 250,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "sys-instr-svc" in body
+        assert "You are a helpful assistant that speaks only in haiku." in body
+        assert "System Prompt" in body
+
+    async def test_flat_view_dedupes_system_prompt_from_system_role_input_turn(self, client):
+        """Flat AI view should hide duplicate system role turn when it matches system prompt content."""
+        system_text = "You are a concise assistant focused on diagnostics."
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "flat-dedupe-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "operation": "chat",
+                "system_instructions": system_text,
+                "input_messages": [
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": "Find failed traces"},
+                ],
+                "output_messages": [{"role": "assistant", "content": "Filtering traces now."}],
+                "tokens_in": 15,
+                "tokens_out": 5,
+                "duration_ms": 120,
+            },
+        )
+        assert r.status_code == 200
+
+        r2 = await client.get("/ai?service=flat-dedupe-svc")
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        assert "System Prompt" in body
+        assert "Hidden 1 duplicate system instruction turn." in body
+        # The duplicated system role turn should be hidden from the conversation turn badges.
+        assert ">system instruction<" not in body
+
+    async def test_execution_event_label_replaces_system_event_label(self, client):
+        """AI view should label non-LLM rows as Execution Event for taxonomy clarity."""
+        r_ingest = await client.post(
+            "/v1/ai",
+            json={
+                "service": "execution-label-svc",
+                "provider": "sobs",
+                "model": "",
+                "operation": "chat",
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "duration_ms": 0,
+            },
+        )
+        assert r_ingest.status_code == 200
+
+        r = await client.get("/ai?service=execution-label-svc")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Execution Event" in body
+
+    async def test_semconv_operation_name_detected_in_otlp_sse_broadcast(self, client):
+        """OTLP trace spans with gen_ai.operation.name but no provider should broadcast AI SSE event."""
+        import app as app_module
+
+        q = asyncio.Queue()
+        app_module._sse_subscribers.add(q)
+        try:
+            r = await client.post(
+                "/v1/traces",
+                json={
+                    "resourceSpans": [
+                        {
+                            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "otel-svc"}}]},
+                            "scopeSpans": [
+                                {
+                                    "scope": {"name": "test"},
+                                    "spans": [
+                                        {
+                                            "traceId": "aa" * 16,
+                                            "spanId": "bb" * 8,
+                                            "name": "chat gpt-4o",
+                                            "startTimeUnixNano": "1000000000",
+                                            "endTimeUnixNano": "2000000000",
+                                            "kind": 3,
+                                            "status": {"code": 1},
+                                            "attributes": [
+                                                {
+                                                    "key": "gen_ai.operation.name",
+                                                    "value": {"stringValue": "chat"},
+                                                },
+                                                {
+                                                    "key": "gen_ai.request.model",
+                                                    "value": {"stringValue": "gpt-4o"},
+                                                },
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            assert r.status_code == 200
+            # At least one SSE event should have source=ai
+            events = []
+            while not q.empty():
+                events.append(await q.get())
+            ai_events = [e for e in events if e.get("source") == "ai"]
+            assert ai_events, "Expected an AI SSE event for span with gen_ai.operation.name"
+        finally:
+            app_module._sse_subscribers.discard(q)
+
+
+class TestInternalAssistantOtelCompliance:
+    async def test_internal_llm_call_emits_semconv_span(self, monkeypatch):
+        import app as app_module
+
+        model = f"internal-test-{secrets.token_hex(4)}"
+
+        class _FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+                    "choices": [{"message": {"content": "internal answer"}}],
+                }
+
+        class _FakeClient:
+            async def post(self, *_args, **_kwargs):
+                return _FakeResponse()
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(app_module, "_get_async_http_client", _fake_get_client)
+        app_module.app.config["TESTING"] = True
+
+        reply, stats = await app_module._call_llm_endpoint(
+            "https://api.openai.com/v1",
+            model,
+            "no-key",
+            [
+                {"role": "system", "content": "You are concise."},
+                {"role": "user", "content": "Hello from internal assistant"},
+            ],
+        )
+        assert reply == "internal answer"
+        assert int(stats.get("prompt_tokens", 0)) == 11
+        assert int(stats.get("completion_tokens", 0)) == 7
+
+        db = app_module.get_db()
+        row = db.execute(
+            "SELECT "
+            "SpanAttributes['gen_ai.provider.name'] AS provider, "
+            "SpanAttributes['gen_ai.operation.name'] AS operation, "
+            "SpanAttributes['gen_ai.request.model'] AS model, "
+            "SpanAttributes['gen_ai.input.messages'] AS input_messages, "
+            "SpanAttributes['gen_ai.output.messages'] AS output_messages, "
+            "SpanAttributes['gen_ai.system_instructions'] AS system_instructions, "
+            "StatusCode "
+            "FROM otel_traces "
+            "WHERE ServiceName=? AND SpanAttributes['gen_ai.request.model']=? "
+            "ORDER BY Timestamp DESC LIMIT 1",
+            [app_module._AI_HELPER_SERVICE_NAME, model],
+        ).fetchone()
+        assert row is not None
+        assert str(row[0]) == "openai"
+        assert str(row[1]) == "chat"
+        assert str(row[2]) == model
+        assert "Hello from internal assistant" in str(row[3])
+        assert "internal answer" in str(row[4])
+        assert "You are concise." in str(row[5])
+        assert str(row[6]) == "STATUS_CODE_OK"
+
+    async def test_internal_llm_call_failure_emits_error_span(self, monkeypatch):
+        import app as app_module
+
+        model = f"internal-fail-{secrets.token_hex(4)}"
+
+        class _FakeClient:
+            async def post(self, *_args, **_kwargs):
+                raise RuntimeError("simulated endpoint failure")
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(app_module, "_get_async_http_client", _fake_get_client)
+        app_module.app.config["TESTING"] = True
+
+        reply, stats = await app_module._call_llm_endpoint(
+            "https://example.internal/v1",
+            model,
+            "no-key",
+            [{"role": "user", "content": "this will fail"}],
+        )
+        assert reply == ""
+        assert "error" in stats
+
+        db = app_module.get_db()
+        row = db.execute(
+            "SELECT "
+            "StatusCode, "
+            "SpanAttributes['error.type'] AS error_type, "
+            "SpanAttributes['error.message'] AS error_message "
+            "FROM otel_traces "
+            "WHERE ServiceName=? AND SpanAttributes['gen_ai.request.model']=? "
+            "ORDER BY Timestamp DESC LIMIT 1",
+            [app_module._AI_HELPER_SERVICE_NAME, model],
+        ).fetchone()
+        assert row is not None
+        assert str(row[0]) == "STATUS_CODE_ERROR"
+        assert str(row[1]) == "RuntimeError"
+        assert "simulated endpoint failure" in str(row[2])
+
+    async def test_internal_streaming_llm_aggregates_deltas_into_single_span(self, monkeypatch):
+        import app as app_module
+
+        model = f"internal-stream-{secrets.token_hex(4)}"
+
+        class _FakeStreamResponse:
+            def raise_for_status(self):
+                return None
+
+            async def aiter_lines(self):
+                yield 'data: {"choices":[{"delta":{"content":"Hello "}}]}'
+                yield 'data: {"choices":[{"delta":{"content":"world"}}]}'
+                yield (
+                    'data: {"usage":{"prompt_tokens":9,"completion_tokens":4},'
+                    '"choices":[{"delta":{},"finish_reason":"stop"}]}'
+                )
+                yield "data: [DONE]"
+
+        class _FakeStreamContext:
+            def __init__(self):
+                self._resp = _FakeStreamResponse()
+
+            async def __aenter__(self):
+                return self._resp
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        class _FakeClient:
+            def stream(self, *_args, **_kwargs):
+                return _FakeStreamContext()
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(app_module, "_get_async_http_client", _fake_get_client)
+        app_module.app.config["TESTING"] = True
+
+        events = []
+        async for event in app_module._stream_llm_endpoint(
+            "https://api.openai.com/v1",
+            model,
+            "no-key",
+            [{"role": "user", "content": "Say hello"}],
+            timeout=10,
+        ):
+            events.append(event)
+
+        deltas = [e.get("text") for e in events if e.get("type") == "delta"]
+        assert deltas == ["Hello ", "world"]
+        done = [e for e in events if e.get("type") == "done"]
+        assert len(done) == 1
+        assert int(done[0]["stats"].get("prompt_tokens", 0)) == 9
+        assert int(done[0]["stats"].get("completion_tokens", 0)) == 4
+
+        db = app_module.get_db()
+        count_row = db.execute(
+            "SELECT COUNT(*) FROM otel_traces " "WHERE ServiceName=? AND SpanAttributes['gen_ai.request.model']=?",
+            [app_module._AI_HELPER_SERVICE_NAME, model],
+        ).fetchone()
+        assert count_row is not None
+        assert int(count_row[0]) == 1
+
+        row = db.execute(
+            "SELECT SpanAttributes['gen_ai.output.messages'] AS output_messages, StatusCode "
+            "FROM otel_traces "
+            "WHERE ServiceName=? AND SpanAttributes['gen_ai.request.model']=? "
+            "ORDER BY Timestamp DESC LIMIT 1",
+            [app_module._AI_HELPER_SERVICE_NAME, model],
+        ).fetchone()
+        assert row is not None
+        assert "Hello world" in str(row[0])
+        assert str(row[1]) == "STATUS_CODE_OK"
+
+
 class TestCustomDashboards:
     async def test_list_dashboards_empty(self, client):
         r = await client.get("/dashboards")
@@ -6214,6 +7042,62 @@ class TestAISettingsAndAgentFlows:
         assert "event: token" in body
         assert "event: done" in body
         assert '"answer": "hello world"' in body
+
+    async def test_ai_helper_guard_result_logs_system_prompt_for_trace(self, client, monkeypatch):
+        from app import _save_ai_setting, get_db
+
+        db = get_db()
+        _save_ai_setting(db, "ai.endpoint_url", "https://api.example.com/v1")
+        _save_ai_setting(db, "ai.model", "gpt-test")
+        _save_ai_setting(db, "ai.guard_endpoint_url", "https://guard.example.com/v1")
+        _save_ai_setting(db, "ai.guard_model", "guard-test")
+
+        captured_events: list[dict[str, object]] = []
+
+        def _capture_emit(**kwargs):
+            captured_events.append(kwargs)
+
+        async def _fake_guard(*_args, **_kwargs):
+            return (
+                True,
+                "allowed",
+                {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 1,
+                    "elapsed_ms": 7,
+                    "system_instructions": "Guard safety instruction",
+                    "input_messages": [
+                        {"role": "system", "content": "Guard safety instruction"},
+                        {"role": "user", "content": "Summarize current error trends"},
+                    ],
+                },
+            )
+
+        async def _fake_stream(*_args, **_kwargs):
+            yield {"type": "delta", "text": "ok"}
+            yield {"type": "done", "stats": {"prompt_tokens": 8, "completion_tokens": 2, "elapsed_ms": 20}}
+
+        monkeypatch.setattr(sobs_app, "_emit_ai_helper_log_event", _capture_emit)
+        monkeypatch.setattr(sobs_app, "_check_guard_model", _fake_guard)
+        monkeypatch.setattr(sobs_app, "_stream_llm_endpoint", _fake_stream)
+
+        r = await client.post(
+            "/api/ai/helper",
+            json={
+                "question": "Summarize current error trends",
+                "page": "/errors",
+                "stream": False,
+            },
+        )
+        assert r.status_code == 200
+
+        guard_event = next((e for e in captured_events if str(e.get("event_name") or "") == "guard.result"), None)
+        assert guard_event is not None
+        attrs = guard_event.get("attrs") or {}
+        assert attrs.get("gen_ai.system_instructions") == "Guard safety instruction"
+        guard_messages = json.loads(str(attrs.get("gen_ai.input.messages") or "[]"))
+        assert guard_messages[0]["role"] == "system"
+        assert guard_messages[0]["content"] == "Guard safety instruction"
 
     async def test_ai_helper_capabilities_exposes_thinking_support(self, client):
         from app import _save_ai_setting, get_db

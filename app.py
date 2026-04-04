@@ -1726,6 +1726,116 @@ def _llm_usage_stats(usage: dict[str, Any] | None, elapsed_ms: int) -> dict[str,
     }
 
 
+def _infer_genai_provider(endpoint_url: str) -> str:
+    host = urllib.parse.urlparse(str(endpoint_url or "")).netloc.lower()
+    if not host:
+        return "openai-compatible"
+    if "openai" in host:
+        return "openai"
+    if "anthropic" in host:
+        return "anthropic"
+    if "groq" in host:
+        return "groq"
+    if "google" in host or "gemini" in host:
+        return "google"
+    if "mistral" in host:
+        return "mistral"
+    if "deepseek" in host:
+        return "deepseek"
+    if "ollama" in host:
+        return "ollama"
+    return "openai-compatible"
+
+
+async def _emit_internal_genai_span(
+    *,
+    endpoint_url: str,
+    model: str,
+    input_messages: list[dict[str, Any]],
+    output_messages: list[dict[str, Any]] | None,
+    stats: dict[str, Any],
+    error_type: str = "",
+) -> None:
+    provider = _infer_genai_provider(endpoint_url)
+    status_code = "STATUS_CODE_ERROR" if error_type else "STATUS_CODE_OK"
+    trace_id = secrets.token_hex(16)
+    span_id = secrets.token_hex(8)
+    ts = _now_iso()
+    elapsed_ms = max(0, int(stats.get("elapsed_ms") or 0))
+    span_attrs: dict[str, Any] = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.provider.name": provider,
+        "gen_ai.request.model": model,
+        "gen_ai.usage.input_tokens": int(stats.get("prompt_tokens") or 0),
+        "gen_ai.usage.output_tokens": int(stats.get("completion_tokens") or 0),
+        "gen_ai.input.messages": json.dumps(input_messages, ensure_ascii=False),
+    }
+    if output_messages is not None:
+        span_attrs["gen_ai.output.messages"] = json.dumps(output_messages, ensure_ascii=False)
+    system_messages = [m.get("content") for m in input_messages if str(m.get("role", "")).strip().lower() == "system"]
+    if system_messages:
+        span_attrs["gen_ai.system_instructions"] = "\n\n".join(str(msg) for msg in system_messages if msg is not None)
+    if int(stats.get("thinking_tokens") or 0) > 0:
+        span_attrs["sobs.gen_ai.usage.thinking_tokens"] = int(stats.get("thinking_tokens") or 0)
+    if error_type:
+        span_attrs["error.type"] = error_type
+        if stats.get("error"):
+            span_attrs["error.message"] = str(stats.get("error"))
+    row = {
+        "Timestamp": ts,
+        "TraceId": trace_id,
+        "SpanId": span_id,
+        "ParentSpanId": "",
+        "TraceState": "",
+        "SpanName": f"chat {model}".strip(),
+        "SpanKind": "CLIENT",
+        "ServiceName": _AI_HELPER_SERVICE_NAME,
+        "ResourceAttributes": {},
+        "ScopeName": "sobs-ai",
+        "ScopeVersion": "",
+        "SpanAttributes": _stringify_attrs(span_attrs),
+        "Duration": elapsed_ms * 1_000_000,
+        "StatusCode": status_code,
+        "StatusMessage": str(stats.get("error") or ""),
+        "Events": {"Timestamp": [], "Name": [], "Attributes": []},
+        "Links": {"TraceId": [], "SpanId": [], "TraceState": [], "Attributes": []},
+    }
+
+    wait = bool(app.config.get("TESTING", False))
+
+    def _op(db: ChDbConnection) -> None:
+        _insert_rows_json_each_row(db, "otel_traces", [row])
+        try:
+            rules = _load_tag_rules(db)
+            if rules:
+                _apply_tag_rules(db, "ai", [row], rules)
+        except Exception:
+            app.logger.exception("auto-tag application failed for internal ai")
+
+    try:
+        _queue_write(_op, wait=wait)
+    except Exception:
+        app.logger.exception("internal ai span ingest write failed")
+
+    try:
+        await _sse_broadcast(
+            {
+                "source": "ai",
+                "ts": ts,
+                "service": _AI_HELPER_SERVICE_NAME,
+                "provider": provider,
+                "model": model,
+                "operation": "chat",
+                "duration_ms": round(elapsed_ms, 1),
+                "tokens_in": int(stats.get("prompt_tokens") or 0),
+                "tokens_out": int(stats.get("completion_tokens") or 0),
+                "error_type": error_type,
+            }
+        )
+    except Exception:
+        app.logger.exception("internal ai sse broadcast failed")
+
+
 def _tokenize_for_embedding(text: str) -> list[str]:
     if not text:
         return []
@@ -2770,6 +2880,13 @@ async def _call_llm_endpoint(
         stats = _llm_usage_stats(body.get("usage"), elapsed_ms)
         reply_text = _coerce_llm_content(body["choices"][0]["message"].get("content"))
         if reply_text.strip():
+            await _emit_internal_genai_span(
+                endpoint_url=endpoint_url,
+                model=model,
+                input_messages=messages,
+                output_messages=[{"role": "assistant", "content": reply_text}],
+                stats=stats,
+            )
             return reply_text, stats
 
         # Some servers/models emit reasoning-only output with empty message.content.
@@ -2800,6 +2917,13 @@ async def _call_llm_endpoint(
         retry_stats = _llm_usage_stats(retry_body.get("usage"), retry_elapsed_ms)
         retry_reply = _coerce_llm_content(retry_body["choices"][0]["message"].get("content"))
         if retry_reply.strip():
+            await _emit_internal_genai_span(
+                endpoint_url=endpoint_url,
+                model=model,
+                input_messages=retry_messages,
+                output_messages=[{"role": "assistant", "content": retry_reply}],
+                stats=retry_stats,
+            )
             return retry_reply, retry_stats
 
         retry_hint = _empty_content_hint(retry_body)
@@ -2814,6 +2938,14 @@ async def _call_llm_endpoint(
         retry_stats_out: dict[str, Any] = dict(retry_stats)
         retry_stats_out["error"] = error_text
         log.warning("LLM endpoint returned empty content: %s", error_text)
+        await _emit_internal_genai_span(
+            endpoint_url=endpoint_url,
+            model=model,
+            input_messages=retry_messages,
+            output_messages=[],
+            stats=retry_stats_out,
+            error_type="empty_content",
+        )
         return "", retry_stats_out
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -2834,7 +2966,16 @@ async def _call_llm_endpoint(
             type(exc).__name__,
             exc,
         )
-        return "", {"elapsed_ms": elapsed_ms, "error": error_text}
+        error_stats = {"elapsed_ms": elapsed_ms, "error": error_text}
+        await _emit_internal_genai_span(
+            endpoint_url=endpoint_url,
+            model=model,
+            input_messages=messages,
+            output_messages=[],
+            stats=error_stats,
+            error_type=type(exc).__name__,
+        )
+        return "", error_stats
 
 
 async def _stream_llm_endpoint(
@@ -2862,74 +3003,96 @@ async def _stream_llm_endpoint(
         payload["tool_choice"] = "auto"
     client = await _get_async_http_client()
     usage: dict[str, Any] = {}
+    output_parts: list[str] = []
     tool_accumulator: dict[int, dict[str, str]] = {}
     started_at = time.monotonic()
-    async with client.stream(
-        "POST",
-        _llm_chat_completions_url(endpoint_url),
-        json=payload,
-        headers=_llm_request_headers(api_key),
-        timeout=timeout,
-    ) as resp:
-        resp.raise_for_status()
-        async for line in resp.aiter_lines():
-            line = line.strip()
-            if not line or line.startswith(":"):
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if not data:
-                continue
-            if data == "[DONE]":
-                break
-            try:
-                event = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            event_usage = event.get("usage") or {}
-            if event_usage:
-                usage = event_usage
-            for tool_delta in _extract_stream_tool_call_deltas(event):
-                tool_slot = tool_accumulator.setdefault(tool_delta["index"], {"name": "", "arguments": ""})
-                if tool_delta["name"]:
-                    tool_slot["name"] = tool_delta["name"]
-                if tool_delta["arguments"]:
-                    tool_slot["arguments"] += tool_delta["arguments"]
-            delta_text = _extract_stream_delta(event)
-            if delta_text:
-                yield {"type": "delta", "text": delta_text}
-            if _extract_stream_finish_reason(event) == "tool_calls":
-                for tool_index in sorted(tool_accumulator):
-                    call = tool_accumulator[tool_index]
-                    args: dict[str, Any] = {}
-                    raw_args = call.get("arguments") or ""
-                    if raw_args:
-                        try:
-                            parsed_args = json.loads(raw_args)
-                            if isinstance(parsed_args, dict):
-                                args = parsed_args
-                        except json.JSONDecodeError:
-                            args = {}
-                    yield {"type": "tool", "tool_call": {"name": call.get("name", ""), "arguments": args}}
-                tool_accumulator.clear()
-
-    if tool_accumulator:
-        for tool_index in sorted(tool_accumulator):
-            call = tool_accumulator[tool_index]
-            args = {}
-            raw_args = call.get("arguments") or ""
-            if raw_args:
+    try:
+        async with client.stream(
+            "POST",
+            _llm_chat_completions_url(endpoint_url),
+            json=payload,
+            headers=_llm_request_headers(api_key),
+            timeout=timeout,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    break
                 try:
-                    parsed_args = json.loads(raw_args)
-                    if isinstance(parsed_args, dict):
-                        args = parsed_args
+                    event = json.loads(data)
                 except json.JSONDecodeError:
-                    args = {}
-            yield {"type": "tool", "tool_call": {"name": call.get("name", ""), "arguments": args}}
+                    continue
+                event_usage = event.get("usage") or {}
+                if event_usage:
+                    usage = event_usage
+                for tool_delta in _extract_stream_tool_call_deltas(event):
+                    tool_slot = tool_accumulator.setdefault(tool_delta["index"], {"name": "", "arguments": ""})
+                    if tool_delta["name"]:
+                        tool_slot["name"] = tool_delta["name"]
+                    if tool_delta["arguments"]:
+                        tool_slot["arguments"] += tool_delta["arguments"]
+                delta_text = _extract_stream_delta(event)
+                if delta_text:
+                    output_parts.append(delta_text)
+                    yield {"type": "delta", "text": delta_text}
+                if _extract_stream_finish_reason(event) == "tool_calls":
+                    for tool_index in sorted(tool_accumulator):
+                        call = tool_accumulator[tool_index]
+                        args: dict[str, Any] = {}
+                        raw_args = call.get("arguments") or ""
+                        if raw_args:
+                            try:
+                                parsed_args = json.loads(raw_args)
+                                if isinstance(parsed_args, dict):
+                                    args = parsed_args
+                            except json.JSONDecodeError:
+                                args = {}
+                        yield {"type": "tool", "tool_call": {"name": call.get("name", ""), "arguments": args}}
+                    tool_accumulator.clear()
 
-    elapsed_ms = int((time.monotonic() - started_at) * 1000)
-    yield {"type": "done", "stats": _llm_usage_stats(usage, elapsed_ms)}
+        if tool_accumulator:
+            for tool_index in sorted(tool_accumulator):
+                call = tool_accumulator[tool_index]
+                args = {}
+                raw_args = call.get("arguments") or ""
+                if raw_args:
+                    try:
+                        parsed_args = json.loads(raw_args)
+                        if isinstance(parsed_args, dict):
+                            args = parsed_args
+                    except json.JSONDecodeError:
+                        args = {}
+                yield {"type": "tool", "tool_call": {"name": call.get("name", ""), "arguments": args}}
+
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        stats = _llm_usage_stats(usage, elapsed_ms)
+        await _emit_internal_genai_span(
+            endpoint_url=endpoint_url,
+            model=model,
+            input_messages=messages,
+            output_messages=[{"role": "assistant", "content": "".join(output_parts)}],
+            stats=stats,
+        )
+        yield {"type": "done", "stats": stats}
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit_internal_genai_span(
+            endpoint_url=endpoint_url,
+            model=model,
+            input_messages=messages,
+            output_messages=[{"role": "assistant", "content": "".join(output_parts)}],
+            stats={"elapsed_ms": elapsed_ms, "error": str(exc)},
+            error_type=type(exc).__name__,
+        )
+        raise
 
 
 def _heuristic_guard_check(text: str) -> bool:
@@ -3084,6 +3247,9 @@ async def _check_guard_model(
             ),
         )
     )
+    guard_stats = dict(guard_stats or {})
+    guard_stats.setdefault("system_instructions", system_msg)
+    guard_stats.setdefault("input_messages", messages)
     if not reply:
         # Some guard endpoints emit verdict-like reasoning metadata while leaving
         # message.content empty. Re-parse those hints before failing closed.
@@ -3094,7 +3260,7 @@ async def _check_guard_model(
             if fallback_category:
                 reply = f"{reply}\n{fallback_category}"
         else:
-            return False, "guard_unavailable", {}
+            return False, "guard_unavailable", guard_stats
 
     # Llama Guard 3 returns a two-line format:
     #   safe              (allowed)
@@ -4698,6 +4864,161 @@ def _stringify_attrs(values: dict | None) -> dict[str, str]:
     return out
 
 
+def _genai_tool_calls_to_text(tool_calls_value: Any) -> str:
+    if not isinstance(tool_calls_value, list):
+        return ""
+    chunks: list[str] = []
+    for item in tool_calls_value:
+        if not isinstance(item, dict):
+            continue
+        function_value = item.get("function")
+        function: dict[str, Any] = function_value if isinstance(function_value, dict) else {}
+        name = str(item.get("name") or function.get("name") or "").strip()
+        arguments = item.get("arguments")
+        if arguments in (None, "", [], {}):
+            arguments = function.get("arguments")
+        label = f"tool_call:{name}" if name else "tool_call"
+        if isinstance(arguments, (dict, list)) and arguments:
+            chunks.append(f"{label} {json.dumps(arguments, ensure_ascii=False)}")
+        elif arguments not in (None, ""):
+            chunks.append(f"{label} {arguments}")
+        else:
+            chunks.append(label)
+    return "\n".join(chunks).strip()
+
+
+def _genai_message_content_to_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content).strip()
+    if content not in (None, ""):
+        return str(content)
+
+    parts_value = message.get("parts")
+    if isinstance(parts_value, list):
+        chunks: list[str] = []
+        for part in parts_value:
+            if isinstance(part, str):
+                if part:
+                    chunks.append(part)
+                continue
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type", "")).strip().lower()
+            if part_type in {"text", "reasoning"}:
+                text = part.get("content", "") or part.get("text", "")
+                if text:
+                    chunks.append(str(text))
+                continue
+            if part_type in {"tool_call", "server_tool_call"}:
+                rendered = _genai_tool_calls_to_text([part])
+                if rendered:
+                    chunks.append(rendered)
+                continue
+            if part_type in {"tool_call_response", "server_tool_call_response"}:
+                response = part.get("response")
+                if response:
+                    chunks.append(str(response))
+                else:
+                    chunks.append(part_type)
+                continue
+            part_content = part.get("content")
+            if part_content:
+                chunks.append(str(part_content))
+                continue
+            chunks.append(json.dumps(part, ensure_ascii=False))
+        rendered_parts = "\n".join(chunks).strip()
+        if rendered_parts:
+            return rendered_parts
+
+    tool_calls_text = _genai_tool_calls_to_text(message.get("tool_calls"))
+    if tool_calls_text:
+        return tool_calls_text
+
+    function_call = message.get("function_call")
+    if isinstance(function_call, dict):
+        function_text = _genai_tool_calls_to_text([{"function": function_call}])
+        if function_text:
+            return function_text
+
+    return ""
+
+
+def _genai_message_reasoning_to_text(message: dict[str, Any]) -> str:
+    """Extract model reasoning/thinking text when providers expose it separately."""
+
+    def _coerce_reasoning_text(value: Any) -> str:
+        if value in (None, ""):
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            chunks: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        chunks.append(text)
+                    continue
+                if isinstance(item, dict):
+                    text = str(item.get("text") or item.get("content") or "").strip()
+                    if text:
+                        chunks.append(text)
+                    continue
+                text = str(item or "").strip()
+                if text:
+                    chunks.append(text)
+            return "\n".join(chunks).strip()
+        if isinstance(value, dict):
+            direct = str(value.get("text") or value.get("content") or "").strip()
+            if direct:
+                return direct
+            return json.dumps(value, ensure_ascii=False)
+        return str(value).strip()
+
+    # Common provider fields.
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        text = _coerce_reasoning_text(message.get(key))
+        if text:
+            return text
+
+    # Semconv-style parts with explicit reasoning type.
+    parts_value = message.get("parts")
+    if isinstance(parts_value, list):
+        reasoning_chunks: list[str] = []
+        for part in parts_value:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").strip().lower() != "reasoning":
+                continue
+            text = _coerce_reasoning_text(part.get("content") or part.get("text"))
+            if text:
+                reasoning_chunks.append(text)
+        if reasoning_chunks:
+            return "\n".join(reasoning_chunks).strip()
+
+    return ""
+
+
+def _parse_genai_messages_json(messages_str: str) -> list[Any] | None:
+    if not messages_str:
+        return []
+    try:
+        parsed = json.loads(messages_str)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for key in ("messages", "input_messages", "output_messages", "items"):
+            nested = parsed.get(key)
+            if isinstance(nested, list):
+                return nested
+    return []
+
+
 def _extract_messages_text(messages_str: str) -> str:
     """Extract readable text from gen_ai.input.messages or gen_ai.output.messages JSON.
 
@@ -4706,19 +5027,17 @@ def _extract_messages_text(messages_str: str) -> str:
     """
     if not messages_str:
         return ""
+
     try:
-        messages = json.loads(messages_str)
+        messages = _parse_genai_messages_json(messages_str)
+        if messages is None:
+            return messages_str
         if isinstance(messages, list):
             parts = []
             for msg in messages:
                 if isinstance(msg, dict):
                     role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        # Content blocks (e.g. OpenAI vision API)
-                        content = " ".join(
-                            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
-                        )
+                    content = _genai_message_content_to_text(msg)
                     if content:
                         parts.append(f"[{role}] {content}" if role else str(content))
                 elif isinstance(msg, str):
@@ -4727,6 +5046,250 @@ def _extract_messages_text(messages_str: str) -> str:
         return messages_str
     except (json.JSONDecodeError, TypeError):
         return messages_str
+
+
+def _normalize_genai_messages_for_display(messages: Any) -> list[dict[str, Any]]:
+    """Normalize GenAI message payloads into role/content objects for UI rendering."""
+    if not isinstance(messages, list):
+        return []
+
+    role_labels = {
+        "system": "system instruction",
+        "user": "user",
+        "assistant": "assistant",
+        "tool": "tool",
+    }
+
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict):
+            msg = dict(message)
+            role = str(msg.get("role") or "").strip().lower()
+            if role:
+                msg["role"] = role
+                msg["role_label"] = role_labels.get(role, role)
+            content = _genai_message_content_to_text(msg)
+            reasoning = _genai_message_reasoning_to_text(msg)
+            if content:
+                msg["content"] = content
+            if reasoning:
+                msg["thinking_content"] = reasoning
+            if msg.get("content") is None:
+                msg["content"] = ""
+            normalized.append(msg)
+            continue
+
+        if isinstance(message, str):
+            normalized.append({"role": "", "content": message})
+            continue
+
+        normalized.append({"role": "", "content": json.dumps(message, ensure_ascii=False)})
+
+    return normalized
+
+
+def _normalize_for_dedupe(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text)
+
+
+def _dedupe_system_input_messages(
+    input_messages: list[dict[str, Any]], system_instructions: str
+) -> tuple[list[dict[str, Any]], int]:
+    canonical_system = _normalize_for_dedupe(system_instructions)
+    if not canonical_system:
+        return input_messages, 0
+
+    filtered_messages: list[dict[str, Any]] = []
+    duplicate_count = 0
+    for msg in input_messages:
+        role = str(msg.get("role") or "").strip().lower()
+        if role == "system":
+            content = _normalize_for_dedupe(msg.get("content") or "")
+            if content and content == canonical_system:
+                duplicate_count += 1
+                continue
+        filtered_messages.append(msg)
+    return filtered_messages, duplicate_count
+
+
+def _string_attr_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _first_message_content(messages: list[dict[str, Any]], roles: tuple[str, ...]) -> str:
+    target_roles = {role.strip().lower() for role in roles}
+    for message in messages:
+        role = str(message.get("role") or "").strip().lower()
+        if role not in target_roles:
+            continue
+        content = str(message.get("content") or "").strip()
+        if content:
+            return content
+    return ""
+
+
+def _summarize_ai_tool_action(raw_action: str) -> str:
+    text = str(raw_action or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text[:180]
+    if not isinstance(parsed, dict):
+        return text[:180]
+    action_type = str(parsed.get("type") or "").strip()
+    sql_where = str(parsed.get("sql_where") or "").strip()
+    target_page = str(parsed.get("target_page") or "").strip()
+    if sql_where:
+        return f"{action_type or 'action'}: {sql_where}"[:180]
+    if target_page:
+        return f"{action_type or 'action'} -> {target_page}"[:180]
+    return action_type[:180]
+
+
+def _build_ai_trace_turn_cards(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    turns: dict[str, dict[str, Any]] = {}
+    for item in spans:
+        turn_id = str(item.get("turn_id") or "").strip()
+        if not turn_id:
+            continue
+        turn = turns.setdefault(
+            turn_id,
+            {
+                "turn_id": turn_id,
+                "chat_id": str(item.get("chat_id") or "").strip(),
+                "model": str(item.get("model") or "").strip(),
+                "provider": str(item.get("provider") or "").strip(),
+                "status": "in_progress",
+                "user_message": "",
+                "assistant_message": "",
+                "request_summary": "",
+                "action_summary": "",
+                "result_summary": "",
+                "guard_allowed": None,
+                "guard_reason": "",
+                "tools": [],
+                "tool_count": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "thinking_tokens": 0,
+                "duration_ms": 0.0,
+                "started_at": str(item.get("ts") or ""),
+                "completed_at": "",
+                "event_names": [],
+                "trace_id": str(item.get("trace_id") or "").strip(),
+            },
+        )
+
+        event_name = str(item.get("event_name") or "").strip()
+        if event_name and event_name not in turn["event_names"]:
+            turn["event_names"].append(event_name)
+
+        if not turn["model"]:
+            turn["model"] = str(item.get("model") or "").strip()
+        if not turn["provider"]:
+            turn["provider"] = str(item.get("provider") or "").strip()
+        if not turn["chat_id"]:
+            turn["chat_id"] = str(item.get("chat_id") or "").strip()
+        if not turn["trace_id"]:
+            turn["trace_id"] = str(item.get("trace_id") or "").strip()
+
+        ts = str(item.get("ts") or "")
+        if ts and (not turn["started_at"] or ts < turn["started_at"]):
+            turn["started_at"] = ts
+        if ts and (not turn["completed_at"] or ts > turn["completed_at"]):
+            turn["completed_at"] = ts
+
+        turn["tokens_in"] += int(item.get("tokens_in") or 0)
+        turn["tokens_out"] += int(item.get("tokens_out") or 0)
+        turn["thinking_tokens"] += int(item.get("thinking_tokens") or 0)
+        turn["duration_ms"] = round(float(turn["duration_ms"] or 0) + float(item.get("duration_ms") or 0), 1)
+
+        user_candidate = (
+            str(item.get("input_question") or "").strip()
+            or _first_message_content(cast(list[dict[str, Any]], item.get("input_messages") or []), ("user",))
+            or str(item.get("prompt") or "").strip()
+        )
+        if user_candidate and not turn["user_message"]:
+            turn["user_message"] = user_candidate
+
+        assistant_candidate = (
+            _first_message_content(cast(list[dict[str, Any]], item.get("output_messages") or []), ("assistant",))
+            or str(item.get("response") or "").strip()
+        )
+        if assistant_candidate and (event_name == "turn.complete" or not turn["assistant_message"]):
+            turn["assistant_message"] = assistant_candidate
+
+        request_summary = str(item.get("turn_summary_request") or "").strip()
+        action_summary = str(item.get("turn_summary_action") or "").strip()
+        result_summary = str(item.get("turn_summary_result") or "").strip()
+        if request_summary and not turn["request_summary"]:
+            turn["request_summary"] = request_summary
+        if action_summary and not turn["action_summary"]:
+            turn["action_summary"] = action_summary
+        if result_summary and not turn["result_summary"]:
+            turn["result_summary"] = result_summary
+
+        if event_name == "guard.result":
+            turn["guard_allowed"] = _string_attr_truthy(item.get("guard_allowed"))
+            turn["guard_reason"] = str(item.get("guard_reason") or "").strip()
+        elif event_name == "turn.blocked":
+            turn["status"] = "blocked"
+            turn["guard_reason"] = str(item.get("guard_reason") or item.get("error_message") or "").strip()
+        elif event_name == "turn.error":
+            turn["status"] = "failed"
+        elif event_name == "turn.cancelled":
+            turn["status"] = "cancelled"
+        elif event_name == "turn.complete" and turn["status"] == "in_progress":
+            turn["status"] = "completed"
+
+        if event_name in {"tool.proposed", "tool.executed"}:
+            tool_name = str(item.get("tool_name") or "propose_ui_action").strip()
+            tool_status = str(
+                item.get("tool_status") or ("executed" if event_name == "tool.executed" else "proposed")
+            ).strip()
+            tool_summary = str(item.get("tool_summary") or "").strip() or _summarize_ai_tool_action(
+                str(item.get("tool_action") or "")
+            )
+            tool_key = (
+                str(item.get("tool_action_id") or "").strip(),
+                tool_name,
+                tool_status,
+                tool_summary,
+            )
+            if tool_key not in {
+                (
+                    str(existing.get("action_id") or "").strip(),
+                    str(existing.get("name") or "").strip(),
+                    str(existing.get("status") or "").strip(),
+                    str(existing.get("summary") or "").strip(),
+                )
+                for existing in turn["tools"]
+            }:
+                turn["tools"].append(
+                    {
+                        "name": tool_name,
+                        "status": tool_status,
+                        "summary": tool_summary,
+                        "action_id": str(item.get("tool_action_id") or "").strip(),
+                    }
+                )
+
+    turn_cards = sorted(
+        turns.values(), key=lambda item: (str(item.get("started_at") or ""), str(item.get("turn_id") or ""))
+    )
+    for index, turn in enumerate(turn_cards, start=1):
+        turn["index"] = index
+        turn["tool_count"] = len(cast(list[dict[str, Any]], turn.get("tools") or []))
+        if not str(turn.get("request_summary") or "").strip():
+            turn["request_summary"] = str(turn.get("user_message") or "").strip()
+        if not str(turn.get("result_summary") or "").strip():
+            turn["result_summary"] = str(turn.get("assistant_message") or "").strip()
+    return turn_cards
 
 
 def _map_to_dict(value) -> dict:
@@ -5738,7 +6301,8 @@ async def ingest_traces():
         )
         # Also broadcast as an AI event when the span carries GenAI attributes
         provider = event.attrs.get("gen_ai.provider.name") or event.attrs.get("gen_ai.system", "")
-        if provider:
+        operation_name = str(event.attrs.get("gen_ai.operation.name", ""))
+        if provider or operation_name:
             await _sse_broadcast(
                 {
                     "source": "ai",
@@ -5969,6 +6533,9 @@ async def ingest_ai():
     if payload.get("output_messages") is not None:
         raw = payload["output_messages"]
         span_attrs["gen_ai.output.messages"] = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+    if payload.get("system_instructions") is not None:
+        raw = payload["system_instructions"]
+        span_attrs["gen_ai.system_instructions"] = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
     # Legacy sobs fields (kept for backward-compat / UI fallback)
     if payload.get("prompt"):
         span_attrs["sobs.gen_ai.prompt"] = str(payload["prompt"])
@@ -6493,10 +7060,7 @@ async def summary():
         "errors_total": len(error_items),
         "spans": db.execute("SELECT COUNT(*) FROM otel_traces").fetchone()[0],
         "rum": db.execute("SELECT COUNT(*) FROM hyperdx_sessions").fetchone()[0],
-        "ai": db.execute(
-            "SELECT COUNT(*) FROM otel_traces "
-            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
-        ).fetchone()[0],
+        "ai": db.execute("SELECT COUNT(*) FROM otel_traces " f"WHERE {_AI_SPAN_CONDITION}").fetchone()[0],
         "services": [
             r[0]
             for r in db.execute(
@@ -6542,7 +7106,7 @@ async def summary():
         "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) ti, "
         "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) to_ "
         "FROM otel_traces "
-        "WHERE SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '' "
+        f"WHERE {_AI_SPAN_CONDITION} "
         "GROUP BY model"
     ).fetchall()
     return await render_template(
@@ -6952,6 +7516,15 @@ _AI_TRACE_PROMPT_SQL = (
     "SpanAttributes['gen_ai.input.messages'])"
 )
 _AI_TRACE_RESPONSE_SQL = "coalesce(SpanAttributes['sobs.gen_ai.response'], " "SpanAttributes['gen_ai.output.messages'])"
+
+# Semantic convention-first condition: a span is an AI span if it carries any of the
+# canonical GenAI semantic convention attributes (gen_ai.provider.name, gen_ai.operation.name)
+# or the legacy gen_ai.system field used by older instrumentations.
+_AI_SPAN_CONDITION = (
+    "(SpanAttributes['gen_ai.provider.name'] != '' "
+    "OR SpanAttributes['gen_ai.system'] != '' "
+    "OR SpanAttributes['gen_ai.operation.name'] != '')"
+)
 
 
 def _replace_sql_outside_single_quotes(sql: str, replacements: list[tuple[str, str]]) -> str:
@@ -9636,7 +10209,7 @@ async def view_ai():
     conditions = []
     params = []
     error_msg = time_error
-    base_ai_condition = "(SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
+    base_ai_condition = _AI_SPAN_CONDITION
     time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
     where = "WHERE " + base_ai_condition
     if sql_where and not error_msg:
@@ -9704,7 +10277,7 @@ async def view_ai():
                     rows = db.execute(
                         f"SELECT Timestamp, ServiceName, TraceId, SpanName, Duration, SpanAttributes "
                         f"FROM otel_traces WHERE TraceId IN ({placeholders}) "
-                        "AND (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
+                        f"AND {_AI_SPAN_CONDITION} "
                         "ORDER BY Timestamp ASC",
                         trace_ids,
                     ).fetchall()
@@ -9751,6 +10324,7 @@ async def view_ai():
         # Coalesce prompt/response: OTel standard fields first, sobs legacy fields as fallback
         input_messages_raw = str(attrs.get("gen_ai.input.messages", ""))
         output_messages_raw = str(attrs.get("gen_ai.output.messages", ""))
+        system_instructions_raw = str(attrs.get("gen_ai.system_instructions", ""))
         prompt = _extract_messages_text(input_messages_raw) or str(attrs.get("sobs.gen_ai.prompt", ""))
         response = _extract_messages_text(output_messages_raw) or str(attrs.get("sobs.gen_ai.response", ""))
         tokens_in = _safe_attr_int(attrs, "gen_ai.usage.input_tokens")
@@ -9761,27 +10335,22 @@ async def view_ai():
         tokens_per_sec = round(tokens_out / (duration_ms / 1000), 1) if duration_ms > 0 and tokens_out > 0 else 0
         # Additional OTel GenAI attributes
         finish_reason = str(attrs.get("gen_ai.response.finish_reason", ""))
-        span_name = str(r["SpanName"] or "")
+        item_span_name = str(r["SpanName"] or "")
         temperature = str(attrs.get("gen_ai.request.temperature", ""))
         max_tokens = str(attrs.get("gen_ai.request.max_tokens", ""))
         thinking_tokens = _safe_attr_int(attrs, "gen_ai.usage.thinking_tokens")
+        event_name = str(attrs.get("sobs.ai.event") or "")
+        if not event_name and item_span_name.startswith("ai."):
+            event_name = item_span_name[3:]
         # Build structured messages for conversation view
         input_messages = []
         output_messages = []
-        try:
-            if input_messages_raw:
-                parsed = json.loads(input_messages_raw)
-                if isinstance(parsed, list):
-                    input_messages = parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-        try:
-            if output_messages_raw:
-                parsed = json.loads(output_messages_raw)
-                if isinstance(parsed, list):
-                    output_messages = parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
+        input_messages = _normalize_genai_messages_for_display(_parse_genai_messages_json(input_messages_raw))
+        output_messages = _normalize_genai_messages_for_display(_parse_genai_messages_json(output_messages_raw))
+        input_messages, deduped_system_message_count = _dedupe_system_input_messages(
+            input_messages,
+            system_instructions_raw,
+        )
         # Build raw attributes dict for JSON inspector
         raw_attrs = dict(attrs)
         row_id = _error_id(ts, r["ServiceName"], provider, req_model + err_type + msg, r["TraceId"], "")
@@ -9793,20 +10362,46 @@ async def view_ai():
                 "provider": provider,
                 "model": req_model,
                 "operation": operation,
-                "span_name": span_name,
-                "is_llm_call": bool(req_model and (tokens_in > 0 or tokens_out > 0 or response)),
+                "span_name": item_span_name,
+                "is_llm_call": bool(
+                    req_model
+                    and (
+                        tokens_in > 0
+                        or tokens_out > 0
+                        or response
+                        or input_messages
+                        or output_messages
+                        or bool(system_instructions_raw.strip())
+                    )
+                ),
                 "prompt": prompt,
                 "response": response,
                 "input_messages": input_messages,
                 "output_messages": output_messages,
                 "input_messages_json": input_messages_raw,
                 "output_messages_json": output_messages_raw,
+                "system_instructions": system_instructions_raw,
+                "system_message_deduped_count": deduped_system_message_count,
                 "tokens_in": tokens_in,
                 "tokens_out": tokens_out,
                 "thinking_tokens": thinking_tokens,
                 "duration_ms": duration_ms,
                 "tokens_per_sec": tokens_per_sec,
                 "trace_id": r["TraceId"],
+                "chat_id": str(attrs.get("gen_ai.chat_id", "")),
+                "turn_id": str(attrs.get("gen_ai.turn_id", "") or attrs.get("gen_ai.response.id", "")),
+                "event_name": event_name,
+                "input_question": str(attrs.get("gen_ai.input.question", "")),
+                "turn_summary_request": str(attrs.get("gen_ai.turn.summary.request", "")),
+                "turn_summary_action": str(attrs.get("gen_ai.turn.summary.action", "")),
+                "turn_summary_result": str(attrs.get("gen_ai.turn.summary.result", "")),
+                "guard_allowed": attrs.get("gen_ai.guard.allowed", ""),
+                "guard_reason": str(attrs.get("gen_ai.guard.reason", "")),
+                "tool_name": str(attrs.get("gen_ai.tool.name", "")),
+                "tool_status": str(attrs.get("sobs.ai.action.status", "")),
+                "tool_summary": str(attrs.get("sobs.ai.tool.summary", "")),
+                "tool_action": str(attrs.get("sobs.ai.tool.action", "")),
+                "tool_action_id": str(attrs.get("sobs.ai.action_id", "")),
                 "error_type": err_type,
                 "error_message": msg,
                 "finish_reason": finish_reason,
@@ -9869,6 +10464,7 @@ async def view_ai():
             grp["services"] = sorted(grp["services"])
             grp["models"] = sorted(grp["models"])
             grp["operations"] = sorted(grp["operations"])
+            grp["turn_cards"] = _build_ai_trace_turn_cards(cast(list[dict[str, Any]], grp["spans"]))
             trace_groups.append(grp)
 
     metadata_errors: list[str] = []
@@ -9882,8 +10478,8 @@ async def view_ai():
         services = [
             row[0]
             for row in db.execute(
-                "SELECT DISTINCT ServiceName FROM otel_traces "
-                "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
+                f"SELECT DISTINCT ServiceName FROM otel_traces "
+                f"WHERE {_AI_SPAN_CONDITION} "
                 "AND ServiceName!='' ORDER BY ServiceName"
             ).fetchall()
         ]
@@ -9895,7 +10491,7 @@ async def view_ai():
             row[0]
             for row in db.execute(
                 "SELECT DISTINCT SpanAttributes['gen_ai.request.model'] AS model FROM otel_traces "
-                "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
+                f"WHERE {_AI_SPAN_CONDITION} "
                 "AND SpanAttributes['gen_ai.request.model'] != '' ORDER BY model"
             ).fetchall()
         ]
@@ -9907,7 +10503,7 @@ async def view_ai():
             row[0]
             for row in db.execute(
                 "SELECT DISTINCT SpanAttributes['gen_ai.operation.name'] AS op FROM otel_traces "
-                "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
+                f"WHERE {_AI_SPAN_CONDITION} "
                 "AND SpanAttributes['gen_ai.operation.name'] != '' ORDER BY op"
             ).fetchall()
         ]
@@ -9918,8 +10514,8 @@ async def view_ai():
         span_names = [
             row[0]
             for row in db.execute(
-                "SELECT DISTINCT SpanName FROM otel_traces "
-                "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
+                f"SELECT DISTINCT SpanName FROM otel_traces "
+                f"WHERE {_AI_SPAN_CONDITION} "
                 "AND SpanName != '' ORDER BY SpanName"
             ).fetchall()
         ]
@@ -9934,7 +10530,7 @@ async def view_ai():
             "COUNT(*) cnt, "
             "countIf(SpanAttributes['error.type'] != '') errors "
             "FROM otel_traces "
-            "WHERE (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
+            f"WHERE {_AI_SPAN_CONDITION}"
         ).fetchone()
         if totals_row:
             totals = {
@@ -9999,7 +10595,7 @@ async def export_ai_training():
         max_rows = 1000
 
     conditions = [
-        "(SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')",
+        _AI_SPAN_CONDITION,
     ]
     params: list = []
     if service:
@@ -13575,7 +14171,7 @@ async def api_logs_validate_filter():
 @require_basic_auth
 async def api_ai_field_hints():
     db = get_db()
-    base_where = "(SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '')"
+    base_where = _AI_SPAN_CONDITION
 
     fields = [
         {"name": "service", "column": "ServiceName", "type": "string", "values": []},
@@ -13792,10 +14388,7 @@ async def api_ai_validate_filter():
 
         db = get_db()
         db.execute(
-            "SELECT 1 FROM otel_traces "
-            f"WHERE ({safe_sql}) "
-            "AND (SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '') "
-            "LIMIT 1"
+            "SELECT 1 FROM otel_traces " f"WHERE ({safe_sql}) " f"AND {_AI_SPAN_CONDITION} " "LIMIT 1"
         ).fetchone()
     except Exception as exc:
         issues.append({"level": "error", "message": _public_dashboard_query_error(exc)})
@@ -15670,6 +16263,27 @@ def _sse_json_event(event_name: str, payload: dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _guard_telemetry_attrs(allowed: bool, guard_reason: str, guard_stats: dict[str, Any]) -> dict[str, Any]:
+    attrs: dict[str, Any] = {
+        "gen_ai.guard.allowed": allowed,
+        "gen_ai.guard.reason": guard_reason,
+        "gen_ai.usage.input_tokens": guard_stats.get("prompt_tokens", 0),
+        "gen_ai.usage.output_tokens": guard_stats.get("completion_tokens", 0),
+        "gen_ai.response.latency_ms": guard_stats.get("elapsed_ms", 0),
+    }
+    system_prompt = str(guard_stats.get("system_instructions") or "").strip()
+    if system_prompt:
+        attrs["gen_ai.system_instructions"] = system_prompt
+
+    input_messages = guard_stats.get("input_messages")
+    if input_messages is not None:
+        if isinstance(input_messages, str):
+            attrs["gen_ai.input.messages"] = input_messages
+        else:
+            attrs["gen_ai.input.messages"] = json.dumps(input_messages, ensure_ascii=False)
+    return attrs
+
+
 def _build_ai_turn_logs_url(chat_id: str, turn_id: str) -> str:
     where = (
         "ServiceName = '"
@@ -16041,13 +16655,7 @@ async def ai_helper():
         guard_model=guard_model,
         thinking_level=thinking_level,
         body=f"Guard verdict: {guard_reason}",
-        attrs={
-            "gen_ai.guard.allowed": allowed,
-            "gen_ai.guard.reason": guard_reason,
-            "gen_ai.usage.input_tokens": guard_stats.get("prompt_tokens", 0),
-            "gen_ai.usage.output_tokens": guard_stats.get("completion_tokens", 0),
-            "gen_ai.response.latency_ms": guard_stats.get("elapsed_ms", 0),
-        },
+        attrs=_guard_telemetry_attrs(allowed, guard_reason, guard_stats),
     )
     if not allowed:
         error_message = f"Request blocked by safety guard: {guard_reason}"
@@ -17833,13 +18441,7 @@ async def api_query_ask():
         guard_model=guard_model,
         thinking_level="off",
         body=f"Guard verdict: {guard_reason}",
-        attrs={
-            "gen_ai.guard.allowed": allowed,
-            "gen_ai.guard.reason": guard_reason,
-            "gen_ai.usage.input_tokens": guard_stats.get("prompt_tokens", 0),
-            "gen_ai.usage.output_tokens": guard_stats.get("completion_tokens", 0),
-            "gen_ai.response.latency_ms": guard_stats.get("elapsed_ms", 0),
-        },
+        attrs=_guard_telemetry_attrs(allowed, guard_reason, guard_stats),
     )
     if not allowed:
         return (
@@ -18313,13 +18915,7 @@ async def api_query_run():
             guard_model=guard_model,
             thinking_level="off",
             body=f"Guard verdict: {guard_reason}",
-            attrs={
-                "gen_ai.guard.allowed": allowed,
-                "gen_ai.guard.reason": guard_reason,
-                "gen_ai.usage.input_tokens": guard_stats.get("prompt_tokens", 0),
-                "gen_ai.usage.output_tokens": guard_stats.get("completion_tokens", 0),
-                "gen_ai.response.latency_ms": guard_stats.get("elapsed_ms", 0),
-            },
+            attrs=_guard_telemetry_attrs(allowed, guard_reason, guard_stats),
         )
         if allowed:
             schema_context = await asyncio.to_thread(ChdbSqlRunner(db).get_schema_context)
