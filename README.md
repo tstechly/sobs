@@ -1,5 +1,8 @@
 # SOBS – Simple Observe Stack
 
+## This is still very much a WIP - Alpha. Hoping to get a v1 one out by April 10.
+It is functional and being used, needs more polish and the custom (non-OTEL) tables may change.
+
 **SOBS** is a lightweight, single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), and **AI call transparency** — all in one tiny container you can run as a standalone pod or sidecar.
 
 ![Summary AI Assistant](static/help/summary_ai_assistant.png)
