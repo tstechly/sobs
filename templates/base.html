@@ -266,6 +266,16 @@
         </a>
       </li>
       <li class="nav-item">
+        <a href="{{ url_for('view_web_traffic') }}" class="nav-link {% if request.endpoint == 'view_web_traffic' %}active{% endif %}" title="Web Traffic">
+          <i class="bi bi-map"></i><span class="sb-label">Web Traffic</span>
+        </a>
+      </li>
+      <li class="nav-item">
+        <a href="{{ url_for('view_enrichment_cve') }}" class="nav-link {% if request.endpoint == 'view_enrichment_cve' %}active{% endif %}" title="CVE Findings">
+          <i class="bi bi-shield-exclamation"></i><span class="sb-label">CVE</span>
+        </a>
+      </li>
+      <li class="nav-item">
         <a href="{{ url_for('view_ai') }}" class="nav-link {% if request.endpoint == 'view_ai' %}active{% endif %}" title="AI">
           <i class="bi bi-cpu"></i><span class="sb-label">AI</span>
         </a>
@@ -290,7 +300,7 @@
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_settings') }}" class="nav-link {% if request.endpoint in ('view_settings', 'view_tag_rules', 'view_ai_settings', 'view_agent_rules', 'view_notifications', 'view_k8s_settings') %}active{% endif %}" title="Settings">
+        <a href="{{ url_for('view_settings') }}" class="nav-link {% if request.endpoint in ('view_settings', 'view_tag_rules', 'view_ai_settings', 'view_agent_rules', 'view_notifications', 'view_enrichment_settings', 'view_k8s_settings') %}active{% endif %}" title="Settings">
           <i class="bi bi-gear"></i><span class="sb-label">Settings</span>
         </a>
       </li>
