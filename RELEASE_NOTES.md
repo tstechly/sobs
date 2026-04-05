@@ -4,19 +4,10 @@
 
 ### Added
 
-- Logs page Query Statistics panel now supports query-scoped summaries (all matching rows across the active query, not only the visible page).
-- Added a manual Run advanced analysis action on the Logs page for deeper message intelligence.
-- Advanced analysis includes repeated message pattern fingerprints, error-family clustering, top keywords, and optimization hints.
-- Added Logs SQL assistant improvements: `/api/logs/field-hints`, `/api/logs/validate-filter`, `has_tag()` helper support, and persisted OTEL log-attribute key hints.
-- Added saved Reports across filtered pages (Logs, Traces, Errors, Metrics, RUM, AI) with `/reports` UI and `/api/reports` CRUD API.
-- Added Natural-Language Query page (`/query`) with NL→SQL generation, read-only SQL enforcement, schema endpoint, SQL re-run/refine flows, and add-to-dashboard integration.
-- Added notification auto-make flow from Metrics Rules (preview + create) and per-rule quick action to generate matching notification rules.
-- Added browser push VAPID key lifecycle endpoints and UI management (`/api/notifications/vapid-keygen`, `/api/notifications/vapid-keys`, `/api/notifications/vapid-public-key`).
-- Added optional settings-at-rest encryption for sensitive app settings values via `SOBS_SETTINGS_ENCRYPTION_KEY` or `SOBS_SETTINGS_ENCRYPTION_KEY_FILE`.
-- Added automated agent trigger execution from notification/anomaly rule checks for matching `anomaly_rule` and `tag_rule` agent rules.
-- Added cluster-managed AI configuration overrides via env or file inputs for LLM, guard, and DLP settings (`SOBS_AI_*` and `SOBS_AI_*_FILE`).
-- Added an Ollama-first local AI startup script (`scripts/start_ollama_ai_test.sh`) and updated docs to make local Ollama the default manual testing path.
-- Added Prometheus/OTEL integration examples under `examples/prometheus/` and expanded `scripts/load_example.py` with Prometheus-style system metric families (CPU, memory, disk, network, filesystem/load).
+- Added Web Traffic page with browser context enrichment: delta-posting RUM optimization (87% payload reduction via session caching), 5 aggregation endpoints (browsers, OS, timezones, languages, devices), ECharts visualizations, and IP geolocation via local geoip2fast (no API keys, MIT license).
+- Added CVE vulnerability scanning: OSV.dev integration with daily auto-scan (30s after startup, 24h interval), library inventory from release registry + OTEL ResourceAttributes + instrumentation scopes, and dedicated CVE findings page with severity filtering.
+- Added Enrichment Settings page for configuring IP geolocation and CVE scanning behavior.
+- Added browser context capture in RUM client: timezone, language, platform, browser/OS versions, device class, screen resolution with automatic delta posting to reduce network bandwidth and storage costs.
 
 ### Changed
 
@@ -30,6 +21,9 @@
 - Light-mode contrast/readability fixes were applied across Errors/Traces stack-trace surfaces, chart-help/code panels, metrics rules surfaces, and legacy dark-table usage.
 
 ### Testing
+- Added 6 tests for web traffic aggregation endpoints (browsers, OS, timezones, languages, devices).
+- Added 3 tests for RUM browser context delta posting: full context storage, delta cache retrieval, and backward compatibility.
+- Added tests for CVE scanning endpoints, library version extraction from OTEL, and geoip2fast local lookup.
 
 - Added UI tests for query-scoped statistics behavior and manual advanced-analysis rendering.
 - Added backend tests for guard fail-closed behavior, settings encryption/decryption, action gating, and automated agent trigger execution.
