@@ -9315,8 +9315,7 @@ def _validate_user_sql_where(sql_where: str) -> None:
     if _UNSAFE_WHERE_PATTERNS.search(sql_where):
         raise ValueError(
             "SQL filter contains a disallowed keyword. "
-            "Write operations (INSERT, UPDATE, DELETE, DROP, …) and set operations "
-            "(UNION, INTERSECT, EXCEPT) are not permitted in filter expressions."
+            "Only comparison and logical expressions are permitted in filter fields."
         )
 
 
