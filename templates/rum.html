@@ -1498,7 +1498,7 @@
         maxEdge: 1400
       },
       upload: async function (envelope) {
-        const resp = await fetch('/api/replay/upload', {
+        const resp = await fetch('api/replay/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(envelope)
@@ -1633,7 +1633,7 @@
   }
 
   group.addEventListener('show.bs.dropdown', function () {
-    fetch('/api/reports?page_type=rum')
+    fetch({{ url_for('api_list_reports') | tojson }} + '?page_type=rum')
       .then(r => r.json())
       .then(reports => {
         if (!reports.length) {
