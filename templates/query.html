@@ -85,6 +85,11 @@
 </div>
 
 <div id="errorAlert" class="alert alert-danger d-none" role="alert"></div>
+<div id="errorActions" class="d-none mb-3">
+  <button id="copyErrorForAiBtn" class="btn btn-sm btn-outline-warning" type="button" title="Copy query failure details for AI assistance">
+    <i class="bi bi-robot me-1"></i>Copy for AI
+  </button>
+</div>
 
 <!-- Generated SQL -->
 <div id="sqlSection" class="d-none mb-4">
@@ -316,6 +321,8 @@
   var questionHistorySelect = document.getElementById('questionHistorySelect');
   var clearQuestionHistoryBtn = document.getElementById('clearQuestionHistoryBtn');
   var errorAlert = document.getElementById('errorAlert');
+  var errorActions = document.getElementById('errorActions');
+  var copyErrorForAiBtn = document.getElementById('copyErrorForAiBtn');
   var queryStatus = document.getElementById('queryStatus');
   var queryStatusIcon = document.getElementById('queryStatusIcon');
   var queryStatusText = document.getElementById('queryStatusText');
@@ -389,6 +396,7 @@
   var currentQuestion = '';
   var lastRenderedSql = '';
   var currentChartSpec = '';
+  var currentLlmStats = {};
   var preferredChartType = '';
   var preferredChartInstruction = '';
   var thinkingLevel = 'off';
@@ -598,7 +606,18 @@
     });
 
     hideError();
-    setQueryStatus('loading', 'Running query...');
+    currentLlmStats = {};
+    var stopProgress = startProgressStages(
+      [
+        'Analyzing question and validating safety...',
+        'Generating SQL query...',
+        'Validating SQL and preparing execution...',
+        'Executing query and loading results...',
+        'Building chart output (if enabled)...'
+      ],
+      30000,
+      'This is taking a little longer than expected. Please wait...'
+    );
     sqlSection.classList.add('d-none');
     traceMeta.classList.add('d-none');
     tableSection.classList.add('d-none');
@@ -620,6 +639,7 @@
         })
       });
       var data = await resp.json();
+      currentLlmStats = (data && data.llm_stats && typeof data.llm_stats === 'object') ? data.llm_stats : {};
 
       if (!data.ok) {
         setQueryStatus('error', 'Query failed.');
@@ -641,6 +661,7 @@
       setQueryStatus('error', 'Request failed.');
       showError('Request failed: ' + err.message);
     } finally {
+      stopProgress();
       setLoading(false);
     }
   }
@@ -823,13 +844,125 @@
     askBtnLabel.classList.toggle('d-none', on);
   }
 
+  function startProgressStages(stages, slowAfterMs, slowMessage) {
+    var phaseList = Array.isArray(stages) ? stages.filter(function (s) { return !!s; }) : [];
+    if (phaseList.length === 0) {
+      phaseList = ['Working on your request...'];
+    }
+
+    var slowThresholdMs = Number.isFinite(slowAfterMs) && slowAfterMs > 0 ? slowAfterMs : 30000;
+    var longMessage = slowMessage || 'This is taking a little longer than expected. Please wait...';
+    var phaseDurationMs = 6500;
+    var stageIndex = 0;
+    var longMode = false;
+
+    setQueryStatus('loading', phaseList[0]);
+
+    var phaseTimer = window.setInterval(function () {
+      if (longMode) return;
+      stageIndex += 1;
+      if (stageIndex >= phaseList.length) {
+        stageIndex = phaseList.length - 1;
+      }
+      setQueryStatus('loading', phaseList[stageIndex]);
+    }, phaseDurationMs);
+
+    var slowTimer = window.setTimeout(function () {
+      longMode = true;
+      setQueryStatus('warning', longMessage);
+    }, slowThresholdMs);
+
+    return function stopProgressStages() {
+      window.clearInterval(phaseTimer);
+      window.clearTimeout(slowTimer);
+    };
+  }
+
   function showError(msg) {
     errorAlert.textContent = msg;
     errorAlert.classList.remove('d-none');
+    if (errorActions) {
+      errorActions.classList.remove('d-none');
+    }
   }
 
   function hideError() {
     errorAlert.classList.add('d-none');
+    if (errorActions) {
+      errorActions.classList.add('d-none');
+    }
+  }
+
+  function buildCopyForAiPrompt() {
+    var normalizeText = function (value) { return String(value || '').replace(/\r\n?/g, '\n').trim(); };
+    var toSingleLine = function (value) { return normalizeText(value).replace(/\n+/g, ' '); };
+    var escapeInlineMd = function (value) {
+      return toSingleLine(value).replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+    };
+    var fenceFor = function (value) {
+      var content = normalizeText(value);
+      var runs = content.match(/`+/g) || [];
+      var longestRun = 0;
+      runs.forEach(function (run) {
+        if (run.length > longestRun) {
+          longestRun = run.length;
+        }
+      });
+      return '`'.repeat(Math.max(3, longestRun + 1));
+    };
+
+    var question = normalizeText(currentQuestion || questionInput.value || '');
+    var sqlText = normalizeText(getSqlForExecution() || lastRenderedSql || sqlDisplay.textContent || '');
+    var errorText = normalizeText(errorAlert && errorAlert.textContent ? errorAlert.textContent : '');
+    var preferredType = normalizeText(preferredChartType || 'auto');
+    var chartHint = normalizeText(preferredChartInstruction || '');
+    var llmStats = currentLlmStats && typeof currentLlmStats === 'object' ? currentLlmStats : {};
+    var totalStats = llmStats.totals && typeof llmStats.totals === 'object' ? llmStats.totals : {};
+    var lines = [
+      '## Query Iteration Request',
+      '',
+      '**Question:** ' + escapeInlineMd(question || '(not available)'),
+      '**Thinking level:** `' + escapeInlineMd(thinkingLevel || 'off') + '`',
+      '**Preferred chart type:** `' + escapeInlineMd(preferredType || 'auto') + '`',
+      '**Generate chart enabled:** `' + (chartCheck.checked ? 'yes' : 'no') + '`',
+    ];
+
+    if (chartHint) {
+      lines.push('**Chart instruction:** ' + escapeInlineMd(chartHint));
+    }
+
+    lines.push(
+      '**LLM total prompt tokens:** `' + String(Number(totalStats.prompt_tokens || 0)) + '`',
+      '**LLM total completion tokens:** `' + String(Number(totalStats.completion_tokens || 0)) + '`',
+      '**LLM total thinking tokens:** `' + String(Number(totalStats.thinking_tokens || 0)) + '`',
+      '**LLM total elapsed ms:** `' + String(Number(totalStats.elapsed_ms || 0)) + '`'
+    );
+
+    Object.keys(llmStats).forEach(function (stageName) {
+      if (stageName === 'totals') return;
+      var stage = llmStats[stageName];
+      if (!stage || typeof stage !== 'object') return;
+      lines.push(
+        '',
+        '**' + escapeInlineMd(stageName.replace(/_/g, ' ')) + ':** prompt=' + String(Number(stage.prompt_tokens || 0)) +
+          ', completion=' + String(Number(stage.completion_tokens || 0)) +
+          ', thinking=' + String(Number(stage.thinking_tokens || 0)) +
+          ', elapsed_ms=' + String(Number(stage.elapsed_ms || 0))
+      );
+    });
+
+    if (sqlText) {
+      var sqlFence = fenceFor(sqlText);
+      lines.push('', '**Generated SQL:**', sqlFence + 'sql', sqlText, sqlFence);
+    }
+
+    if (errorText) {
+      var errFence = fenceFor(errorText);
+      lines.push('', '**Execution error:**', errFence, errorText, errFence);
+    }
+
+    lines.push('', 'Please return a corrected ClickHouse SQL query that resolves the error and still answers the question.');
+    return lines.join('\n');
   }
 
   function updateQueryOptionsHint() {
@@ -946,6 +1079,7 @@
 
   function applyQueryResponse(data, options) {
     var opts = options || {};
+    currentLlmStats = (data && data.llm_stats && typeof data.llm_stats === 'object') ? data.llm_stats : {};
 
     cachedSqlNotice.classList.toggle('d-none', !opts.cached);
 
@@ -1274,6 +1408,29 @@
     });
   });
 
+  if (copyErrorForAiBtn) {
+    copyErrorForAiBtn.addEventListener('click', async function () {
+      var errorText = String(errorAlert && errorAlert.textContent ? errorAlert.textContent : '').trim();
+      if (!errorText) {
+        setQueryStatus('warning', 'No query error available to copy.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(buildCopyForAiPrompt());
+        var original = copyErrorForAiBtn.innerHTML;
+        copyErrorForAiBtn.innerHTML = '<i class="bi bi-check2 me-1"></i>Copied!';
+        copyErrorForAiBtn.classList.replace('btn-outline-warning', 'btn-warning');
+        setTimeout(function () {
+          copyErrorForAiBtn.innerHTML = original;
+          copyErrorForAiBtn.classList.replace('btn-warning', 'btn-outline-warning');
+        }, 2000);
+      } catch (err) {
+        setQueryStatus('error', 'Could not copy error prompt.');
+        showError('Could not copy to clipboard: ' + err.message);
+      }
+    });
+  }
+
   var copyChartSpecBtn = document.getElementById('copyChartSpecBtn');
   if (copyChartSpecBtn) {
     copyChartSpecBtn.addEventListener('click', function (e) {
@@ -1349,7 +1506,17 @@
     exitSqlEditMode(true);
 
     hideError();
-    setQueryStatus('loading', 'Executing SQL...');
+    currentLlmStats = {};
+    var stopProgress = startProgressStages(
+      [
+        'Validating SQL safety and structure...',
+        'Executing SQL query...',
+        'Preparing table results...',
+        'Generating chart output (if enabled)...'
+      ],
+      30000,
+      'This is taking a little longer than expected. Please wait...'
+    );
     tableSection.classList.add('d-none');
     chartSection.classList.add('d-none');
     setLoading(true);
@@ -1368,6 +1535,7 @@
         })
       });
       var data = await resp.json();
+      currentLlmStats = (data && data.llm_stats && typeof data.llm_stats === 'object') ? data.llm_stats : {};
       if (!data.ok) {
         setQueryStatus('error', 'SQL execution failed.');
         showError(data.error || 'Unknown error');
@@ -1388,6 +1556,7 @@
       setQueryStatus('error', 'SQL execution failed.');
       showError('SQL execution failed: ' + err.message);
     } finally {
+      stopProgress();
       setLoading(false);
     }
   });

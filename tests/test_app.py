@@ -10217,6 +10217,165 @@ class TestChdbSqlRunner:
             runner.run_sql("DROP TABLE otel_logs")
 
     # ------------------------------------------------------------------
+    # Table allowlist – permitted tables
+    # ------------------------------------------------------------------
+
+    def test_validate_sql_otel_logs_is_allowed(self):
+        """Querying otel_logs is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT Timestamp FROM otel_logs LIMIT 1")
+
+    def test_validate_sql_otel_traces_is_allowed(self):
+        """Querying otel_traces is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT TraceId FROM otel_traces LIMIT 1")
+
+    def test_validate_sql_otel_metrics_gauge_is_allowed(self):
+        """Querying otel_metrics_gauge is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT MetricName FROM otel_metrics_gauge LIMIT 1")
+
+    def test_validate_sql_otel_metrics_sum_is_allowed(self):
+        """Querying otel_metrics_sum is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT MetricName FROM otel_metrics_sum LIMIT 1")
+
+    def test_validate_sql_otel_metrics_histogram_is_allowed(self):
+        """Querying otel_metrics_histogram is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT MetricName FROM otel_metrics_histogram LIMIT 1")
+
+    def test_validate_sql_hyperdx_sessions_is_allowed(self):
+        """Querying hyperdx_sessions is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT SessionId FROM hyperdx_sessions LIMIT 1")
+
+    def test_validate_sql_system_tables_is_allowed(self):
+        """Querying system.tables is permitted (metadata introspection)."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT name FROM system.tables WHERE database='default'")
+
+    def test_validate_sql_system_columns_is_allowed(self):
+        """Querying system.columns is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "SELECT name, type FROM system.columns WHERE database='default' AND table='otel_logs'"
+        )
+
+    def test_validate_sql_qualified_default_table_is_allowed(self):
+        """A fully-qualified default.otel_logs reference is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT 1 FROM default.otel_logs LIMIT 1")
+
+    def test_validate_sql_view_is_allowed(self):
+        """Querying an allowed view (v_otel_metrics_1m) is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM v_otel_metrics_1m LIMIT 1")
+
+    # ------------------------------------------------------------------
+    # Table allowlist – blocked tables
+    # ------------------------------------------------------------------
+
+    def test_validate_sql_sobs_ai_settings_blocked(self):
+        """Querying sobs_ai_settings is blocked to prevent secret leakage."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT Value FROM sobs_ai_settings")
+
+    def test_validate_sql_sobs_notification_channels_blocked(self):
+        """Querying sobs_notification_channels is blocked."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM sobs_notification_channels")
+
+    def test_validate_sql_sobs_app_settings_blocked(self):
+        """Querying sobs_app_settings is blocked."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM sobs_app_settings")
+
+    def test_validate_sql_sobs_reports_blocked(self):
+        """Querying sobs_reports is blocked."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM sobs_reports")
+
+    def test_validate_sql_unknown_table_blocked(self):
+        """Querying an arbitrary unknown table is blocked."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM some_random_table")
+
+    def test_validate_sql_non_default_database_blocked(self):
+        """Querying a table in a database other than system or default is blocked."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM other_db.otel_logs")
+
+    # ------------------------------------------------------------------
+    # Table allowlist – CTE alias handling
+    # ------------------------------------------------------------------
+
+    def test_validate_sql_cte_alias_not_blocked(self):
+        """CTE aliases used in FROM are not treated as table references."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "WITH summary AS (SELECT ServiceName, count() AS c FROM otel_logs GROUP BY 1)"
+            " SELECT * FROM summary ORDER BY c DESC"
+        )
+
+    def test_validate_sql_cte_with_blocked_table_inside_raises(self):
+        """A CTE that reads from a blocked table is still rejected."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql(
+                "WITH secret AS (SELECT Value FROM sobs_ai_settings WHERE Key='ai.api_key')" " SELECT * FROM secret"
+            )
+
+    def test_validate_sql_multi_cte_aliases_not_blocked(self):
+        """Multiple CTE aliases are all recognised and excluded from table checks."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "WITH logs AS (SELECT ServiceName FROM otel_logs),"
+            " traces AS (SELECT ServiceName FROM otel_traces)"
+            " SELECT * FROM logs JOIN traces ON logs.ServiceName = traces.ServiceName"
+        )
+
+    def test_validate_sql_recursive_cte_alias_not_blocked(self):
+        """WITH RECURSIVE CTE aliases are recognised and excluded from table checks."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "WITH RECURSIVE tree AS (SELECT TraceId FROM otel_traces WHERE ParentSpanId=''"
+            " UNION ALL SELECT t.TraceId FROM otel_traces t"
+            " JOIN tree ON t.ParentSpanId = tree.TraceId)"
+            " SELECT * FROM tree LIMIT 100"
+        )
+
+    def test_validate_sql_left_join_allowed_table_is_allowed(self):
+        """LEFT JOIN to an allowed table is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "SELECT l.ServiceName FROM otel_logs l LEFT JOIN otel_traces t ON l.TraceId = t.TraceId"
+        )
+
+    def test_validate_sql_left_join_blocked_table_raises(self):
+        """LEFT JOIN to a blocked table is rejected."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql(
+                "SELECT l.ServiceName FROM otel_logs l LEFT JOIN sobs_ai_settings s ON 1=1"
+            )
+
+    def test_validate_sql_inner_join_allowed_tables_is_allowed(self):
+        """INNER JOIN between two allowed tables is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "SELECT * FROM otel_logs INNER JOIN otel_traces ON otel_logs.TraceId = otel_traces.TraceId"
+        )
+
+    def test_validate_sql_cross_join_allowed_tables_is_allowed(self):
+        """CROSS JOIN between two allowed tables is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM otel_logs CROSS JOIN otel_traces LIMIT 10")
+
+    # ------------------------------------------------------------------
+    # Table allowlist – schema context
+    # ------------------------------------------------------------------
+
+    def test_get_schema_context_excludes_sobs_tables(self):
+        """get_schema_context never exposes internal sobs_* tables to the LLM."""
+        db = sobs_app.get_db()
+        runner = sobs_app.ChdbSqlRunner(db)
+        ctx = runner.get_schema_context()
+        assert "sobs_ai_settings" not in ctx
+        assert "sobs_app_settings" not in ctx
+        assert "sobs_notification_channels" not in ctx
+
+    def test_get_schema_context_includes_allowed_tables(self):
+        """get_schema_context includes observability tables from the allowlist."""
+        db = sobs_app.get_db()
+        runner = sobs_app.ChdbSqlRunner(db)
+        ctx = runner.get_schema_context()
+        assert "otel_logs" in ctx
+        assert "otel_traces" in ctx
+
+    # ------------------------------------------------------------------
     # Schema introspection
     # ------------------------------------------------------------------
 
@@ -10293,6 +10452,14 @@ class TestVannaRunQuery:
         assert df is None
         assert "SQL validation error" in err
 
+    def test_blocked_table_returns_validation_error(self):
+        """_vanna_run_query surfaces a validation error for a disallowed table."""
+        db = sobs_app.get_db()
+        df, err = sobs_app._vanna_run_query(db, "SELECT * FROM sobs_ai_settings")
+        assert df is None
+        assert "SQL validation error" in err
+        assert "not permitted" in err
+
     def test_invalid_sql_returns_error_string(self):
         db = sobs_app.get_db()
         df, err = sobs_app._vanna_run_query(db, "SELECT * FROM definitely_nonexistent_table_abc_xyz LIMIT 1")
@@ -10304,6 +10471,154 @@ class TestVannaRunQuery:
             import pandas as pd
 
             assert isinstance(df, pd.DataFrame)
+
+
+class TestQueryAllowedTablesEnvVar:
+    """Tests for the SOBS_QUERY_ALLOWED_TABLES environment-variable extension."""
+
+    def test_build_query_allowed_tables_returns_builtin_without_env(self, monkeypatch):
+        """Without env var, the allowlist equals the built-in set."""
+        monkeypatch.delenv("SOBS_QUERY_ALLOWED_TABLES", raising=False)
+        result = sobs_app._build_query_allowed_tables()
+        assert result == sobs_app._QUERY_ALLOWED_TABLES_BUILTIN
+
+    def test_build_query_allowed_tables_merges_env_var(self, monkeypatch):
+        """SOBS_QUERY_ALLOWED_TABLES adds extra names to the built-in allowlist."""
+        monkeypatch.setenv("SOBS_QUERY_ALLOWED_TABLES", "my_custom_table, another_table")
+        result = sobs_app._build_query_allowed_tables()
+        assert "my_custom_table" in result
+        assert "another_table" in result
+        # Built-in tables are still present.
+        assert "otel_logs" in result
+
+    def test_build_query_allowed_tables_rejects_unsafe_names(self, monkeypatch):
+        """Malformed table names (e.g. containing spaces, dots, semicolons) are skipped."""
+        monkeypatch.setenv("SOBS_QUERY_ALLOWED_TABLES", "valid_table, bad name, another.bad, ;evil")
+        result = sobs_app._build_query_allowed_tables()
+        assert "valid_table" in result
+        # Malformed entries must not appear.
+        assert "bad name" not in result
+        assert "another.bad" not in result
+        assert ";evil" not in result
+
+    def test_custom_table_blocked_without_env_var(self):
+        """A custom table is blocked when not in the allowlist."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM my_custom_table")
+
+    def test_allowlist_contains_all_expected_builtin_tables(self):
+        """Key OTEL/observability table names are present in the built-in allowlist."""
+        # Verify core tables are present without duplicating the full list (which is
+        # the single source of truth in _QUERY_ALLOWED_TABLES_BUILTIN).
+        builtin = sobs_app._QUERY_ALLOWED_TABLES_BUILTIN
+        assert len(builtin) > 0, "Built-in allowlist must not be empty."
+        assert "otel_logs" in builtin
+        assert "otel_traces" in builtin
+        assert "otel_metrics_gauge" in builtin
+        assert "otel_metrics_sum" in builtin
+        assert "otel_metrics_histogram" in builtin
+
+
+class TestValidateUserSqlWhere:
+    """Unit tests for the _validate_user_sql_where() centralised injection guard."""
+
+    # ------------------------------------------------------------------
+    # Safe (should not raise)
+    # ------------------------------------------------------------------
+
+    def test_simple_equality_is_allowed(self):
+        sobs_app._validate_user_sql_where("SeverityText = 'ERROR'")
+
+    def test_and_combination_is_allowed(self):
+        sobs_app._validate_user_sql_where("ServiceName = 'api' AND SeverityText = 'WARN'")
+
+    def test_like_is_allowed(self):
+        sobs_app._validate_user_sql_where("Body LIKE '%timeout%'")
+
+    def test_in_list_is_allowed(self):
+        sobs_app._validate_user_sql_where("SeverityText IN ('ERROR', 'FATAL')")
+
+    def test_is_null_is_allowed(self):
+        sobs_app._validate_user_sql_where("TraceId IS NOT NULL")
+
+    def test_match_function_is_allowed(self):
+        sobs_app._validate_user_sql_where("match(Body, '(?i)failed')")
+
+    def test_empty_string_is_allowed(self):
+        sobs_app._validate_user_sql_where("")
+
+    # ------------------------------------------------------------------
+    # Write / DDL keywords must be blocked
+    # ------------------------------------------------------------------
+
+    def test_union_is_allowed(self):
+        # UNION is valid for dynamic dataset queries on the NQL page and custom charts.
+        sobs_app._validate_user_sql_where("1=1 UNION ALL SELECT Value FROM sobs_ai_settings")
+
+    def test_union_select_mixed_case_is_allowed(self):
+        sobs_app._validate_user_sql_where("1=1 uNiOn SELECT Key FROM sobs_app_settings")
+
+    def test_intersect_is_allowed(self):
+        sobs_app._validate_user_sql_where("1=1 INTERSECT SELECT 1")
+
+    def test_except_is_allowed(self):
+        sobs_app._validate_user_sql_where("1=1 EXCEPT SELECT 1")
+
+    def test_insert_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1; INSERT INTO otel_logs VALUES ()")
+
+    def test_update_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 UPDATE otel_logs SET Body=''")
+
+    def test_delete_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 DELETE FROM otel_logs")
+
+    def test_drop_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 DROP TABLE otel_logs")
+
+    def test_alter_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 ALTER TABLE otel_logs ADD COLUMN x Int32")
+
+    def test_create_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 CREATE TABLE evil AS SELECT 1")
+
+
+class TestWritableTablesAllowlist:
+    """Unit tests for the _WRITABLE_TABLES allowlist used by _insert_rows_json_each_row."""
+
+    def test_allowlist_is_nonempty(self):
+        assert len(sobs_app._WRITABLE_TABLES) > 0
+
+    def test_allowlist_contains_otel_logs(self):
+        assert "otel_logs" in sobs_app._WRITABLE_TABLES
+
+    def test_allowlist_contains_otel_traces(self):
+        assert "otel_traces" in sobs_app._WRITABLE_TABLES
+
+    def test_insert_to_allowed_table_succeeds(self):
+        """_insert_rows_json_each_row with an allowed table name does not raise."""
+        db = sobs_app.get_db()
+        # Insert 0 rows – no actual data written, but the allowlist check runs.
+        result = sobs_app._insert_rows_json_each_row(db, "otel_logs", [])
+        assert result == 0
+
+    def test_insert_to_unregistered_table_raises(self):
+        """_insert_rows_json_each_row raises ValueError for a table not in the allowlist."""
+        db = sobs_app.get_db()
+        with pytest.raises(ValueError, match="unregistered table"):
+            sobs_app._insert_rows_json_each_row(db, "some_external_table", [{"x": 1}])
+
+    def test_insert_to_internal_sobs_unregistered_table_raises(self):
+        """Tables that look internal but are not in the allowlist are also rejected."""
+        db = sobs_app.get_db()
+        with pytest.raises(ValueError, match="unregistered table"):
+            sobs_app._insert_rows_json_each_row(db, "sobs_fake_secrets", [{"x": 1}])
 
 
 class TestQueryRoutes:
