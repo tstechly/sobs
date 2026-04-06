@@ -166,6 +166,86 @@ app.config["SECRET_KEY"] = os.environ.get("SOBS_SECRET_KEY", "sobs-dev-secret-ke
 app.config["SESSION_COOKIE_NAME"] = os.environ.get("SOBS_SESSION_COOKIE_NAME", "sobs_session")
 app.config["ENABLE_FIRST_RUN_TOUR"] = _env_flag("SOBS_ENABLE_FIRST_RUN_TOUR", True)
 
+# ---------------------------------------------------------------------------
+# Turbo-Flask POC – Hotwire Turbo integration helpers (Quart-compatible)
+# ---------------------------------------------------------------------------
+# NOTE: The turbo-flask PyPI package targets synchronous Flask; we replicate
+# the tiny subset we need here using Quart-native primitives so that all
+# helpers are async-safe and do not import flask internals.
+
+
+def _turbo_can_stream() -> bool:
+    """Return True when the client advertises it accepts Turbo Stream responses."""
+    best = request.accept_mimetypes.best_match(["text/vnd.turbo-stream.html", "text/html"])
+    return best == "text/vnd.turbo-stream.html"
+
+
+def _turbo_frame_id() -> str:
+    """Return the Turbo-Frame request-header value, or empty string."""
+    return request.headers.get("Turbo-Frame", "")
+
+
+def _turbo_make_stream(action: str, content: str, target: str, *, multiple: bool = False) -> str:
+    """Build a single ``<turbo-stream>`` tag string."""
+    target_attr = f'targets="{target}"' if multiple else f'target="{target}"'
+    return (
+        f'<turbo-stream action="{action}" {target_attr}>'
+        f"<template>{content}</template>"
+        f"</turbo-stream>"
+    )
+
+
+def _turbo_replace(content: str, target: str, *, multiple: bool = False) -> str:
+    """Turbo Stream *replace* – swaps the entire target element."""
+    return _turbo_make_stream("replace", content, target, multiple=multiple)
+
+
+def _turbo_update(content: str, target: str, *, multiple: bool = False) -> str:
+    """Turbo Stream *update* – replaces only the inner HTML of target."""
+    return _turbo_make_stream("update", content, target, multiple=multiple)
+
+
+def _turbo_append(content: str, target: str, *, multiple: bool = False) -> str:
+    """Turbo Stream *append* – inserts content at the end of target."""
+    return _turbo_make_stream("append", content, target, multiple=multiple)
+
+
+def _turbo_prepend(content: str, target: str, *, multiple: bool = False) -> str:
+    """Turbo Stream *prepend* – inserts content at the start of target."""
+    return _turbo_make_stream("prepend", content, target, multiple=multiple)
+
+
+def _turbo_remove(target: str) -> str:
+    """Turbo Stream *remove* – removes the target element."""
+    return f'<turbo-stream action="remove" target="{target}"></turbo-stream>'
+
+
+def _turbo_stream_response(streams: "list[str] | str") -> Response:
+    """Wrap one or more Turbo Stream tags in an HTTP response with the correct MIME type.
+
+    This is the Quart-native equivalent of ``turbo_flask.Turbo.stream()``.
+    Usage::
+
+        async def my_route():
+            if _turbo_can_stream():
+                html = await render_template("_my_partial.html", ...)
+                return _turbo_stream_response(_turbo_replace(html, target="my-id"))
+            return await render_template("full_page.html", ...)
+    """
+    if isinstance(streams, list):
+        content = "\n".join(streams)
+    else:
+        content = streams
+    return Response(content, mimetype="text/vnd.turbo-stream.html")
+
+
+@app.context_processor
+def _inject_turbo_context() -> dict:
+    """Expose ``turbo_enabled=True`` to every Jinja2 template."""
+    return {"turbo_enabled": True}
+
+
+# ---------------------------------------------------------------------------
 _SETTINGS_ENCRYPTION_PREFIX = "enc:v1:"
 _SETTINGS_ENCRYPTION_KEY_ENV = "SOBS_SETTINGS_ENCRYPTION_KEY"
 _SETTINGS_ENCRYPTION_KEY_FILE_ENV = "SOBS_SETTINGS_ENCRYPTION_KEY_FILE"

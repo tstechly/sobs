@@ -76,7 +76,8 @@
     </h2>
     <div id="logsFiltersPanel" class="accordion-collapse collapse show" aria-labelledby="logsFiltersHeading" data-bs-parent="#logsFiltersAccordion">
       <div class="accordion-body py-3">
-    <form method="get" class="d-flex flex-wrap gap-2 align-items-end sobs-filter-form">
+    <form method="get" class="d-flex flex-wrap gap-2 align-items-end sobs-filter-form"
+          data-turbo-frame="logs-results" data-turbo-action="advance">
       <input type="hidden" name="live" id="liveModeInput" value="{{ '1' if live == '1' else '' }}">
       <input type="hidden" name="analyze" value="{{ analyze }}">
       <input type="hidden" name="stats" value="{{ '1' if stats_open else '' }}">
@@ -186,6 +187,15 @@
     </div>
   </div>
 </div>
+
+{# ── Turbo Frame: logs-results ──────────────────────────────────────────────
+   Wraps the stats panel, results table, pagination, and empty state so that
+   submitting the filter form (which targets this frame) replaces only this
+   portion of the page without losing the open filter accordion above.
+   The data-turbo-action="advance" on the form ensures the URL is updated and
+   the browser back-button still works correctly.
+   ─────────────────────────────────────────────────────────────────────────── #}
+<turbo-frame id="logs-results">
 
 <!-- Query Statistics Panel -->
 {% if level_stats or service_stats %}
@@ -452,6 +462,7 @@
   <p class="mt-2">No logs found{% if q %} matching <code>{{ q }}</code>{% endif %}</p>
 </div>
 {% endif %}
+</turbo-frame>
 {% endblock %}
 
 {% block scripts %}
@@ -891,6 +902,13 @@
 
   window.addEventListener("beforeunload", () => {
     stopLive();
+  });
+
+  // When Turbo Drive navigates away from this page, stop the live stream to
+  // prevent a dangling EventSource connection.
+  document.addEventListener("turbo:before-visit", function onTurboLeave() {
+    stopLive();
+    document.removeEventListener("turbo:before-visit", onTurboLeave);
   });
 
   window.addEventListener("scroll", () => {

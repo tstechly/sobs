@@ -214,9 +214,9 @@
 </head>
 <body>
 <!-- Overlay backdrop for hamburger sidebar -->
-<div id="sbBackdrop" class="sb-backdrop"></div>
+<div id="sbBackdrop" class="sb-backdrop" data-turbo-permanent></div>
 <!-- Topbar: visible only in hamburger/small-screen mode -->
-<div id="sbTopbar" class="sb-topbar">
+<div id="sbTopbar" class="sb-topbar" data-turbo-permanent>
   <button id="sbHamburgerBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center" aria-label="Open menu" aria-expanded="false" aria-controls="sbSidebar">
     <i class="bi bi-list fs-5"></i>
   </button>
@@ -240,7 +240,7 @@
 </div>
 <div class="d-flex">
   <!-- Sidebar -->
-  <nav id="sbSidebar" class="sidebar d-flex flex-column" aria-label="Main navigation">
+  <nav id="sbSidebar" class="sidebar d-flex flex-column" aria-label="Main navigation" data-turbo-permanent>
     <!-- Sidebar edge toggle button (full ↔ compact) -->
     <button id="sbToggleBtn" class="sb-toggle-btn" aria-label="Toggle sidebar">
       <i id="sbToggleIcon" class="bi bi-chevron-left"></i>
@@ -627,6 +627,11 @@
 /* ===== Sidebar ===== */
 (function () {
   var sidebar = document.getElementById('sbSidebar');
+  // The sidebar carries data-turbo-permanent, so it is preserved across Turbo
+  // Drive navigations.  The base.html script block re-executes on every visit,
+  // so we guard against registering duplicate event listeners here.
+  if (!sidebar || sidebar.dataset.turboSetup) return;
+  sidebar.dataset.turboSetup = '1';
   var toggleBtn = document.getElementById('sbToggleBtn');
   var toggleIcon = document.getElementById('sbToggleIcon');
   var hamburgerBtn = document.getElementById('sbHamburgerBtn');
@@ -3207,5 +3212,72 @@
   });
 }());
 </script>
+
+{% if turbo_enabled %}
+{# =========================================================================
+   Turbo-Flask POC – Hotwire Turbo Drive & Frames
+   https://turbo.hotwired.dev/
+   The UMD build is bundled locally (static/turbo.es2017-umd.js).
+   ========================================================================= #}
+<script src="{{ url_for('static', filename='turbo.es2017-umd.js') }}"></script>
+<script>
+(function () {
+  if (typeof Turbo === 'undefined') return;
+
+  // Show the progress bar after a short delay to avoid flicker on fast loads.
+  Turbo.config.drive.progressBarDelay = 150;
+
+  // ---------------------------------------------------------------------------
+  // Active nav-link highlighting
+  // The sidebar is data-turbo-permanent, so its active classes are NOT updated
+  // automatically by Turbo on navigation.  We update them here on every load.
+  // ---------------------------------------------------------------------------
+  function updateActiveNavLinks() {
+    var path = window.location.pathname;
+    // Normalise base path: strip trailing slash for comparison.
+    var cleanPath = path.replace(/\/$/, '') || '/';
+    document.querySelectorAll('#sbSidebar .nav-link[href]').forEach(function (link) {
+      var href = link.getAttribute('href') || '';
+      // Strip query / fragment for comparison.
+      var hrefPath = href.split('?')[0].split('#')[0].replace(/\/$/, '') || '/';
+      var isActive;
+      if (hrefPath === '/') {
+        // Root only matches exactly.
+        isActive = cleanPath === '/';
+      } else {
+        // Prefix match so sub-pages (e.g. /settings/tags) keep Settings active.
+        isActive = cleanPath === hrefPath || cleanPath.startsWith(hrefPath + '/');
+      }
+      link.classList.toggle('active', isActive);
+      link.setAttribute('aria-current', isActive ? 'page' : 'false');
+    });
+  }
+
+  // turbo:load fires after every Turbo navigation and on the initial page load.
+  document.addEventListener('turbo:load', updateActiveNavLinks);
+
+  // ---------------------------------------------------------------------------
+  // Opt-out Turbo Drive for routes that stream or push data.
+  // The live-mode EventSource in logs.html is started/stopped by JavaScript,
+  // not by navigation, so no opt-out is needed there.  However, any link that
+  // deliberately wants a full browser reload can set data-turbo="false".
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Bootstrap modal z-index compatibility
+  // When Turbo replaces the body the Bootstrap modal backdrop can be left
+  // behind.  Remove stale backdrops before each visit.
+  // ---------------------------------------------------------------------------
+  document.addEventListener('turbo:before-visit', function () {
+    document.querySelectorAll('.modal-backdrop').forEach(function (el) {
+      el.remove();
+    });
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+    document.body.style.removeProperty('overflow');
+  });
+}());
+</script>
+{% endif %}
 </body>
 </html>
