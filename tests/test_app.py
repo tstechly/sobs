@@ -2515,6 +2515,29 @@ class TestUIPages:
         assert b"captureException" in body
         assert b"setClientAuthToken" in body
 
+    async def test_rum_js_etag_header(self, client):
+        r = await client.get("/static/rum.js")
+        assert r.status_code == 200
+        assert r.headers.get("ETag"), "ETag header should be present on rum.js"
+        assert r.headers.get("X-SourceMap") == "rum.js.map"
+        assert r.headers.get("SourceMap") == "rum.js.map"
+
+    async def test_rum_min_js_served(self, client):
+        r = await client.get("/static/rum.min.js")
+        assert r.status_code == 200
+        body = await r.get_data()
+        # Minified file should be significantly smaller than the source
+        assert len(body) > 0
+        assert b"sobs-rum" in body
+        assert r.headers.get("ETag"), "ETag header should be present on rum.min.js"
+
+    async def test_rum_d_ts_served(self, client):
+        r = await client.get("/static/rum.d.ts")
+        assert r.status_code == 200
+        body = await r.get_data()
+        assert b"SOBSApi" in body
+        assert b"SOBSInitOptions" in body
+
     async def test_pagination(self, client):
         r = await client.get("/logs?limit=10&offset=0")
         assert r.status_code == 200
