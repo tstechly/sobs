@@ -10325,6 +10325,40 @@ class TestChdbSqlRunner:
             " SELECT * FROM logs JOIN traces ON logs.ServiceName = traces.ServiceName"
         )
 
+    def test_validate_sql_recursive_cte_alias_not_blocked(self):
+        """WITH RECURSIVE CTE aliases are recognised and excluded from table checks."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "WITH RECURSIVE tree AS (SELECT TraceId FROM otel_traces WHERE ParentSpanId=''"
+            " UNION ALL SELECT t.TraceId FROM otel_traces t"
+            " JOIN tree ON t.ParentSpanId = tree.TraceId)"
+            " SELECT * FROM tree LIMIT 100"
+        )
+
+    def test_validate_sql_left_join_allowed_table_is_allowed(self):
+        """LEFT JOIN to an allowed table is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "SELECT l.ServiceName FROM otel_logs l LEFT JOIN otel_traces t ON l.TraceId = t.TraceId"
+        )
+
+    def test_validate_sql_left_join_blocked_table_raises(self):
+        """LEFT JOIN to a blocked table is rejected."""
+        with pytest.raises(ValueError, match="not permitted"):
+            sobs_app.ChdbSqlRunner.validate_sql(
+                "SELECT l.ServiceName FROM otel_logs l LEFT JOIN sobs_ai_settings s ON 1=1"
+            )
+
+    def test_validate_sql_inner_join_allowed_tables_is_allowed(self):
+        """INNER JOIN between two allowed tables is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "SELECT * FROM otel_logs INNER JOIN otel_traces ON otel_logs.TraceId = otel_traces.TraceId"
+        )
+
+    def test_validate_sql_cross_join_allowed_tables_is_allowed(self):
+        """CROSS JOIN between two allowed tables is permitted."""
+        sobs_app.ChdbSqlRunner.validate_sql(
+            "SELECT * FROM otel_logs CROSS JOIN otel_traces LIMIT 10"
+        )
+
     # ------------------------------------------------------------------
     # Table allowlist – schema context
     # ------------------------------------------------------------------
@@ -10461,6 +10495,16 @@ class TestQueryAllowedTablesEnvVar:
         assert "another_table" in result
         # Built-in tables are still present.
         assert "otel_logs" in result
+
+    def test_build_query_allowed_tables_rejects_unsafe_names(self, monkeypatch):
+        """Malformed table names (e.g. containing spaces, dots, semicolons) are skipped."""
+        monkeypatch.setenv("SOBS_QUERY_ALLOWED_TABLES", "valid_table, bad name, another.bad, ;evil")
+        result = sobs_app._build_query_allowed_tables()
+        assert "valid_table" in result
+        # Malformed entries must not appear.
+        assert "bad name" not in result
+        assert "another.bad" not in result
+        assert ";evil" not in result
 
     def test_custom_table_blocked_without_env_var(self):
         """A custom table is blocked when not in the allowlist."""

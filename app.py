@@ -21627,20 +21627,33 @@ def _build_query_allowed_tables() -> frozenset[str]:
 
     Merges the built-in allowlist with any additional names supplied via the
     ``SOBS_QUERY_ALLOWED_TABLES`` environment variable (comma-separated).
+    Only names that match the safe identifier pattern ``[a-zA-Z_][a-zA-Z0-9_]*``
+    are accepted from the environment variable; malformed entries are silently
+    skipped to prevent injection through the configuration surface.
     """
     extra = os.environ.get("SOBS_QUERY_ALLOWED_TABLES", "").strip()
     if not extra:
         return _QUERY_ALLOWED_TABLES_BUILTIN
-    extra_names = frozenset(n.strip().lower() for n in extra.split(",") if n.strip())
+    _safe_ident = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+    extra_names = frozenset(
+        n.strip().lower()
+        for n in extra.split(",")
+        if n.strip() and _safe_ident.match(n.strip())
+    )
     return _QUERY_ALLOWED_TABLES_BUILTIN | extra_names
 
 
 _QUERY_ALLOWED_TABLES: frozenset[str] = _build_query_allowed_tables()
 
-# Extracts CTE alias names from ``WITH alias AS (`` and ``, alias AS (`` syntax.
-# The comma variant uses a plain ``,`` (no word-boundary) because it is
+# Extracts CTE alias names.  Handles all three forms:
+#   WITH alias AS (          – standard CTE
+#   WITH RECURSIVE alias AS  – recursive CTE (ClickHouse extension)
+#   , alias AS (             – additional CTE in the same WITH clause
+# The comma variant omits the word-boundary (``\b``) because it is
 # preceded by ``)`` which is a non-word character.
-_SQL_CTE_ALIAS_RE = re.compile(r"(?:\bWITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+_SQL_CTE_ALIAS_RE = re.compile(
+    r"(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)(\w+)\s+AS\s*\(", re.IGNORECASE
+)
 
 # Extracts the column/array expression that follows ``ARRAY JOIN`` so it can
 # be excluded from the table-reference allowlist check (ARRAY JOIN targets
