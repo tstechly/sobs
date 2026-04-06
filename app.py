@@ -6775,7 +6775,54 @@ def _error_id(ts: str, service: str, err_type: str, message: str, trace_id: str,
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Internal write-table allowlist
+# ---------------------------------------------------------------------------
+# The complete set of table names that SOBS may write to via
+# ``_insert_rows_json_each_row``.  This prevents inadvertent writes to
+# unintended tables if the ``table_name`` argument were ever derived from an
+# unexpected source, and makes the write surface explicit and auditable.
+_WRITABLE_TABLES: frozenset[str] = frozenset(
+    [
+        # OTEL/observability ingest tables
+        "otel_logs",
+        "otel_traces",
+        "otel_metrics_gauge",
+        "otel_metrics_sum",
+        "otel_metrics_histogram",
+        "hyperdx_sessions",
+        # SOBS internal state tables
+        "sobs_ai_memories",
+        "sobs_ai_settings",
+        "sobs_agent_rules",
+        "sobs_agent_runs",
+        "sobs_anomaly_rules",
+        "sobs_app_releases",
+        "sobs_app_settings",
+        "sobs_apps",
+        "sobs_chart_configs",
+        "sobs_cve_dispositions",
+        "sobs_cve_findings",
+        "sobs_dashboards",
+        "sobs_github_work_items",
+        "sobs_log_attr_keys",
+        "sobs_notification_channels",
+        "sobs_notification_log",
+        "sobs_notification_rules",
+        "sobs_record_tags",
+        "sobs_release_artifacts",
+        "sobs_reports",
+        "sobs_tag_rules",
+    ]
+)
+
+
 def _insert_rows_json_each_row(db, table_name: str, rows: list[dict]) -> int:
+    if table_name not in _WRITABLE_TABLES:
+        raise ValueError(
+            f"Attempt to write to unregistered table '{table_name}'. "
+            "Only tables in _WRITABLE_TABLES may be written via _insert_rows_json_each_row."
+        )
     if not rows:
         return 0
     dt_keys = {
@@ -8937,6 +8984,7 @@ async def view_logs():
     elif sql_where:
         # Allow raw WHERE clause (SQL search)
         try:
+            _validate_user_sql_where(sql_where)
             safe_sql = sql_where.replace(";", "")
             safe_sql = re.sub(r"\blevel\b", "SeverityText", safe_sql, flags=re.IGNORECASE)
             safe_sql = re.sub(r"\bservice\b", "ServiceName", safe_sql, flags=re.IGNORECASE)
@@ -9195,6 +9243,7 @@ def _replace_sql_outside_single_quotes(sql: str, replacements: list[tuple[str, s
 
 
 def _normalize_ai_sql_where(sql_where: str) -> str:
+    _validate_user_sql_where(sql_where)
     safe_sql = str(sql_where or "").replace(";", "")
     replacements = [
         (r"\bLogAttributes\s*\[", "SpanAttributes["),
@@ -9219,6 +9268,56 @@ def _normalize_ai_sql_where(sql_where: str) -> str:
         (r"\bduration_ms\b", "(Duration / 1000000.0)"),
     ]
     return _replace_sql_outside_single_quotes(safe_sql, replacements)
+
+
+# ---------------------------------------------------------------------------
+# User SQL WHERE fragment – centralised injection protection
+# ---------------------------------------------------------------------------
+
+# All write / DDL keywords that must never appear in user-supplied WHERE filters.
+# Also blocks set operations (UNION, INTERSECT, EXCEPT) that could chain an
+# additional SELECT and exfiltrate data from internal tables.
+_UNSAFE_WHERE_PATTERNS = re.compile(
+    r"\b(insert|update|delete|drop|truncate|alter|create|replace|rename|attach|detach|"
+    r"grant|revoke|system\s+stop|system\s+start|system\s+reload|kill|optimize|exchange|"
+    r"union|intersect|except)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_user_sql_where(sql_where: str) -> None:
+    """Raise ValueError if a user-supplied SQL WHERE fragment contains unsafe patterns.
+
+    This is the centralised injection-protection layer for all filter-bar inputs
+    across every page (logs, AI, traces, errors, RUM, metrics).  It is applied
+    before the normalised fragment is interpolated into any ``WHERE {safe_sql}``
+    clause.
+
+    Blocked patterns:
+
+    * Write / DDL keywords: ``INSERT``, ``UPDATE``, ``DELETE``, ``DROP``,
+      ``TRUNCATE``, ``ALTER``, ``CREATE``, ``REPLACE``, ``RENAME``, …
+    * Set operations: ``UNION``, ``INTERSECT``, ``EXCEPT`` – these can terminate
+      a WHERE clause and chain an additional ``SELECT``, enabling data
+      exfiltration from internal tables (e.g. ``1=1 UNION SELECT Value FROM
+      sobs_ai_settings``).
+
+    Note:
+        This intentionally does **not** block ``SELECT`` itself, because valid
+        ClickHouse WHERE conditions may contain correlated subqueries
+        (e.g. ``EXISTS (SELECT 1 FROM … WHERE …)``).  The broader table-access
+        control for the NL→SQL Query page is handled separately by
+        :class:`ChdbSqlRunner`.
+
+    Raises:
+        ValueError: with a user-readable message when a disallowed pattern is found.
+    """
+    if _UNSAFE_WHERE_PATTERNS.search(sql_where):
+        raise ValueError(
+            "SQL filter contains a disallowed keyword. "
+            "Write operations (INSERT, UPDATE, DELETE, DROP, …) and set operations "
+            "(UNION, INTERSECT, EXCEPT) are not permitted in filter expressions."
+        )
 
 
 def _list_derived_signal_dimensions(db: ChDbConnection) -> tuple[list[str], list[str], list[str]]:
@@ -17625,6 +17724,7 @@ async def api_logs_validate_filter():
         issues.append({"level": "warning", "message": "Filter ends with an operator or keyword."})
 
     try:
+        _validate_user_sql_where(sql_where)
         safe_sql = sql_where.replace(";", "")
         safe_sql = re.sub(r"\blevel\b", "SeverityText", safe_sql, flags=re.IGNORECASE)
         safe_sql = re.sub(r"\bservice\b", "ServiceName", safe_sql, flags=re.IGNORECASE)

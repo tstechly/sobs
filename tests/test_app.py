@@ -10524,6 +10524,111 @@ class TestQueryAllowedTablesEnvVar:
         assert "otel_metrics_histogram" in builtin
 
 
+class TestValidateUserSqlWhere:
+    """Unit tests for the _validate_user_sql_where() centralised injection guard."""
+
+    # ------------------------------------------------------------------
+    # Safe (should not raise)
+    # ------------------------------------------------------------------
+
+    def test_simple_equality_is_allowed(self):
+        sobs_app._validate_user_sql_where("SeverityText = 'ERROR'")
+
+    def test_and_combination_is_allowed(self):
+        sobs_app._validate_user_sql_where("ServiceName = 'api' AND SeverityText = 'WARN'")
+
+    def test_like_is_allowed(self):
+        sobs_app._validate_user_sql_where("Body LIKE '%timeout%'")
+
+    def test_in_list_is_allowed(self):
+        sobs_app._validate_user_sql_where("SeverityText IN ('ERROR', 'FATAL')")
+
+    def test_is_null_is_allowed(self):
+        sobs_app._validate_user_sql_where("TraceId IS NOT NULL")
+
+    def test_match_function_is_allowed(self):
+        sobs_app._validate_user_sql_where("match(Body, '(?i)failed')")
+
+    def test_empty_string_is_allowed(self):
+        sobs_app._validate_user_sql_where("")
+
+    # ------------------------------------------------------------------
+    # Write / DDL keywords must be blocked
+    # ------------------------------------------------------------------
+
+    def test_union_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 UNION ALL SELECT Value FROM sobs_ai_settings")
+
+    def test_union_select_mixed_case_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 uNiOn SELECT Key FROM sobs_app_settings")
+
+    def test_intersect_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 INTERSECT SELECT 1")
+
+    def test_except_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 EXCEPT SELECT 1")
+
+    def test_insert_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1; INSERT INTO otel_logs VALUES ()")
+
+    def test_update_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 UPDATE otel_logs SET Body=''")
+
+    def test_delete_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 DELETE FROM otel_logs")
+
+    def test_drop_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 DROP TABLE otel_logs")
+
+    def test_alter_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 ALTER TABLE otel_logs ADD COLUMN x Int32")
+
+    def test_create_is_blocked(self):
+        with pytest.raises(ValueError, match="disallowed keyword"):
+            sobs_app._validate_user_sql_where("1=1 CREATE TABLE evil AS SELECT 1")
+
+
+class TestWritableTablesAllowlist:
+    """Unit tests for the _WRITABLE_TABLES allowlist used by _insert_rows_json_each_row."""
+
+    def test_allowlist_is_nonempty(self):
+        assert len(sobs_app._WRITABLE_TABLES) > 0
+
+    def test_allowlist_contains_otel_logs(self):
+        assert "otel_logs" in sobs_app._WRITABLE_TABLES
+
+    def test_allowlist_contains_otel_traces(self):
+        assert "otel_traces" in sobs_app._WRITABLE_TABLES
+
+    def test_insert_to_allowed_table_succeeds(self):
+        """_insert_rows_json_each_row with an allowed table name does not raise."""
+        db = sobs_app.get_db()
+        # Insert 0 rows – no actual data written, but the allowlist check runs.
+        result = sobs_app._insert_rows_json_each_row(db, "otel_logs", [])
+        assert result == 0
+
+    def test_insert_to_unregistered_table_raises(self):
+        """_insert_rows_json_each_row raises ValueError for a table not in the allowlist."""
+        db = sobs_app.get_db()
+        with pytest.raises(ValueError, match="unregistered table"):
+            sobs_app._insert_rows_json_each_row(db, "some_external_table", [{"x": 1}])
+
+    def test_insert_to_internal_sobs_unregistered_table_raises(self):
+        """Tables that look internal but are not in the allowlist are also rejected."""
+        db = sobs_app.get_db()
+        with pytest.raises(ValueError, match="unregistered table"):
+            sobs_app._insert_rows_json_each_row(db, "sobs_fake_secrets", [{"x": 1}])
+
+
 class TestQueryRoutes:
     """Integration tests for /query and /api/query/* routes."""
 
