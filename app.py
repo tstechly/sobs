@@ -9274,13 +9274,10 @@ def _normalize_ai_sql_where(sql_where: str) -> str:
 # User SQL WHERE fragment – centralised injection protection
 # ---------------------------------------------------------------------------
 
-# All write / DDL keywords that must never appear in user-supplied WHERE filters.
-# Also blocks set operations (UNION, INTERSECT, EXCEPT) that could chain an
-# additional SELECT and exfiltrate data from internal tables.
+# Write / DDL keywords that must never appear in user-supplied WHERE filters.
 _UNSAFE_WHERE_PATTERNS = re.compile(
     r"\b(insert|update|delete|drop|truncate|alter|create|replace|rename|attach|detach|"
-    r"grant|revoke|system\s+stop|system\s+start|system\s+reload|kill|optimize|exchange|"
-    r"union|intersect|except)\b",
+    r"grant|revoke|system\s+stop|system\s+start|system\s+reload|kill|optimize|exchange)\b",
     re.IGNORECASE,
 )
 
@@ -9297,17 +9294,15 @@ def _validate_user_sql_where(sql_where: str) -> None:
 
     * Write / DDL keywords: ``INSERT``, ``UPDATE``, ``DELETE``, ``DROP``,
       ``TRUNCATE``, ``ALTER``, ``CREATE``, ``REPLACE``, ``RENAME``, …
-    * Set operations: ``UNION``, ``INTERSECT``, ``EXCEPT`` – these can terminate
-      a WHERE clause and chain an additional ``SELECT``, enabling data
-      exfiltration from internal tables (e.g. ``1=1 UNION SELECT Value FROM
-      sobs_ai_settings``).
 
     Note:
-        This intentionally does **not** block ``SELECT`` itself, because valid
-        ClickHouse WHERE conditions may contain correlated subqueries
-        (e.g. ``EXISTS (SELECT 1 FROM … WHERE …)``).  The broader table-access
-        control for the NL→SQL Query page is handled separately by
-        :class:`ChdbSqlRunner`.
+        Set operations (``UNION``, ``INTERSECT``, ``EXCEPT``) are deliberately
+        **not** blocked here because they are valid in dynamic dataset queries
+        used by the NQL page and custom charts.  The broader table-access control
+        for the NL→SQL Query page is handled separately by
+        :class:`ChdbSqlRunner`.  This function intentionally does **not** block
+        ``SELECT`` itself, because valid ClickHouse WHERE conditions may contain
+        correlated subqueries (e.g. ``EXISTS (SELECT 1 FROM … WHERE …)``).
 
     Raises:
         ValueError: with a user-readable message when a disallowed pattern is found.

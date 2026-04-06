@@ -10556,21 +10556,18 @@ class TestValidateUserSqlWhere:
     # Write / DDL keywords must be blocked
     # ------------------------------------------------------------------
 
-    def test_union_is_blocked(self):
-        with pytest.raises(ValueError, match="disallowed keyword"):
-            sobs_app._validate_user_sql_where("1=1 UNION ALL SELECT Value FROM sobs_ai_settings")
+    def test_union_is_allowed(self):
+        # UNION is valid for dynamic dataset queries on the NQL page and custom charts.
+        sobs_app._validate_user_sql_where("1=1 UNION ALL SELECT Value FROM sobs_ai_settings")
 
-    def test_union_select_mixed_case_is_blocked(self):
-        with pytest.raises(ValueError, match="disallowed keyword"):
-            sobs_app._validate_user_sql_where("1=1 uNiOn SELECT Key FROM sobs_app_settings")
+    def test_union_select_mixed_case_is_allowed(self):
+        sobs_app._validate_user_sql_where("1=1 uNiOn SELECT Key FROM sobs_app_settings")
 
-    def test_intersect_is_blocked(self):
-        with pytest.raises(ValueError, match="disallowed keyword"):
-            sobs_app._validate_user_sql_where("1=1 INTERSECT SELECT 1")
+    def test_intersect_is_allowed(self):
+        sobs_app._validate_user_sql_where("1=1 INTERSECT SELECT 1")
 
-    def test_except_is_blocked(self):
-        with pytest.raises(ValueError, match="disallowed keyword"):
-            sobs_app._validate_user_sql_where("1=1 EXCEPT SELECT 1")
+    def test_except_is_allowed(self):
+        sobs_app._validate_user_sql_where("1=1 EXCEPT SELECT 1")
 
     def test_insert_is_blocked(self):
         with pytest.raises(ValueError, match="disallowed keyword"):
