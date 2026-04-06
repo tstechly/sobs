@@ -21651,19 +21651,25 @@ _QUERY_ALLOWED_TABLES: frozenset[str] = _build_query_allowed_tables()
 #   , alias AS (             – additional CTE in the same WITH clause
 # The comma variant omits the word-boundary (``\b``) because it is
 # preceded by ``)`` which is a non-word character.
+# Identifiers are matched as ``[a-zA-Z_]\w*`` (cannot start with a digit).
 _SQL_CTE_ALIAS_RE = re.compile(
-    r"(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)(\w+)\s+AS\s*\(", re.IGNORECASE
+    r"(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)([a-zA-Z_]\w*)\s+AS\s*\(", re.IGNORECASE
 )
 
 # Extracts the column/array expression that follows ``ARRAY JOIN`` so it can
 # be excluded from the table-reference allowlist check (ARRAY JOIN targets
 # are array columns, not data-source tables).
-_SQL_ARRAY_JOIN_RE = re.compile(r"\bARRAY\s+JOIN\s+((?:\w+\.)*\w+)", re.IGNORECASE)
+_SQL_ARRAY_JOIN_RE = re.compile(
+    r"\bARRAY\s+JOIN\s+((?:[a-zA-Z_]\w*\.)*[a-zA-Z_]\w*)", re.IGNORECASE
+)
 
 # Extracts table/view references that follow ``FROM`` or any ``JOIN`` keyword.
 # Matches optional ``database.`` qualifier (e.g. ``default.otel_logs``).
 # Does NOT match subqueries (``FROM (SELECT …)``), because ``(`` is not ``\w``.
-_SQL_TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+((?:\w+\.)*\w+)", re.IGNORECASE)
+# Identifiers use ``[a-zA-Z_]\w*`` so numeric-leading tokens are never matched.
+_SQL_TABLE_REF_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+((?:[a-zA-Z_]\w*\.)*[a-zA-Z_]\w*)", re.IGNORECASE
+)
 
 
 class ChdbSqlRunner:
