@@ -5693,14 +5693,34 @@ def decompress_json(data):
 # ---------------------------------------------------------------------------
 # Auth decorator (optional API key)
 # ---------------------------------------------------------------------------
+
+# Short-lived in-memory cache for external auth results, keyed by the
+# Authorization header value.  Entries expire after _EXT_AUTH_CACHE_TTL
+# seconds so that revocations or auth changes take effect quickly.
+_EXT_AUTH_CACHE: dict[str, tuple[bool, float]] = {}
+_EXT_AUTH_CACHE_TTL: int = 60  # seconds
+
+
 async def _check_external_auth(authorization: str) -> bool:
     """Validate a Bearer token against the configured external auth service.
 
     Makes a POST to ``{EXTERNAL_AUTH_URL}/internal/auth/validate`` forwarding
     the ``Authorization`` header.  Returns ``True`` only on an HTTP 200 reply.
+
+    Results are cached in memory for up to ``_EXT_AUTH_CACHE_TTL`` seconds
+    (default 60 s) to reduce load on the external auth provider.  Only
+    successful (``True``) validations are cached; failures are never cached so
+    that revoked tokens are rejected on the very next request.
     """
     if not EXTERNAL_AUTH_URL:
         return False
+    now = time.monotonic()
+    cached = _EXT_AUTH_CACHE.get(authorization)
+    if cached is not None:
+        result, expires_at = cached
+        if now < expires_at:
+            return result
+        del _EXT_AUTH_CACHE[authorization]
     try:
         client = await _get_async_http_client()
         resp = await client.post(
@@ -5708,9 +5728,12 @@ async def _check_external_auth(authorization: str) -> bool:
             headers={"Authorization": authorization},
             timeout=5,
         )
-        return resp.status_code == 200
+        valid = resp.status_code == 200
     except (httpx.HTTPError, OSError):
         return False
+    if valid:
+        _EXT_AUTH_CACHE[authorization] = (True, now + _EXT_AUTH_CACHE_TTL)
+    return valid
 
 
 def _auth_mode() -> str:

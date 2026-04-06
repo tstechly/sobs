@@ -3336,6 +3336,93 @@ class TestExternalAuth:
         assert r.status_code == 401
         assert r.headers.get("WWW-Authenticate") == 'Bearer realm="SOBS"'
 
+    async def test_check_external_auth_caches_successful_result(self, monkeypatch):
+        """A successful validation result should be served from cache on the second call."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+        monkeypatch.setattr(app_module, "_EXT_AUTH_CACHE", {})
+
+        call_count = {"n": 0}
+
+        class _FakeClient:
+            async def post(self, *_args, **_kwargs):
+                call_count["n"] += 1
+
+                class _Response:
+                    status_code = 200
+
+                return _Response()
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(app_module, "_get_async_http_client", _fake_get_client)
+
+        assert await app_module._check_external_auth("Bearer tok") is True
+        assert await app_module._check_external_auth("Bearer tok") is True
+        assert call_count["n"] == 1, "External auth service should only be called once"
+
+    async def test_check_external_auth_does_not_cache_failure(self, monkeypatch):
+        """A failed validation must not be cached; the external service should be called every time."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+        monkeypatch.setattr(app_module, "_EXT_AUTH_CACHE", {})
+
+        call_count = {"n": 0}
+
+        class _FakeClient:
+            async def post(self, *_args, **_kwargs):
+                call_count["n"] += 1
+
+                class _Response:
+                    status_code = 401
+
+                return _Response()
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(app_module, "_get_async_http_client", _fake_get_client)
+
+        assert await app_module._check_external_auth("Bearer bad") is False
+        assert await app_module._check_external_auth("Bearer bad") is False
+        assert call_count["n"] == 2, "External service should be called on every failed attempt"
+
+    async def test_check_external_auth_cache_expires_after_ttl(self, monkeypatch):
+        """A cached result should be discarded once the TTL has elapsed."""
+        import app as app_module
+
+        monkeypatch.setattr(app_module, "EXTERNAL_AUTH_URL", self._EXT_AUTH_URL)
+        monkeypatch.setattr(app_module, "_EXT_AUTH_CACHE", {})
+        monkeypatch.setattr(app_module, "_EXT_AUTH_CACHE_TTL", 60)
+
+        call_count = {"n": 0}
+
+        class _FakeClient:
+            async def post(self, *_args, **_kwargs):
+                call_count["n"] += 1
+
+                class _Response:
+                    status_code = 200
+
+                return _Response()
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(app_module, "_get_async_http_client", _fake_get_client)
+
+        # Populate the cache with an already-expired entry.
+        import time
+
+        app_module._EXT_AUTH_CACHE["Bearer tok"] = (True, time.monotonic() - 1)
+
+        # Should bypass the stale entry and call the external service.
+        assert await app_module._check_external_auth("Bearer tok") is True
+        assert call_count["n"] == 1, "Stale cache entry should trigger a fresh external call"
+
 
 # ---------------------------------------------------------------------------
 # SSE tail endpoint
