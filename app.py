@@ -1538,6 +1538,7 @@ _AI_SETTING_KEYS = (
     "ai.model",
     "ai.thinking_level",
     "ai.api_key",
+    "ai.endpoint_timeout_seconds",
     "ai.guard_endpoint_url",
     "ai.guard_model",
     "ai.guard_thinking_level",
@@ -1562,6 +1563,7 @@ _AI_ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "ai.model": ("SOBS_AI_MODEL", "SOBS_AI_MODEL_FILE"),
     "ai.thinking_level": ("SOBS_AI_THINKING_LEVEL", "SOBS_AI_THINKING_LEVEL_FILE"),
     "ai.api_key": ("SOBS_AI_API_KEY", "SOBS_AI_API_KEY_FILE"),
+    "ai.endpoint_timeout_seconds": ("SOBS_AI_ENDPOINT_TIMEOUT_SECONDS", "SOBS_AI_ENDPOINT_TIMEOUT_SECONDS_FILE"),
     "ai.guard_endpoint_url": ("SOBS_AI_GUARD_ENDPOINT_URL", "SOBS_AI_GUARD_ENDPOINT_URL_FILE"),
     "ai.guard_model": ("SOBS_AI_GUARD_MODEL", "SOBS_AI_GUARD_MODEL_FILE"),
     "ai.guard_thinking_level": ("SOBS_AI_GUARD_THINKING_LEVEL", "SOBS_AI_GUARD_THINKING_LEVEL_FILE"),
@@ -1973,6 +1975,32 @@ def _llm_usage_stats(usage: dict[str, Any] | None, elapsed_ms: int) -> dict[str,
         "thinking_tokens": int(thinking_tokens or 0),
         "elapsed_ms": elapsed_ms,
     }
+
+
+def _query_llm_stage_stats(stats: dict[str, Any] | None) -> dict[str, int]:
+    payload = stats or {}
+    return {
+        "prompt_tokens": int(payload.get("prompt_tokens") or 0),
+        "completion_tokens": int(payload.get("completion_tokens") or 0),
+        "thinking_tokens": int(payload.get("thinking_tokens") or 0),
+        "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+    }
+
+
+def _summarize_query_llm_stats(**stages: dict[str, Any] | None) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "totals": {"prompt_tokens": 0, "completion_tokens": 0, "thinking_tokens": 0, "elapsed_ms": 0}
+    }
+    for stage_name, raw_stats in stages.items():
+        if raw_stats is None:
+            continue
+        stage_stats = _query_llm_stage_stats(raw_stats)
+        summary[stage_name] = stage_stats
+        summary["totals"]["prompt_tokens"] += stage_stats["prompt_tokens"]
+        summary["totals"]["completion_tokens"] += stage_stats["completion_tokens"]
+        summary["totals"]["thinking_tokens"] += stage_stats["thinking_tokens"]
+        summary["totals"]["elapsed_ms"] += stage_stats["elapsed_ms"]
+    return summary
 
 
 def _infer_genai_provider(endpoint_url: str) -> str:
@@ -3433,6 +3461,18 @@ def _resolve_guard_thinking_level(settings: dict[str, str], guard_model: str) ->
 def _resolve_guard_max_tokens(thinking_level: str) -> int:
     # Thinking models can consume output budget on reasoning before final text.
     return 256 if thinking_level != "off" else 64
+
+
+def _resolve_endpoint_timeout_seconds(settings: dict[str, str]) -> int:
+    """Resolve LLM endpoint timeout in seconds (default 120, range 5-300)."""
+    raw = str(settings.get("ai.endpoint_timeout_seconds", "") or "").strip()
+    if not raw:
+        return 120  # Default 120 seconds for complex multi-stage query generation
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 120
+    return max(5, min(300, value))
 
 
 def _resolve_guard_timeout_seconds(settings: dict[str, str]) -> int:
@@ -21729,11 +21769,7 @@ def _build_query_allowed_tables() -> frozenset[str]:
     if not extra:
         return _QUERY_ALLOWED_TABLES_BUILTIN
     _safe_ident = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-    extra_names = frozenset(
-        n.strip().lower()
-        for n in extra.split(",")
-        if n.strip() and _safe_ident.match(n.strip())
-    )
+    extra_names = frozenset(n.strip().lower() for n in extra.split(",") if n.strip() and _safe_ident.match(n.strip()))
     return _QUERY_ALLOWED_TABLES_BUILTIN | extra_names
 
 
@@ -21746,24 +21782,18 @@ _QUERY_ALLOWED_TABLES: frozenset[str] = _build_query_allowed_tables()
 # The comma variant omits the word-boundary (``\b``) because it is
 # preceded by ``)`` which is a non-word character.
 # Identifiers are matched as ``[a-zA-Z_]\w*`` (cannot start with a digit).
-_SQL_CTE_ALIAS_RE = re.compile(
-    r"(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)([a-zA-Z_]\w*)\s+AS\s*\(", re.IGNORECASE
-)
+_SQL_CTE_ALIAS_RE = re.compile(r"(?:\bWITH\s+(?:RECURSIVE\s+)?|,\s*)([a-zA-Z_]\w*)\s+AS\s*\(", re.IGNORECASE)
 
 # Extracts the column/array expression that follows ``ARRAY JOIN`` so it can
 # be excluded from the table-reference allowlist check (ARRAY JOIN targets
 # are array columns, not data-source tables).
-_SQL_ARRAY_JOIN_RE = re.compile(
-    r"\bARRAY\s+JOIN\s+((?:[a-zA-Z_]\w*\.)*[a-zA-Z_]\w*)", re.IGNORECASE
-)
+_SQL_ARRAY_JOIN_RE = re.compile(r"\bARRAY\s+JOIN\s+((?:[a-zA-Z_]\w*\.)*[a-zA-Z_]\w*)", re.IGNORECASE)
 
 # Extracts table/view references that follow ``FROM`` or any ``JOIN`` keyword.
 # Matches optional ``database.`` qualifier (e.g. ``default.otel_logs``).
 # Does NOT match subqueries (``FROM (SELECT …)``), because ``(`` is not ``\w``.
 # Identifiers use ``[a-zA-Z_]\w*`` so numeric-leading tokens are never matched.
-_SQL_TABLE_REF_RE = re.compile(
-    r"\b(?:FROM|JOIN)\s+((?:[a-zA-Z_]\w*\.)*[a-zA-Z_]\w*)", re.IGNORECASE
-)
+_SQL_TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+((?:[a-zA-Z_]\w*\.)*[a-zA-Z_]\w*)", re.IGNORECASE)
 
 
 class ChdbSqlRunner:
@@ -21954,7 +21984,16 @@ read-only ClickHouse SELECT queries based on natural-language questions.
 Rules:
 - Output ONLY raw SQL. No markdown, no backticks, no explanation.
 - You MUST return a non-empty SQL query as your final answer.
-- Use only SELECT statements (or WITH … SELECT). Never use INSERT, UPDATE, DELETE, DROP, CREATE, or any DDL.
+- Use only SELECT statements (or WITH … SELECT). Never use INSERT, UPDATE,
+    DELETE, DROP, CREATE, or any DDL.
+- For complex analytical, correlation, or chart-oriented questions with
+    multiple metrics or transforms, prefer 2-4 compact, clearly named CTEs
+    instead of one large SELECT.
+- For simple questions, a single SELECT is preferred over unnecessary CTEs.
+- When using multiple CTEs, keep each CTE focused on one step such as
+    filtering, aggregation, enrichment, or final shaping.
+- If you use CTEs (WITH ...), you MUST include a final SELECT statement after the CTE block.
+- Ensure all parentheses and quotes are balanced before returning the SQL.
 - The database name is "default". Always qualify table names as `default.<table>` or omit the database when unambiguous.
 - Use ClickHouse-compatible syntax (e.g. toDate(), now(), formatDateTime(), arrayJoin(), etc.).
 - When the question asks for a chart or visualisation, still return only the SQL that produces the data.
@@ -22122,8 +22161,9 @@ async def _vanna_generate_sql(
         {"role": "user", "content": user_content},
     ]
 
+    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
     sql_raw, _stats = await _call_llm_endpoint(
-        endpoint_url, model, api_key, messages, max_tokens=512, thinking_level=thinking_level
+        endpoint_url, model, api_key, messages, max_tokens=1024, thinking_level=thinking_level, timeout=endpoint_timeout
     )
     if not sql_raw:
         error_detail = str(_stats.get("error") or "").strip()
@@ -22186,8 +22226,9 @@ async def _vanna_generate_named_queries(
         {"role": "user", "content": user_message},
     ]
 
+    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
     plan_raw, stats = await _call_llm_endpoint(
-        endpoint_url, model, api_key, messages, max_tokens=768, thinking_level=thinking_level
+        endpoint_url, model, api_key, messages, max_tokens=768, thinking_level=thinking_level, timeout=endpoint_timeout
     )
     if not plan_raw:
         return [], str(stats.get("error") or "").strip(), stats
@@ -22264,8 +22305,18 @@ async def _vanna_repair_sql(
         {"role": "user", "content": user_message},
     ]
 
+    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
     sql_raw, _stats = await _call_llm_endpoint(
-        endpoint_url, model, api_key, messages, max_tokens=512, thinking_level=thinking_level
+        endpoint_url,
+        model,
+        api_key,
+        messages,
+        max_tokens=768,
+        thinking_level=thinking_level,
+        timeout=endpoint_timeout,
+        empty_content_retry_instruction=(
+            "Return ONLY complete executable ClickHouse SQL. " "No reasoning, no markdown, no commentary."
+        ),
     )
     if not sql_raw:
         error_detail = str(_stats.get("error") or "").strip()
@@ -22281,6 +22332,81 @@ async def _vanna_repair_sql(
     if not sql:
         return "", "LLM returned an empty repaired SQL statement.", _stats
     return sql, "", _stats
+
+
+def _repair_truncated_in_clause_literals(sql: str) -> str:
+    """Best-effort fix for a truncated trailing ``IN (...)`` literal list.
+
+    Example input tail:
+        WHERE ServiceName IN ('load-svc-0','load-svc-
+
+    becomes:
+        WHERE ServiceName IN ('load-svc-0')
+    """
+    text = str(sql or "")
+    match = re.search(r"\bIN\s*\(([^)]*)$", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return text
+
+    items_raw = match.group(1)
+    if not items_raw.strip():
+        return text
+
+    cleaned_items: list[str] = []
+    for item in items_raw.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if token.count("'") % 2 != 0:
+            break
+        cleaned_items.append(token)
+
+    if not cleaned_items:
+        return text
+
+    return text[: match.start(1)] + ",".join(cleaned_items) + ")"
+
+
+def _auto_repair_incomplete_cte_sql(sql: str) -> str:
+    """Best-effort local fix for truncated CTE SQL.
+
+    This handles common model truncation output like:
+        WITH t AS (SELECT ... GROUP BY ... HAVING ...
+        WITH t AS (SELECT ... WHERE name IN ('a','b','c-
+
+    by balancing closing parentheses and appending a final
+    ``SELECT * FROM t`` when missing.
+    """
+    text = str(sql or "").strip().rstrip(";")
+    if not text:
+        return ""
+
+    if not re.match(r"^\s*with\b", text, flags=re.IGNORECASE):
+        return ""
+
+    text = _repair_truncated_in_clause_literals(text)
+    if text.count("'") % 2 != 0:
+        return ""
+
+    cte_match = re.match(r"^\s*with\s+([a-zA-Z_]\w*)\s+as\s*\(", text, flags=re.IGNORECASE)
+    if not cte_match:
+        return ""
+
+    has_final_select = re.search(r"\)\s*select\b", text, flags=re.IGNORECASE | re.DOTALL) is not None
+    open_parens = text.count("(")
+    close_parens = text.count(")")
+
+    if has_final_select and open_parens <= close_parens:
+        return ""
+
+    fixed = text
+    if open_parens > close_parens:
+        fixed += ")" * (open_parens - close_parens)
+
+    if re.search(r"\)\s*select\b", fixed, flags=re.IGNORECASE | re.DOTALL) is None:
+        fixed += f"\nSELECT * FROM {cte_match.group(1)}"
+
+    return fixed
 
 
 async def _vanna_generate_chart_spec(
@@ -22345,8 +22471,9 @@ async def _vanna_generate_chart_spec(
         {"role": "user", "content": user_message},
     ]
 
+    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
     spec_raw, _stats = await _call_llm_endpoint(
-        endpoint_url, model, api_key, messages, max_tokens=1024, thinking_level=thinking_level
+        endpoint_url, model, api_key, messages, max_tokens=1024, thinking_level=thinking_level, timeout=endpoint_timeout
     )
     if not spec_raw:
         error_detail = str(_stats.get("error") or "").strip()
@@ -22477,8 +22604,9 @@ async def _vanna_refine_chart_spec(
         {"role": "user", "content": user_message},
     ]
 
+    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
     spec_raw, _stats = await _call_llm_endpoint(
-        endpoint_url, model, api_key, messages, max_tokens=1024, thinking_level=thinking_level
+        endpoint_url, model, api_key, messages, max_tokens=1024, thinking_level=thinking_level, timeout=endpoint_timeout
     )
     if not spec_raw:
         error_detail = str(_stats.get("error") or "").strip()
@@ -22739,6 +22867,7 @@ async def api_query_ask():
                     "sql": "",
                     "columns": [],
                     "rows": [],
+                    "llm_stats": _summarize_query_llm_stats(sql_generation=sql_stats),
                 }
             ),
             503,
@@ -22752,6 +22881,9 @@ async def api_query_ask():
     retry_count = 0
     exec_error = ""
     main_df: pd.DataFrame | None = None
+    last_repair_stats: dict[str, Any] = {}
+    named_stats: dict[str, Any] = {}
+    chart_stats: dict[str, Any] = {}
     if do_execute:
         max_attempts = 3
         current_sql = sql
@@ -22773,34 +22905,45 @@ async def api_query_ask():
                 severity="WARN",
                 attrs={"gen_ai.operation.name": "query_sql_explain", "sobs.query.exec.error": explain_error},
             )
-            repaired_sql, repair_error, repair_stats = await _vanna_repair_sql(
-                question=question,
-                schema_context=schema_context,
-                previous_sql=current_sql,
-                execution_error=explain_error,
-                settings=settings,
-                attempt_number=0,
-                thinking_level=thinking_level,
-            )
-            _emit_ai_helper_log_event(
-                event_name="query.sql.repaired",
-                chat_id=trace_id,
-                turn_id=turn_id,
-                page="/query",
-                model=model,
-                guard_model=guard_model,
-                thinking_level="off",
-                body=repaired_sql if repaired_sql else repair_error,
-                attrs={
-                    "gen_ai.operation.name": "query_sql_repair",
-                    "gen_ai.usage.input_tokens": repair_stats.get("prompt_tokens", 0),
-                    "gen_ai.usage.output_tokens": repair_stats.get("completion_tokens", 0),
-                    "gen_ai.response.latency_ms": repair_stats.get("elapsed_ms", 0),
-                },
-            )
-            if repaired_sql and not repair_error:
-                current_sql = repaired_sql
+
+            auto_repaired = _auto_repair_incomplete_cte_sql(current_sql)
+            if auto_repaired and auto_repaired != current_sql:
+                current_sql = auto_repaired
                 retry_count += 1
+                explain_error = await asyncio.to_thread(_vanna_explain_sql, db, current_sql)
+
+            if not explain_error:
+                pass
+            else:
+                repaired_sql, repair_error, repair_stats = await _vanna_repair_sql(
+                    question=question,
+                    schema_context=schema_context,
+                    previous_sql=current_sql,
+                    execution_error=explain_error,
+                    settings=settings,
+                    attempt_number=0,
+                    thinking_level=thinking_level,
+                )
+                _emit_ai_helper_log_event(
+                    event_name="query.sql.repaired",
+                    chat_id=trace_id,
+                    turn_id=turn_id,
+                    page="/query",
+                    model=model,
+                    guard_model=guard_model,
+                    thinking_level="off",
+                    body=repaired_sql if repaired_sql else repair_error,
+                    attrs={
+                        "gen_ai.operation.name": "query_sql_repair",
+                        "gen_ai.usage.input_tokens": repair_stats.get("prompt_tokens", 0),
+                        "gen_ai.usage.output_tokens": repair_stats.get("completion_tokens", 0),
+                        "gen_ai.response.latency_ms": repair_stats.get("elapsed_ms", 0),
+                    },
+                )
+                if repaired_sql and not repair_error:
+                    current_sql = repaired_sql
+                    retry_count += 1
+                last_repair_stats = repair_stats
 
         for attempt in range(1, max_attempts + 1):
             sql = current_sql
@@ -22853,6 +22996,12 @@ async def api_query_ask():
             if attempt >= max_attempts:
                 break
 
+            auto_repaired = _auto_repair_incomplete_cte_sql(current_sql)
+            if auto_repaired and auto_repaired != current_sql:
+                current_sql = auto_repaired
+                retry_count += 1
+                continue
+
             repaired_sql, repair_error, repair_stats = await _vanna_repair_sql(
                 question=question,
                 schema_context=schema_context,
@@ -22880,9 +23029,11 @@ async def api_query_ask():
             )
             if repair_error:
                 last_repair_error = repair_error
+                last_repair_stats = repair_stats
                 break
             current_sql = repaired_sql
             retry_count += 1
+            last_repair_stats = repair_stats
 
         if exec_error and last_repair_error:
             exec_error = f"{exec_error} | SQL repair error: {last_repair_error}"
@@ -23019,6 +23170,12 @@ async def api_query_ask():
             "datasets": datasets,
             "chart_spec": chart_spec,
             "error": exec_error or chart_error,
+            "llm_stats": _summarize_query_llm_stats(
+                sql_generation=sql_stats,
+                sql_repair=last_repair_stats,
+                named_query_generation=named_stats,
+                chart_generation=chart_stats,
+            ),
         }
     )
 
@@ -23087,6 +23244,7 @@ async def api_query_run():
                     "sql": sql,
                     "columns": [],
                     "rows": [],
+                    "llm_stats": _summarize_query_llm_stats(),
                 }
             ),
             422,
@@ -23144,6 +23302,8 @@ async def api_query_run():
 
     chart_spec = ""
     chart_error = ""
+    named_stats: dict[str, Any] = {}
+    chart_stats: dict[str, Any] = {}
     if do_chart and not exec_error and columns:
         guard_input = question or f"Generate chart for SQL: {sql[:500]}"
         allowed, guard_reason, guard_stats = await _check_guard_model(settings, guard_input, "/query")
@@ -23279,6 +23439,10 @@ async def api_query_run():
             "datasets": datasets,
             "chart_spec": chart_spec,
             "error": final_error,
+            "llm_stats": _summarize_query_llm_stats(
+                named_query_generation=named_stats,
+                chart_generation=chart_stats,
+            ),
         }
     )
 

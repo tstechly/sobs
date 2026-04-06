@@ -10246,9 +10246,7 @@ class TestChdbSqlRunner:
 
     def test_validate_sql_system_tables_is_allowed(self):
         """Querying system.tables is permitted (metadata introspection)."""
-        sobs_app.ChdbSqlRunner.validate_sql(
-            "SELECT name FROM system.tables WHERE database='default'"
-        )
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT name FROM system.tables WHERE database='default'")
 
     def test_validate_sql_system_columns_is_allowed(self):
         """Querying system.columns is permitted."""
@@ -10313,8 +10311,7 @@ class TestChdbSqlRunner:
         """A CTE that reads from a blocked table is still rejected."""
         with pytest.raises(ValueError, match="not permitted"):
             sobs_app.ChdbSqlRunner.validate_sql(
-                "WITH secret AS (SELECT Value FROM sobs_ai_settings WHERE Key='ai.api_key')"
-                " SELECT * FROM secret"
+                "WITH secret AS (SELECT Value FROM sobs_ai_settings WHERE Key='ai.api_key')" " SELECT * FROM secret"
             )
 
     def test_validate_sql_multi_cte_aliases_not_blocked(self):
@@ -10355,9 +10352,7 @@ class TestChdbSqlRunner:
 
     def test_validate_sql_cross_join_allowed_tables_is_allowed(self):
         """CROSS JOIN between two allowed tables is permitted."""
-        sobs_app.ChdbSqlRunner.validate_sql(
-            "SELECT * FROM otel_logs CROSS JOIN otel_traces LIMIT 10"
-        )
+        sobs_app.ChdbSqlRunner.validate_sql("SELECT * FROM otel_logs CROSS JOIN otel_traces LIMIT 10")
 
     # ------------------------------------------------------------------
     # Table allowlist – schema context
