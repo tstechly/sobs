@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from '_multi_select_filter.html' import render_multi_select %}
 {% block title %}Logs{% endblock %}
 {% block content %}
 {% set live = request.args.get('live', '') %}
@@ -75,7 +76,7 @@
     </h2>
     <div id="logsFiltersPanel" class="accordion-collapse collapse show" aria-labelledby="logsFiltersHeading" data-bs-parent="#logsFiltersAccordion">
       <div class="accordion-body py-3">
-    <form method="get" class="d-flex flex-wrap gap-2 align-items-end">
+    <form method="get" class="d-flex flex-wrap gap-2 align-items-end sobs-filter-form">
       <input type="hidden" name="live" id="liveModeInput" value="{{ '1' if live == '1' else '' }}">
       <input type="hidden" name="analyze" value="{{ analyze }}">
       <input type="hidden" name="stats" value="{{ '1' if stats_open else '' }}">
@@ -91,24 +92,8 @@
               style="display:none;position:absolute;top:100%;left:0;z-index:1060;min-width:100%;max-width:600px;max-height:min(400px,60vh);overflow-y:auto;"></ul>
         </div>
       </div>
-      <div style="flex: 1 0 120px">
-        <label class="form-label small text-secondary">Level</label>
-        <select name="level" class="form-select form-select-sm">
-          <option value="">All levels</option>
-          {% for l in levels %}
-          <option value="{{ l }}" {% if l == level %}selected{% endif %}>{{ l }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div style="flex: 1 0 140px">
-        <label class="form-label small text-secondary">Service</label>
-        <select name="service" class="form-select form-select-sm">
-          <option value="">All services</option>
-          {% for s in services %}
-          <option value="{{ s }}" {% if s == service %}selected{% endif %}>{{ s }}</option>
-          {% endfor %}
-        </select>
-      </div>
+      {{ render_multi_select('level', 'Level', levels, selected_levels, '120px') }}
+      {{ render_multi_select('service', 'Service', services, selected_services, '140px') }}
       <div style="flex: 1 0 220px">
         <div class="d-flex align-items-center justify-content-between">
           <label class="form-label small text-secondary mb-1">Trace ID</label>
@@ -131,15 +116,7 @@
           autocomplete="off">
       </div>
       {% if event_names %}
-      <div style="flex: 1 0 130px">
-        <label class="form-label small text-secondary">Event</label>
-        <select name="event_name" class="form-select form-select-sm">
-          <option value="">All events</option>
-          {% for e in event_names %}
-          <option value="{{ e }}" {% if e == event_name %}selected{% endif %}>{{ e }}</option>
-          {% endfor %}
-        </select>
-      </div>
+      {{ render_multi_select('event_name', 'Event', event_names, selected_event_names, '130px') }}
       {% endif %}
       <div class="filter-date-group">
         <div class="filter-date-fields">
@@ -244,11 +221,11 @@
           </a>
         </div>
         <div class="row g-3">
-          {% if level_stats %}
+              {% if level_stats %}
           <div class="col-md-6">
             <div class="d-flex align-items-center justify-content-between mb-2">
               <h6 class="text-secondary small mb-0"><i class="bi bi-tag me-1"></i>By Level</h6>
-              {% if level %}
+              {% if selected_levels %}
               <a class="small text-decoration-none"
                   href="{{ url_for('view_logs', q=q, level='', service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}">
                 Clear
@@ -258,7 +235,7 @@
             <div class="d-flex flex-wrap gap-2">
               {% for lvl, cnt in level_stats.items() %}
               <a href="{{ url_for('view_logs', q=q, level=lvl, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
-                 class="badge badge-level-{{ lvl }} text-decoration-none{% if lvl == level %} border border-light{% endif %}">
+                 class="badge badge-level-{{ lvl }} text-decoration-none{% if lvl in selected_levels %} border border-light{% endif %}">
                 {{ lvl }}: {{ cnt }}
               </a>
               {% endfor %}
@@ -272,7 +249,7 @@
           <div class="col-md-6">
             <div class="d-flex align-items-center justify-content-between mb-2">
               <h6 class="text-secondary small mb-0"><i class="bi bi-server me-1"></i>By Service</h6>
-              {% if service %}
+              {% if selected_services %}
               <a class="small text-decoration-none"
                   href="{{ url_for('view_logs', q=q, level=level, service='', trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}">
                 Clear
@@ -282,7 +259,7 @@
             <div class="d-flex flex-wrap gap-2">
               {% for svc, cnt in service_stats.items() %}
               <a href="{{ url_for('view_logs', q=q, level=level, service=svc, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
-                 class="badge bg-secondary text-decoration-none{% if svc == service %} border border-light{% endif %}">
+                 class="badge bg-secondary text-decoration-none{% if svc in selected_services %} border border-light{% endif %}">
                 {{ svc }}: {{ cnt }}
               </a>
               {% endfor %}
@@ -517,8 +494,8 @@
 
   const activeFilters = {
     q: {{ q|tojson }},
-    level: {{ level|tojson }},
-    service: {{ service|tojson }},
+    levels: {{ selected_levels|tojson }},
+    services: {{ selected_services|tojson }},
     sql: {{ sql_where|tojson }}
   };
   const activeSort = {
@@ -671,11 +648,17 @@
   }
 
   function passesFilters(event) {
-    if (activeFilters.level && String(event.level || "").toUpperCase() !== activeFilters.level) {
-      return false;
+    if (activeFilters.levels && activeFilters.levels.length > 0) {
+      const eventLevel = String(event.level || "").toUpperCase();
+      if (!activeFilters.levels.includes(eventLevel)) {
+        return false;
+      }
     }
-    if (activeFilters.service && String(event.service || "") !== activeFilters.service) {
-      return false;
+    if (activeFilters.services && activeFilters.services.length > 0) {
+      const eventService = String(event.service || "");
+      if (!activeFilters.services.includes(eventService)) {
+        return false;
+      }
     }
     if (activeFilters.q) {
       try {

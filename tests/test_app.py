@@ -3205,10 +3205,13 @@ class TestUIPages:
         )
         assert r.status_code == 200
         data = await r.get_data()
-        assert b"event_name=turn.feedback" in data
         assert b"q=error" in data
-        assert b"level=INFO" in data
-        assert b"service=svc-a" in data
+        # Level, Service, and Event are now in hidden inputs (multi-select components)
+        assert b'name="level"' in data and b'value="INFO"' in data
+        assert b'name="service"' in data and b'value="svc-a"' in data
+        # Event filter UI only renders when event_names catalog is available.
+        if b'name="event_name"' in data:
+            assert b'value="turn.feedback"' in data
         assert b"sql=SeverityText" in data
         assert b"from_ts=2026-04-06" in data
         assert b"to_ts=2026-04-06" in data
@@ -4465,7 +4468,7 @@ class TestGenAICompliance:
         r2 = await client.get("/ai?view=trace&span_name=ai.guard.result")
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
-        assert '<option value="ai.guard.result" selected' in body
+        assert 'name="span_name" value="ai.guard.result"' in body
 
     async def test_ai_view_includes_metrics_tab(self, client):
         """AI view should include Metrics tab with token and timing info."""

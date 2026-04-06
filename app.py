@@ -9014,13 +9014,14 @@ def _compute_advanced_log_analysis(rows: list[dict], level_stats: dict, service_
 async def view_logs():
     db = get_db()
     q = request.args.get("q", "").strip()
-    level = request.args.get("level", "").strip().upper()
-    service = request.args.get("service", "").strip()
+    selected_levels = [level_val.strip().upper() for level_val in request.args.getlist("level") if level_val.strip()]
+    selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
     trace_id = request.args.get("trace_id", "").strip()
     trace_ids, trace_id = _parse_trace_filter_values(trace_id, request.args.getlist("trace_ids"))
     trace_ids_csv = ",".join(trace_ids)
     trace_ids_count = len(trace_ids)
-    event_name = request.args.get("event_name", "").strip()
+    selected_event_names = [evt.strip() for evt in request.args.getlist("event_name") if evt.strip()]
+    event_name = ""  # Keep empty for backward compatibility; use selected_event_names for filtering
     from_ts, to_ts, time_error = _parse_time_window_args()
     sql_where = request.args.get("sql", "").strip()
     run_advanced_analysis = request.args.get("analyze", "").strip() == "1"
@@ -9096,15 +9097,18 @@ async def view_logs():
     else:
         conditions = []
         params = []
-        if level:
-            conditions.append("SeverityText=?")
-            params.append(level)
-        if service:
-            conditions.append("ServiceName=?")
-            params.append(service)
-        if event_name:
-            conditions.append("EventName=?")
-            params.append(event_name)
+        if selected_levels:
+            placeholders = ",".join(["?"] * len(selected_levels))
+            conditions.append(f"SeverityText IN ({placeholders})")
+            params.extend(selected_levels)
+        if selected_services:
+            placeholders = ",".join(["?"] * len(selected_services))
+            conditions.append(f"ServiceName IN ({placeholders})")
+            params.extend(selected_services)
+        if selected_event_names:
+            placeholders = ",".join(["?"] * len(selected_event_names))
+            conditions.append(f"EventName IN ({placeholders})")
+            params.extend(selected_event_names)
         if trace_ids:
             placeholders = ",".join(["?"] * len(trace_ids))
             conditions.append(f"lower(TraceId) IN ({placeholders})")
@@ -9243,8 +9247,10 @@ async def view_logs():
         limit=limit,
         offset=offset,
         q=q,
-        level=level,
-        service=service,
+        level="",  # Keep empty for backward compatibility; use selected_levels for filtering
+        selected_levels=selected_levels,
+        service="",  # Keep empty for backward compatibility; use selected_services for filtering
+        selected_services=selected_services,
         trace_id=trace_id,
         trace_ids_csv=trace_ids_csv,
         trace_ids_count=trace_ids_count,
@@ -9255,6 +9261,7 @@ async def view_logs():
         levels=levels,
         event_names=event_names,
         event_name=event_name,
+        selected_event_names=selected_event_names,
         error_msg=error_msg,
         sort_by=sort_by,
         sort_dir=sort_dir,
@@ -10497,9 +10504,12 @@ def _annotate_rows_with_rules(
 @require_basic_auth
 async def view_metrics():
     db = get_db()
-    service = request.args.get("service", "").strip()
-    signal = request.args.get("signal", "").strip()
-    source = request.args.get("source", "").strip()
+    selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
+    selected_signals = [sig.strip() for sig in request.args.getlist("signal") if sig.strip()]
+    selected_sources = [src.strip() for src in request.args.getlist("source") if src.strip()]
+    service = selected_services[0] if selected_services else ""
+    signal = selected_signals[0] if selected_signals else ""
+    source = selected_sources[0] if selected_sources else ""
     attr_fp = request.args.get("attr_fp", "").strip()
     from_ts, to_ts, time_error = _parse_time_window_args()
     limit = _parse_limit(100)
@@ -10527,15 +10537,18 @@ async def view_metrics():
 
     where_parts: list[str] = []
     params: list[str] = []
-    if service:
-        where_parts.append("ServiceName = ?")
-        params.append(service)
-    if signal:
-        where_parts.append("SignalName = ?")
-        params.append(signal)
-    if source:
-        where_parts.append("SignalSource = ?")
-        params.append(source)
+    if selected_services:
+        placeholders = ",".join(["?"] * len(selected_services))
+        where_parts.append(f"ServiceName IN ({placeholders})")
+        params.extend(selected_services)
+    if selected_signals:
+        placeholders = ",".join(["?"] * len(selected_signals))
+        where_parts.append(f"SignalName IN ({placeholders})")
+        params.extend(selected_signals)
+    if selected_sources:
+        placeholders = ",".join(["?"] * len(selected_sources))
+        where_parts.append(f"SignalSource IN ({placeholders})")
+        params.extend(selected_sources)
     if attr_fp:
         where_parts.append("AttrFingerprint = ?")
         params.append(attr_fp)
@@ -10624,8 +10637,11 @@ async def view_metrics():
         limit=limit,
         offset=offset,
         service=service,
+        selected_services=selected_services,
         signal=signal,
+        selected_signals=selected_signals,
         source=source,
+        selected_sources=selected_sources,
         attr_fp=attr_fp,
         from_ts=from_ts,
         to_ts=to_ts,
@@ -11237,7 +11253,8 @@ def _load_work_item_links_for_ref_ids(db: ChDbConnection, ref_ids: list[str]) ->
 @require_basic_auth
 async def view_errors():
     db = get_db()
-    service = request.args.get("service", "").strip()
+    selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
+    service = selected_services[0] if selected_services else ""
     group_by = request.args.get("group_by", "").strip().lower()
     grouped_mode = request.args.get("grouped", "").strip() == "1" or group_by in {
         "group",
@@ -11257,9 +11274,10 @@ async def view_errors():
     resolved_ids = _get_resolved_error_ids(db)
     where_parts = []
     where_params = []
-    if service:
-        where_parts.append("ServiceName=?")
-        where_params.append(service)
+    if selected_services:
+        placeholders = ",".join(["?"] * len(selected_services))
+        where_parts.append(f"ServiceName IN ({placeholders})")
+        where_params.extend(selected_services)
     time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
     where_parts.extend(time_conditions)
     where_params.extend(time_params)
@@ -11364,6 +11382,7 @@ async def view_errors():
         limit=limit,
         offset=offset,
         service=service,
+        selected_services=selected_services,
         from_ts=from_ts,
         to_ts=to_ts,
         error_msg=time_error,
@@ -11537,7 +11556,8 @@ def _build_trace_timeline_segments(
 @require_basic_auth
 async def view_traces():
     db = get_db()
-    service = request.args.get("service", "").strip()
+    selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
+    service = selected_services[0] if selected_services else ""
     trace_id = request.args.get("trace_id", "").strip()
     from_ts, to_ts, time_error = _parse_time_window_args()
     limit = _parse_limit(100)
@@ -11555,9 +11575,10 @@ async def view_traces():
 
     conditions = []
     params = []
-    if service:
-        conditions.append("ServiceName=?")
-        params.append(service)
+    if selected_services:
+        placeholders = ",".join(["?"] * len(selected_services))
+        conditions.append(f"ServiceName IN ({placeholders})")
+        params.extend(selected_services)
     if trace_id:
         conditions.append("TraceId=?")
         params.append(trace_id)
@@ -11745,6 +11766,7 @@ async def view_traces():
         limit=limit,
         offset=offset,
         service=service,
+        selected_services=selected_services,
         trace_id=trace_id,
         from_ts=from_ts,
         to_ts=to_ts,
@@ -13437,8 +13459,10 @@ async def view_enrichment_cve():
     except (TypeError, ValueError):
         cve_last_backfill_cap = 0
 
-    severity_filter = request.args.get("severity", "").strip()
-    ecosystem_filter = request.args.get("ecosystem", "").strip()
+    selected_severities = [s.strip() for s in request.args.getlist("severity") if s.strip()]
+    selected_ecosystems = [e.strip() for e in request.args.getlist("ecosystem") if e.strip()]
+    severity_filter = selected_severities[0] if selected_severities else ""
+    ecosystem_filter = selected_ecosystems[0] if selected_ecosystems else ""
     package_filter = request.args.get("package", "").strip()
     show_all = request.args.get("show_all", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -13492,10 +13516,12 @@ async def view_enrichment_cve():
                 )
             ecosystems = sorted({f["ecosystem"] for f in cve_findings if f["ecosystem"]})
             severities = sorted({f["severity"] for f in cve_findings if f["severity"]})
-            if severity_filter:
-                cve_findings = [f for f in cve_findings if f["severity"] == severity_filter]
-            if ecosystem_filter:
-                cve_findings = [f for f in cve_findings if f["ecosystem"] == ecosystem_filter]
+            if selected_severities:
+                selected_severity_set = set(selected_severities)
+                cve_findings = [f for f in cve_findings if f["severity"] in selected_severity_set]
+            if selected_ecosystems:
+                selected_ecosystem_set = set(selected_ecosystems)
+                cve_findings = [f for f in cve_findings if f["ecosystem"] in selected_ecosystem_set]
             if package_filter:
                 pkg_lower = package_filter.lower()
                 cve_findings = [f for f in cve_findings if pkg_lower in f["package"].lower()]
@@ -13521,6 +13547,8 @@ async def view_enrichment_cve():
         severities=severities,
         severity_filter=severity_filter,
         ecosystem_filter=ecosystem_filter,
+        selected_severities=selected_severities,
+        selected_ecosystems=selected_ecosystems,
         package_filter=package_filter,
         show_all=show_all,
     )
@@ -13859,18 +13887,23 @@ async def api_get_work_items():
 @require_basic_auth
 async def view_ai():
     db = get_db()
-    service = request.args.get("service", "").strip()
-    model = request.args.get("model", "").strip()
-    operation_filter = request.args.get("operation", "").strip()
-    span_name = request.args.get("span_name", "").strip()
-    row_type = request.args.get("row_type", "").strip().lower()
+    selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
+    selected_models = [mdl.strip() for mdl in request.args.getlist("model") if mdl.strip()]
+    selected_operations = [op.strip() for op in request.args.getlist("operation") if op.strip()]
+    selected_span_names = [sn.strip() for sn in request.args.getlist("span_name") if sn.strip()]
+    selected_row_types = [rt.strip().lower() for rt in request.args.getlist("row_type") if rt.strip()]
+    selected_row_types = [rt for rt in selected_row_types if rt in ("llm", "system")]
+
+    service = selected_services[0] if selected_services else ""
+    model = selected_models[0] if selected_models else ""
+    operation_filter = selected_operations[0] if selected_operations else ""
+    span_name = selected_span_names[0] if selected_span_names else ""
+    row_type = selected_row_types[0] if selected_row_types else ""
     sql_where = request.args.get("sql", "").strip()
     from_ts, to_ts, time_error = _parse_time_window_args()
     view_mode = request.args.get("view", "flat").strip().lower()
     if view_mode not in ("flat", "trace"):
         view_mode = "flat"
-    if row_type not in ("", "llm", "system"):
-        row_type = ""
     limit = _parse_limit(50)
     offset = _parse_offset()
     sort_by, sort_col, sort_dir = _parse_sort(
@@ -13896,27 +13929,36 @@ async def view_ai():
             error_msg = f"SQL error: {_public_dashboard_query_error(exc)}"
             where = "WHERE " + base_ai_condition
     elif not error_msg:
-        if service:
-            conditions.append("ServiceName=?")
-            params.append(service)
-        if model:
-            conditions.append("SpanAttributes['gen_ai.request.model']=?")
-            params.append(model)
-        if operation_filter:
-            if operation_filter.lower() == "chat":
-                conditions.append(
-                    "(SpanAttributes['gen_ai.operation.name']=? OR SpanAttributes['gen_ai.operation.name']='')"
-                )
-                params.append("chat")
-            else:
-                conditions.append("SpanAttributes['gen_ai.operation.name']=?")
-                params.append(operation_filter)
-        if span_name:
-            conditions.append("SpanName=?")
-            params.append(span_name)
-        if row_type == "llm":
+        if selected_services:
+            placeholders = ",".join(["?"] * len(selected_services))
+            conditions.append(f"ServiceName IN ({placeholders})")
+            params.extend(selected_services)
+        if selected_models:
+            placeholders = ",".join(["?"] * len(selected_models))
+            conditions.append(f"SpanAttributes['gen_ai.request.model'] IN ({placeholders})")
+            params.extend(selected_models)
+        if selected_operations:
+            operation_conditions = []
+            for selected_operation in selected_operations:
+                if selected_operation.lower() == "chat":
+                    operation_conditions.append(
+                        "(SpanAttributes['gen_ai.operation.name']=? OR SpanAttributes['gen_ai.operation.name']='')"
+                    )
+                    params.append("chat")
+                else:
+                    operation_conditions.append("SpanAttributes['gen_ai.operation.name']=?")
+                    params.append(selected_operation)
+            if operation_conditions:
+                conditions.append("(" + " OR ".join(operation_conditions) + ")")
+        if selected_span_names:
+            placeholders = ",".join(["?"] * len(selected_span_names))
+            conditions.append(f"SpanName IN ({placeholders})")
+            params.extend(selected_span_names)
+
+        selected_row_type_set = set(selected_row_types)
+        if selected_row_type_set == {"llm"}:
             conditions.append("SpanAttributes['gen_ai.request.model'] != ''")
-        elif row_type == "system":
+        elif selected_row_type_set == {"system"}:
             conditions.append("SpanAttributes['gen_ai.request.model'] = ''")
         conditions.append(base_ai_condition)
         conditions.extend(time_conditions)
@@ -14226,10 +14268,15 @@ async def view_ai():
         limit=limit,
         offset=offset,
         service=service,
+        selected_services=selected_services,
         model=model,
+        selected_models=selected_models,
         operation=operation_filter,
+        selected_operations=selected_operations,
         span_name=span_name,
+        selected_span_names=selected_span_names,
         row_type=row_type,
+        selected_row_types=selected_row_types,
         sql_where=sql_where,
         view_mode=view_mode,
         services=services,
@@ -23787,8 +23834,29 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
             return int(v or 0)
         return int(row[0] or 0)
 
+    def _normalized_values(raw: Any) -> list[str]:
+        if isinstance(raw, (list, tuple, set)):
+            return [str(v).strip() for v in raw if str(v).strip()]
+        if raw is None:
+            return []
+        value = str(raw).strip()
+        return [value] if value else []
+
+    def _append_or_equals(conditions: list[str], params: list[Any], field_sql: str, values: list[str]) -> None:
+        if not values:
+            return
+        placeholders = " OR ".join([f"{field_sql} = ?"] * len(values))
+        conditions.append(f"({placeholders})")
+        params.extend(values)
+
     name_filter = str(query.get("name", "")).strip()
     namespace_filter = str(query.get("namespace", "")).strip()
+    namespace_values = _normalized_values(query.get("namespace_values"))
+    if not namespace_values and namespace_filter:
+        namespace_values = [namespace_filter]
+    node_values = _normalized_values(query.get("node_values"))
+    deployment_values = _normalized_values(query.get("deployment_values"))
+    pod_values = _normalized_values(query.get("pod_values"))
 
     table_defaults: dict[str, dict[str, Any]] = {
         "nodes": {"sort": "name", "page": 1, "page_size": 25},
@@ -23879,6 +23947,7 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 "MetricName IN ('kube_node_status_condition', 'kube_node_status_allocatable', 'kube_node_info')",
             ]
             node_params: list[Any] = []
+            _append_or_equals(node_conditions, node_params, "Attributes['node']", node_values)
             if name_filter:
                 node_conditions.append("positionCaseInsensitive(Attributes['node'], ?) > 0")
                 node_params.append(name_filter)
@@ -23945,6 +24014,7 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
         try:
             node_conditions = ["Attributes['k8s.node.name'] != ''"]
             node_params = []
+            _append_or_equals(node_conditions, node_params, "Attributes['k8s.node.name']", node_values)
             if name_filter:
                 node_conditions.append("positionCaseInsensitive(Attributes['k8s.node.name'], ?) > 0")
                 node_params.append(name_filter)
@@ -24012,9 +24082,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 " 'kube_pod_info')",
             ]
             pod_params: list[Any] = []
-            if namespace_filter:
-                pod_conditions.append("Attributes['namespace'] = ?")
-                pod_params.append(namespace_filter)
+            _append_or_equals(pod_conditions, pod_params, "Attributes['namespace']", namespace_values)
+            _append_or_equals(pod_conditions, pod_params, "Attributes['pod']", pod_values)
             if name_filter:
                 pod_conditions.append("positionCaseInsensitive(Attributes['pod'], ?) > 0")
                 pod_params.append(name_filter)
@@ -24044,9 +24113,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 "MetricName = 'kube_pod_container_status_restarts_total'",
             ]
             pod_sum_params: list[Any] = []
-            if namespace_filter:
-                pod_sum_conditions.append("Attributes['namespace'] = ?")
-                pod_sum_params.append(namespace_filter)
+            _append_or_equals(pod_sum_conditions, pod_sum_params, "Attributes['namespace']", namespace_values)
+            _append_or_equals(pod_sum_conditions, pod_sum_params, "Attributes['pod']", pod_values)
             if name_filter:
                 pod_sum_conditions.append("positionCaseInsensitive(Attributes['pod'], ?) > 0")
                 pod_sum_params.append(name_filter)
@@ -24131,9 +24199,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
         try:
             pod_conditions = ["Attributes['k8s.pod.name'] != ''"]
             pod_params = []
-            if namespace_filter:
-                pod_conditions.append("Attributes['k8s.namespace.name'] = ?")
-                pod_params.append(namespace_filter)
+            _append_or_equals(pod_conditions, pod_params, "Attributes['k8s.namespace.name']", namespace_values)
+            _append_or_equals(pod_conditions, pod_params, "Attributes['k8s.pod.name']", pod_values)
             if name_filter:
                 pod_conditions.append("positionCaseInsensitive(Attributes['k8s.pod.name'], ?) > 0")
                 pod_params.append(name_filter)
@@ -24210,9 +24277,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 " 'kube_deployment_status_replicas')",
             ]
             deploy_params: list[Any] = []
-            if namespace_filter:
-                deploy_conditions.append("Attributes['namespace'] = ?")
-                deploy_params.append(namespace_filter)
+            _append_or_equals(deploy_conditions, deploy_params, "Attributes['namespace']", namespace_values)
+            _append_or_equals(deploy_conditions, deploy_params, "Attributes['deployment']", deployment_values)
             if name_filter:
                 deploy_conditions.append("positionCaseInsensitive(Attributes['deployment'], ?) > 0")
                 deploy_params.append(name_filter)
@@ -24268,9 +24334,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
         try:
             deploy_conditions = ["Attributes['k8s.deployment.name'] != ''"]
             deploy_params = []
-            if namespace_filter:
-                deploy_conditions.append("Attributes['k8s.namespace.name'] = ?")
-                deploy_params.append(namespace_filter)
+            _append_or_equals(deploy_conditions, deploy_params, "Attributes['k8s.namespace.name']", namespace_values)
+            _append_or_equals(deploy_conditions, deploy_params, "Attributes['k8s.deployment.name']", deployment_values)
             if name_filter:
                 deploy_conditions.append("positionCaseInsensitive(Attributes['k8s.deployment.name'], ?) > 0")
                 deploy_params.append(name_filter)
@@ -24439,6 +24504,10 @@ async def api_kubernetes_status():
 
     query_opts: dict[str, Any] = {
         "namespace": request.args.get("namespace", "").strip(),
+        "namespace_values": [v.strip() for v in request.args.getlist("namespace") if v.strip()],
+        "node_values": [v.strip() for v in request.args.getlist("node") if v.strip()],
+        "deployment_values": [v.strip() for v in request.args.getlist("deployment") if v.strip()],
+        "pod_values": [v.strip() for v in request.args.getlist("pod") if v.strip()],
         "name": request.args.get("name", "").strip(),
         "nodes_sort": request.args.get("nodes_sort", "name").strip(),
         "nodes_dir": request.args.get("nodes_dir", "asc").strip().lower(),

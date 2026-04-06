@@ -1,0 +1,437 @@
+{# 
+  Reusable multi-select filter component for dropdowns
+  
+  Usage:
+  {% from '_multi_select_filter.html' import render_multi_select %}
+  {{ render_multi_select('level', 'Level', levels, [current_level], '120px') }}
+#}
+
+{% macro render_multi_select(filter_name, label, options, selected_values, flex_basis='120px', single_select=false, auto_submit=true, input_name=None) %}
+{% set _input_name = input_name if input_name is not none else filter_name %}
+<div style="flex: 1 1 {{ flex_basis }}; min-width: 0;">
+  <label class="form-label small text-secondary">{{ label }}</label>
+  <div class="dropdown sobs-multi-select-wrap" id="dropdown-{{ filter_name }}">
+    <button 
+      class="form-select form-select-sm sobs-multi-select-toggle"
+      type="button"
+      id="btn-{{ filter_name }}"
+      data-bs-toggle="dropdown"
+      aria-expanded="false"
+      style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+      <span id="label-{{ filter_name }}" class="sobs-multi-select-label">
+        {%- if selected_values %}
+          {{- selected_values | join(', ') -}}
+        {%- else %}
+          All {{ label | lower }}
+        {%- endif -%}
+      </span>
+    </button>
+    <button
+      type="button"
+      id="clear-{{ filter_name }}"
+      class="sobs-multi-select-clear-btn"
+      aria-label="Clear selected {{ label | lower }}"
+      title="Clear selected {{ label | lower }}"
+      hidden>
+      <i class="bi bi-x"></i>
+    </button>
+    <ul class="dropdown-menu sobs-multi-select-menu" aria-labelledby="btn-{{ filter_name }}">
+      {% for opt in options %}
+      {% if opt is mapping %}
+      {% set opt_value = opt.get('value', '') %}
+      {% set opt_label = opt.get('label', opt_value) %}
+      {% else %}
+      {% set opt_value = opt %}
+      {% set opt_label = opt %}
+      {% endif %}
+      <li>
+        <button
+          type="button"
+          class="dropdown-item px-2 py-2 d-flex align-items-center sobs-multi-select-option{% if opt_value in selected_values %} is-selected{% endif %}"
+          data-filter-option="{{ filter_name }}"
+          data-option-value="{{ opt_value }}"
+          aria-pressed="{{ 'true' if opt_value in selected_values else 'false' }}">
+          <i class="bi bi-check2 sobs-multi-select-checkmark{% if opt_value in selected_values %} visible{% endif %}" aria-hidden="true"></i>
+          <span class="sobs-multi-select-option-text">{{ opt_label }}</span>
+        </button>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  <!-- Hidden inputs for form submission (initial state) -->
+  <div id="hidden-fields-{{ filter_name }}">
+    {%- for value in selected_values %}
+    <input type="hidden" name="{{ _input_name }}" value="{{ value }}">
+    {%- endfor %}
+  </div>
+</div>
+
+<script>
+(function() {
+  const filterName = "{{ filter_name }}";
+  const inputName = "{{ _input_name }}";
+  const singleSelect = {{ single_select | tojson }};
+  const autoSubmit = {{ auto_submit | tojson }};
+  const btnId = `btn-${filterName}`;
+  const clearBtnId = `clear-${filterName}`;
+  const labelId = `label-${filterName}`;
+  const hiddenFieldsId = `hidden-fields-${filterName}`;
+  
+  const btn = document.getElementById(btnId);
+  const clearBtn = document.getElementById(clearBtnId);
+  const label = document.getElementById(labelId);
+  const hiddenFieldsContainer = document.getElementById(hiddenFieldsId);
+  const dropdown = document.getElementById(`dropdown-${filterName}`);
+  const dropdownMenu = dropdown ? dropdown.querySelector('.dropdown-menu') : null;
+  
+  // Find all selectable options for this filter
+  const options = document.querySelectorAll(`button[data-filter-option="${filterName}"]`);
+  
+  function getSelectedValues() {
+    return Array.from(options)
+      .filter(option => option.classList.contains('is-selected'))
+      .map(option => option.dataset.optionValue || '');
+  }
+
+  function getSelectedLabels() {
+    return Array.from(options)
+      .filter(option => option.classList.contains('is-selected'))
+      .map(option => {
+        const textNode = option.querySelector('.sobs-multi-select-option-text');
+        return textNode ? textNode.textContent.trim() : (option.dataset.optionValue || '');
+      });
+  }
+
+  function syncOptionVisuals() {
+    options.forEach((option) => {
+      const isActive = option.classList.contains('is-selected');
+      option.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      const checkmark = option.querySelector('.sobs-multi-select-checkmark');
+      if (checkmark) {
+        checkmark.classList.toggle('visible', isActive);
+      }
+    });
+  }
+  
+  function updateLabel() {
+    const checked = getSelectedValues();
+    const checkedLabels = getSelectedLabels();
+    
+    if (checked.length === 0) {
+      label.textContent = `All {{ label | lower }}`;
+      label.title = `All {{ label | lower }}`;
+    } else if (checked.length === 1) {
+      label.textContent = checkedLabels[0] || checked[0];
+      label.title = checkedLabels[0] || checked[0];
+    } else {
+      label.textContent = `${checked.length} selected`;
+      label.title = checkedLabels.join(', ');
+    }
+
+    if (clearBtn) {
+      clearBtn.hidden = singleSelect || checked.length <= 1;
+    }
+
+    syncOptionVisuals();
+    
+    // Update hidden fields for form submission
+    hiddenFieldsContainer.innerHTML = '';
+    checked.forEach(value => {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = inputName;
+      input.value = value;
+      hiddenFieldsContainer.appendChild(input);
+    });
+  }
+
+  function updateMenuWidth() {
+    if (!dropdownMenu || !btn) {
+      return;
+    }
+
+    // Clear any previous explicit size before measuring.
+    dropdownMenu.style.width = '';
+
+    const triggerWidth = Math.ceil(btn.getBoundingClientRect().width);
+    let contentWidth = 0;
+
+    const computed = window.getComputedStyle(btn);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.font = `${computed.fontStyle} ${computed.fontVariant} ${computed.fontWeight} ${computed.fontSize} / ${computed.lineHeight} ${computed.fontFamily}`;
+    }
+
+    options.forEach((option) => {
+      const text = String(option.dataset.optionValue || '').trim();
+      if (!text) {
+        return;
+      }
+      if (ctx) {
+        contentWidth = Math.max(contentWidth, Math.ceil(ctx.measureText(text).width));
+      } else {
+        const textNode = option.querySelector('.sobs-multi-select-option-text');
+        if (textNode) {
+          contentWidth = Math.max(contentWidth, Math.ceil(textNode.scrollWidth));
+        }
+      }
+    });
+
+    // Extra room for menu padding and the right-side checkmark.
+    const horizontalChrome = 72;
+    const desired = Math.max(triggerWidth, contentWidth + horizontalChrome);
+    const viewportCap = Math.floor(window.innerWidth * 0.9);
+    const absoluteCap = 900;
+    const finalWidth = Math.min(desired, viewportCap, absoluteCap);
+
+    dropdownMenu.style.width = `${finalWidth}px`;
+  }
+  
+  // Wait for DOM to be ready if needed
+  function initialize() {
+    // Initialize
+    updateLabel();
+    updateMenuWidth();
+    
+    // Toggle selection state on option click
+    options.forEach(option => {
+      option.addEventListener('click', () => {
+        if (singleSelect) {
+          options.forEach((item) => item.classList.remove('is-selected'));
+          option.classList.add('is-selected');
+        } else {
+          option.classList.toggle('is-selected');
+        }
+        updateLabel();
+        const event = new CustomEvent('sobs:filters:changed', { bubbles: true });
+        option.dispatchEvent(event);
+        // Auto-submit form when filter changes
+        const form = option.closest('form');
+        if (autoSubmit && form) {
+          form.submit();
+        }
+      });
+    });
+    
+    // Prevent dropdown from closing when clicking inside
+    if (dropdownMenu) {
+      dropdownMenu.addEventListener('click', (e) => {
+        e.stopPropagation();
+      });
+
+      // Recalculate width right before showing in case option content changed.
+      dropdown.addEventListener('show.bs.dropdown', updateMenuWidth);
+      dropdown.addEventListener('shown.bs.dropdown', updateMenuWidth);
+      btn.addEventListener('click', updateMenuWidth);
+      window.addEventListener('resize', updateMenuWidth);
+    }
+
+    if (clearBtn) {
+      clearBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        options.forEach((option) => option.classList.remove('is-selected'));
+        updateLabel();
+        const event = new CustomEvent('sobs:filters:changed', { bubbles: true });
+        clearBtn.dispatchEvent(event);
+        const form = clearBtn.closest('form');
+        if (autoSubmit && form) {
+          form.submit();
+        }
+      });
+    }
+  }
+  
+  // Run immediately if DOM is ready, otherwise wait
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize);
+  } else {
+    initialize();
+  }
+})();
+
+(function () {
+  if (window.__sobsFilterFormEnhancementsInit) {
+    return;
+  }
+  window.__sobsFilterFormEnhancementsInit = true;
+
+  function findSubmitButton(form) {
+    return form.querySelector('[data-ai-action-role="filter-submit"], button[type="submit"]');
+  }
+
+  function flashSubmitButton(form) {
+    const submitButton = findSubmitButton(form);
+    if (!submitButton) {
+      return;
+    }
+    submitButton.classList.remove('sobs-filter-submit-dirty');
+    // Force reflow so repeated flashes retrigger animation.
+    void submitButton.offsetWidth;
+    submitButton.classList.add('sobs-filter-submit-dirty');
+  }
+
+  function shouldAutoSubmitOnChange(target) {
+    if (!target) {
+      return false;
+    }
+    if (target.tagName === 'SELECT') {
+      return true;
+    }
+    if (target.tagName === 'INPUT') {
+      const inputType = (target.type || '').toLowerCase();
+      return ['checkbox', 'radio', 'number', 'range', 'date', 'datetime-local', 'time', 'month', 'week'].includes(inputType);
+    }
+    return false;
+  }
+
+  document.addEventListener('change', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const form = target.closest('form.sobs-filter-form');
+    if (!form) {
+      return;
+    }
+    flashSubmitButton(form);
+    if (shouldAutoSubmitOnChange(target)) {
+      form.submit();
+    }
+  });
+
+  document.addEventListener('input', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const form = target.closest('form.sobs-filter-form');
+    if (!form) {
+      return;
+    }
+    flashSubmitButton(form);
+  });
+
+  document.addEventListener('sobs:filters:changed', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const form = target.closest('form.sobs-filter-form');
+    if (!form) {
+      return;
+    }
+    flashSubmitButton(form);
+  });
+})();
+</script>
+
+<style>
+  .sobs-multi-select-toggle {
+    text-align: left;
+    padding-right: 3.5rem;
+    background-position: right 0.75rem center;
+    cursor: pointer;
+  }
+
+  .sobs-multi-select-wrap {
+    position: relative;
+  }
+
+  .sobs-multi-select-clear-btn {
+    position: absolute;
+    right: 2rem;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 0;
+    background: transparent;
+    color: var(--bs-secondary-color);
+    width: 1rem;
+    height: 1rem;
+    padding: 0;
+    line-height: 1;
+    opacity: 0.75;
+  }
+
+  .sobs-multi-select-clear-btn:hover {
+    opacity: 1;
+    color: var(--bs-body-color);
+  }
+
+  .sobs-multi-select-label {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 400;
+  }
+
+  .sobs-multi-select-menu {
+    min-width: 100%;
+    width: 100%;
+    max-width: min(700px, 90vw);
+    margin-left: -0.45rem;
+    max-height: min(360px, 60vh);
+    overflow-x: auto;
+    overflow-y: auto;
+  }
+
+  .sobs-multi-select-option {
+    transition: background-color 0.15s ease-in-out;
+    cursor: pointer;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    font-weight: 400;
+    white-space: nowrap;
+    gap: 0.24rem;
+  }
+
+  .sobs-multi-select-option-text {
+    flex: 1 1 auto;
+    min-width: max-content;
+    padding-right: 0.25rem;
+  }
+
+  .sobs-multi-select-option:hover {
+    background-color: rgba(13, 110, 253, 0.08);
+  }
+
+  .sobs-multi-select-option.is-selected,
+  .sobs-multi-select-option.is-selected:focus,
+  .sobs-multi-select-option.is-selected:active {
+    color: inherit;
+    background-color: rgba(13, 110, 253, 0.08);
+  }
+
+  .sobs-multi-select-checkmark {
+    width: 0.84rem;
+    min-width: 0.84rem;
+    opacity: 0;
+    color: var(--bs-secondary-color);
+  }
+
+  .sobs-multi-select-checkmark.visible {
+    opacity: 1;
+    color: var(--bs-body-color);
+  }
+
+  .sobs-filter-submit-dirty {
+    animation: sobsFilterSubmitFlash 850ms ease-out;
+  }
+
+  @keyframes sobsFilterSubmitFlash {
+    0% {
+      box-shadow: 0 0 0 0 rgba(13, 110, 253, 0.55);
+    }
+    100% {
+      box-shadow: 0 0 0 7px rgba(13, 110, 253, 0);
+    }
+  }
+</style>
+{% endmacro %}
+
+{% macro render_single_select(filter_name, label, options, selected_value, flex_basis='120px', auto_submit=true, input_name=None) %}
+{% set _selected_values = [selected_value] if selected_value is not none else [] %}
+{{ render_multi_select(filter_name, label, options, _selected_values, flex_basis, true, auto_submit, input_name) }}
+{% endmacro %}
