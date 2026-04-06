@@ -21598,12 +21598,67 @@ _UNSAFE_SQL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Query page – table/view access allowlist
+# ---------------------------------------------------------------------------
+
+# Built-in set of table/view names that the Query page may SELECT from.
+# The ``system`` database is always permitted for metadata queries (SHOW,
+# DESCRIBE, and SELECT from system.tables / system.columns).
+# Operators can extend this set via the ``SOBS_QUERY_ALLOWED_TABLES``
+# environment variable (comma-separated additional names merged at startup).
+_QUERY_ALLOWED_TABLES_BUILTIN: frozenset[str] = frozenset(
+    [
+        "otel_logs",
+        "otel_traces",
+        "hyperdx_sessions",
+        "otel_metrics_gauge",
+        "otel_metrics_sum",
+        "otel_metrics_histogram",
+        "v_otel_metrics_1m",
+        "v_otel_metrics_anomaly",
+        "v_derived_signals_anomaly",
+    ]
+)
+
+
+def _build_query_allowed_tables() -> frozenset[str]:
+    """Return the merged set of allowed table/view names for the Query page.
+
+    Merges the built-in allowlist with any additional names supplied via the
+    ``SOBS_QUERY_ALLOWED_TABLES`` environment variable (comma-separated).
+    """
+    extra = os.environ.get("SOBS_QUERY_ALLOWED_TABLES", "").strip()
+    if not extra:
+        return _QUERY_ALLOWED_TABLES_BUILTIN
+    extra_names = frozenset(n.strip().lower() for n in extra.split(",") if n.strip())
+    return _QUERY_ALLOWED_TABLES_BUILTIN | extra_names
+
+
+_QUERY_ALLOWED_TABLES: frozenset[str] = _build_query_allowed_tables()
+
+# Extracts CTE alias names from ``WITH alias AS (`` and ``, alias AS (`` syntax.
+# The comma variant uses a plain ``,`` (no word-boundary) because it is
+# preceded by ``)`` which is a non-word character.
+_SQL_CTE_ALIAS_RE = re.compile(r"(?:\bWITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+
+# Extracts the column/array expression that follows ``ARRAY JOIN`` so it can
+# be excluded from the table-reference allowlist check (ARRAY JOIN targets
+# are array columns, not data-source tables).
+_SQL_ARRAY_JOIN_RE = re.compile(r"\bARRAY\s+JOIN\s+((?:\w+\.)*\w+)", re.IGNORECASE)
+
+# Extracts table/view references that follow ``FROM`` or any ``JOIN`` keyword.
+# Matches optional ``database.`` qualifier (e.g. ``default.otel_logs``).
+# Does NOT match subqueries (``FROM (SELECT …)``), because ``(`` is not ``\w``.
+_SQL_TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+((?:\w+\.)*\w+)", re.IGNORECASE)
+
 
 class ChdbSqlRunner:
     """Vanna-style chDB adapter for read-only SQL execution via chDB's DB-API 2.0 interface.
 
     This adapter:
     - Validates SQL is read-only before execution (SELECT, EXPLAIN, SHOW, DESCRIBE, WITH).
+    - Restricts data access to the tables/views in ``_QUERY_ALLOWED_TABLES`` (allowlist).
     - Executes queries through the shared ChDbConnection so the chDB lock is respected.
     - Returns results as pandas DataFrames.
     - Provides schema introspection helpers for building LLM prompt context.
@@ -21623,6 +21678,8 @@ class ChdbSqlRunner:
         Checks:
         1. The first non-whitespace keyword must be in ``_SAFE_SQL_PREFIXES``.
         2. The statement must not contain write/DDL keywords.
+        3. All referenced tables/views must be in ``_QUERY_ALLOWED_TABLES``
+           (or in the ``system`` database which is always permitted for metadata).
 
         Raises:
             ValueError: with an explicit error message describing the violation.
@@ -21643,6 +21700,60 @@ class ChdbSqlRunner:
                 "SQL statement contains a disallowed write or DDL keyword "
                 "(INSERT, UPDATE, DELETE, DROP, CREATE, TRUNCATE, …)."
             )
+
+        blocked = ChdbSqlRunner._check_table_refs(stripped)
+        if blocked:
+            raise ValueError(
+                f"Access to table or view '{blocked}' is not permitted. "
+                "Only approved observability tables may be queried via the Query page. "
+                f"Allowed tables: {', '.join(sorted(_QUERY_ALLOWED_TABLES))}."
+            )
+
+    @staticmethod
+    def _check_table_refs(sql: str) -> str:
+        """Return the first disallowed table reference in *sql*, or empty string if all are OK.
+
+        The check is allowlist-based:
+        - The ``system`` database (e.g. ``system.tables``) is always permitted.
+        - Table/view names listed in ``_QUERY_ALLOWED_TABLES`` are permitted.
+        - CTE aliases (``WITH alias AS (...)``) are recognised and excluded so
+          that queries like ``WITH t AS (SELECT …) SELECT * FROM t`` are not
+          incorrectly rejected.
+        - ``ARRAY JOIN`` targets are array column expressions, not data-source
+          tables, so they are excluded from the check.
+        """
+        # Step 1: Collect CTE alias names – they are not real tables.
+        cte_aliases: set[str] = {m.group(1).lower() for m in _SQL_CTE_ALIAS_RE.finditer(sql)}
+
+        # Step 2: Collect ARRAY JOIN refs – these are column/array expressions, not tables.
+        array_join_refs: set[str] = {m.group(1).lower() for m in _SQL_ARRAY_JOIN_RE.finditer(sql)}
+
+        # Step 3: Check each FROM/JOIN reference against the allowlist.
+        for m in _SQL_TABLE_REF_RE.finditer(sql):
+            ref = m.group(1)
+            ref_lower = ref.lower()
+
+            # Skip CTE aliases and ARRAY JOIN targets – not real data-source tables.
+            if ref_lower in cte_aliases or ref_lower in array_join_refs:
+                continue
+
+            parts = ref_lower.split(".")
+            db_name = parts[0] if len(parts) > 1 else "default"
+            table_name = parts[-1]
+
+            # The system database is read-only metadata – always permitted.
+            if db_name == "system":
+                continue
+
+            # Only the `default` database is valid for observability tables.
+            if db_name != "default":
+                return ref
+
+            # Check against the allowlist.
+            if table_name not in _QUERY_ALLOWED_TABLES:
+                return ref
+
+        return ""
 
     # ------------------------------------------------------------------
     # Query execution
@@ -21687,7 +21798,7 @@ class ChdbSqlRunner:
     def get_schema_context(self, database: str = "default", max_tables: int = 30) -> str:
         """Build a concise schema description string suitable for embedding in LLM prompts.
 
-        Returns a formatted string listing every table and its columns/types, e.g.::
+        Returns a formatted string listing every **allowed** table and its columns/types, e.g.::
 
             Database: default
             Table: otel_logs
@@ -21695,9 +21806,14 @@ class ChdbSqlRunner:
               - ServiceName: LowCardinality(String)
               ...
 
-        Only the first *max_tables* tables are included to keep prompts manageable.
+        Only tables present in ``_QUERY_ALLOWED_TABLES`` are included, so the LLM
+        prompt never references internal settings tables.  At most *max_tables* entries
+        are included to keep prompts manageable.
         """
-        tables = self.get_tables(database)[:max_tables]
+        all_tables = self.get_tables(database)
+        # Restrict schema context to the allowlist (defence-in-depth: the LLM
+        # should not generate queries for tables it cannot see in the schema).
+        tables = [t for t in all_tables if t in _QUERY_ALLOWED_TABLES][:max_tables]
         if not tables:
             return f"Database: {database}\n(no tables found)"
 

@@ -320,6 +320,28 @@ SOBS includes a dedicated **Query** page that turns natural-language prompts int
 - Query execution is row-capped by `SOBS_QUERY_MAX_ROWS` (default `1000`).
 - Query results can generate chart JSON and be added to an existing dashboard.
 
+### Table/View Access Control
+
+All SQL executed via the Query page is validated against an **allowlist of permitted tables and views**.
+Only the following observability tables may be queried; attempts to access any other table or view
+(including internal `sobs_*` configuration tables) are blocked and surfaced as a validation error.
+
+| Allowed table / view       | Contents                        |
+|----------------------------|---------------------------------|
+| `otel_logs`                | OpenTelemetry log records       |
+| `otel_traces`              | OpenTelemetry trace/span records|
+| `hyperdx_sessions`         | Browser/RUM session records     |
+| `otel_metrics_gauge`       | OTEL gauge metric data points   |
+| `otel_metrics_sum`         | OTEL sum metric data points     |
+| `otel_metrics_histogram`   | OTEL histogram metric data points |
+| `v_otel_metrics_1m`        | 1-minute metric rollup view     |
+| `v_otel_metrics_anomaly`   | Anomaly detection metric view   |
+| `v_derived_signals_anomaly`| Derived anomaly signals view    |
+
+The `system` database (e.g. `system.tables`, `system.columns`) is always permitted for schema
+metadata introspection. Operators can extend the allowlist via the `SOBS_QUERY_ALLOWED_TABLES`
+environment variable (comma-separated table names merged with the built-in set at startup).
+
 Routes:
 
 - `GET /query`
@@ -376,6 +398,7 @@ The Work Items page is intended to make these decisions visible so operators can
 | `SOBS_WRITE_BATCH_MAX`      | `200`          | Max writes processed per DB batch |
 | `SOBS_WRITE_BATCH_WAIT_MS`  | `20`           | Max milliseconds to wait for filling a write batch |
 | `SOBS_QUERY_MAX_ROWS`       | `1000`         | Hard cap for rows returned by Query page SQL execution |
+| `SOBS_QUERY_ALLOWED_TABLES` | _(empty)_     | Comma-separated list of additional table/view names permitted on the Query page (merged with built-in allowlist) |
 | `SOBS_SETTINGS_ENCRYPTION_KEY` | _(empty)_   | Optional app-settings encryption key (base64 URL-safe Fernet key) |
 | `SOBS_SETTINGS_ENCRYPTION_KEY_FILE` | _(empty)_ | Optional absolute file path containing the app-settings encryption key |
 | `SOBS_AI_ENDPOINT_URL`      | _(empty)_      | Optional fallback for AI endpoint URL when not configured in Settings -> AI |
