@@ -6,6 +6,7 @@
     "typecheck:rum": "tsc --project tsconfig.rum.json"
   },
   "dependencies": {
+    "@hotwired/turbo": "^8.0.23",
     "bootstrap": "^5.3.8",
     "bootstrap-icons": "^1.13.1",
     "echarts": "^6.0.0"
