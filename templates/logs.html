@@ -77,7 +77,7 @@
     <div id="logsFiltersPanel" class="accordion-collapse collapse show" aria-labelledby="logsFiltersHeading" data-bs-parent="#logsFiltersAccordion">
       <div class="accordion-body py-3">
     <form method="get" class="d-flex flex-wrap gap-2 align-items-end sobs-filter-form"
-          data-turbo-frame="logs-results" data-turbo-action="advance">
+          data-turbo-frame="logs-table" data-turbo-action="advance">
       <input type="hidden" name="live" id="liveModeInput" value="{{ '1' if live == '1' else '' }}">
       <input type="hidden" name="analyze" value="{{ analyze }}">
       <input type="hidden" name="stats" value="{{ '1' if stats_open else '' }}">
@@ -188,15 +188,6 @@
   </div>
 </div>
 
-{# ── Turbo Frame: logs-results ──────────────────────────────────────────────
-   Wraps the stats panel, results table, pagination, and empty state so that
-   submitting the filter form (which targets this frame) replaces only this
-   portion of the page without losing the open filter accordion above.
-   The data-turbo-action="advance" on the form ensures the URL is updated and
-   the browser back-button still works correctly.
-   ─────────────────────────────────────────────────────────────────────────── #}
-<turbo-frame id="logs-results">
-
 <!-- Query Statistics Panel -->
 {% if level_stats or service_stats %}
 <div class="accordion mb-3" id="statsAccordion">
@@ -237,7 +228,8 @@
               <h6 class="text-secondary small mb-0"><i class="bi bi-tag me-1"></i>By Level</h6>
               {% if selected_levels %}
               <a class="small text-decoration-none"
-                  href="{{ url_for('view_logs', q=q, level='', service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}">
+                  href="{{ url_for('view_logs', q=q, level='', service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
+                  data-turbo-frame="logs-table">
                 Clear
               </a>
               {% endif %}
@@ -245,7 +237,8 @@
             <div class="d-flex flex-wrap gap-2">
               {% for lvl, cnt in level_stats.items() %}
               <a href="{{ url_for('view_logs', q=q, level=lvl, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
-                 class="badge badge-level-{{ lvl }} text-decoration-none{% if lvl in selected_levels %} border border-light{% endif %}">
+                 class="badge badge-level-{{ lvl }} text-decoration-none{% if lvl in selected_levels %} border border-light{% endif %}"
+                 data-turbo-frame="logs-table">
                 {{ lvl }}: {{ cnt }}
               </a>
               {% endfor %}
@@ -261,7 +254,8 @@
               <h6 class="text-secondary small mb-0"><i class="bi bi-server me-1"></i>By Service</h6>
               {% if selected_services %}
               <a class="small text-decoration-none"
-                  href="{{ url_for('view_logs', q=q, level=level, service='', trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}">
+                  href="{{ url_for('view_logs', q=q, level=level, service='', trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
+                  data-turbo-frame="logs-table">
                 Clear
               </a>
               {% endif %}
@@ -269,7 +263,8 @@
             <div class="d-flex flex-wrap gap-2">
               {% for svc, cnt in service_stats.items() %}
               <a href="{{ url_for('view_logs', q=q, level=level, service=svc, trace_id=trace_id, trace_ids=trace_ids_csv, sql='', from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, analyze=analyze, stats='1') }}"
-                 class="badge bg-secondary text-decoration-none{% if svc in selected_services %} border border-light{% endif %}">
+                 class="badge bg-secondary text-decoration-none{% if svc in selected_services %} border border-light{% endif %}"
+                 data-turbo-frame="logs-table">
                 {{ svc }}: {{ cnt }}
               </a>
               {% endfor %}
@@ -289,7 +284,8 @@
               {% set safe_val = tag.value | replace("'", "''") %}
               <a href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql="has_tag('" + safe_key + "','" + safe_val + "')", from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, stats='1') }}"
                  class="badge bg-info-subtle text-info-emphasis text-decoration-none"
-                 title="Filter by {{ tag.key }}={{ tag.value }}">
+                 title="Filter by {{ tag.key }}={{ tag.value }}"
+                 data-turbo-frame="logs-table">
                 <i class="bi bi-tag me-1"></i>{{ tag.key }}={{ tag.value }}: {{ tag.count }}
               </a>
               {% endfor %}
@@ -365,6 +361,15 @@
 </div>
 {% endif %}
 
+{# ── Turbo Frame: logs-table ───────────────────────────────────────────────
+   Wraps ONLY the logs table, pagination, and empty state.  Submitting the
+   filter form (data-turbo-frame="logs-table") or clicking a stats-panel chip
+   replaces only this narrow section — the filter accordion and the stats
+   panel above stay untouched.
+   data-turbo-action="advance" on the form keeps URL + browser history in sync.
+   ─────────────────────────────────────────────────────────────────────────── #}
+<turbo-frame id="logs-table">
+
 <div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
   <table class="table table-sm table-hover align-middle">
     <thead>
@@ -435,7 +440,9 @@
 <nav class="d-flex justify-content-between align-items-center">
   <div class="d-flex align-items-center gap-2">
     <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
-    <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
+    <select class="form-select form-select-sm" style="width:auto;"
+            onchange="if(typeof Turbo!=='undefined'){Turbo.visit(this.value,{frame:'logs-table',action:'advance'})}else{window.location.href=this.value}"
+            aria-label="Rows per page">
       {% for n in [10, 25, 50, 100, 200] %}
       <option value="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
       {% endfor %}
