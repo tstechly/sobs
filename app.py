@@ -188,11 +188,7 @@ def _turbo_frame_id() -> str:
 def _turbo_make_stream(action: str, content: str, target: str, *, multiple: bool = False) -> str:
     """Build a single ``<turbo-stream>`` tag string."""
     target_attr = f'targets="{target}"' if multiple else f'target="{target}"'
-    return (
-        f'<turbo-stream action="{action}" {target_attr}>'
-        f"<template>{content}</template>"
-        f"</turbo-stream>"
-    )
+    return f'<turbo-stream action="{action}" {target_attr}>' f"<template>{content}</template>" f"</turbo-stream>"
 
 
 def _turbo_replace(content: str, target: str, *, multiple: bool = False) -> str:

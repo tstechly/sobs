@@ -3257,11 +3257,35 @@
   document.addEventListener('turbo:load', updateActiveNavLinks);
 
   // ---------------------------------------------------------------------------
-  // Opt-out Turbo Drive for routes that stream or push data.
-  // The live-mode EventSource in logs.html is started/stopped by JavaScript,
-  // not by navigation, so no opt-out is needed there.  However, any link that
-  // deliberately wants a full browser reload can set data-turbo="false".
+  // Sidebar state sync: prevent compact→full flash during navigation
+  //
+  // When the sidebar is in compact mode and Turbo Drive fetches a new page,
+  // the new body's sidebar is full-width (server-rendered default).  Even
+  // though the sidebar has data-turbo-permanent, there is a brief rendering
+  // moment where the new body is briefly visible before Turbo restores the
+  // permanent element.  The CSS width transition (0.22s) makes this appear as
+  // the sidebar "popping open and closing".
+  //
+  // Fix: use turbo:before-render to copy the current sidebar-compact class into
+  // the incoming document BEFORE Turbo renders it.  The permanent element swap
+  // then replaces an already-compact sidebar with the preserved one – no flash.
   // ---------------------------------------------------------------------------
+  document.addEventListener('turbo:before-render', function (event) {
+    var currentSidebar = document.getElementById('sbSidebar');
+    if (!currentSidebar) return;
+    var newBody = event.detail.newBody;
+    var newSidebar = newBody.querySelector('#sbSidebar');
+    if (!newSidebar) return;
+
+    // Mirror the compact/full state so the incoming body has the right width
+    // before it is painted.
+    newSidebar.classList.toggle('sidebar-compact', currentSidebar.classList.contains('sidebar-compact'));
+
+    // Always enter the new page with the hamburger overlay closed.
+    newSidebar.classList.remove('sb-open');
+    var newBackdrop = newBody.querySelector('#sbBackdrop');
+    if (newBackdrop) newBackdrop.classList.remove('show');
+  });
 
   // ---------------------------------------------------------------------------
   // Bootstrap modal z-index compatibility
