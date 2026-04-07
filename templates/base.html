@@ -8,9 +8,16 @@
     function normalizeTheme(value) {
       return (value === 'light' || value === 'dark' || value === 'system') ? value : 'system';
     }
+    function normalizeSidebarState(value) {
+      return value === 'compact' ? 'compact' : 'full';
+    }
     var t = normalizeTheme(localStorage.getItem('sobs-theme'));
     document.documentElement.setAttribute('data-bs-theme',
       t === 'system' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : t);
+    document.documentElement.classList.toggle(
+      'sobs-sidebar-compact',
+      normalizeSidebarState(localStorage.getItem('sobs-sidebar-state')) === 'compact'
+    );
   }());</script>
   <link rel="stylesheet" href="{{ url_for('static', filename='bootstrap.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='bootstrap-icons.min.css') }}">
@@ -27,10 +34,10 @@
     /* Sidebar label (text part) */
     .sb-label { overflow: hidden; transition: opacity 0.15s ease, max-width 0.22s ease; max-width: 200px; white-space: nowrap; }
     /* ===== State 2: Compact (icon-only) ===== */
-    .sidebar.sidebar-compact { width: var(--sb-compact); padding-left: 0; padding-right: 0; }
-    .sidebar.sidebar-compact .sb-label { opacity: 0; max-width: 0; pointer-events: none; }
-    .sidebar.sidebar-compact .sb-brand-text { display: none; }
-    .sidebar.sidebar-compact .nav-link {
+    .sidebar.sidebar-compact, .sobs-sidebar-compact #sbSidebar { width: var(--sb-compact); padding-left: 0; padding-right: 0; }
+    .sidebar.sidebar-compact .sb-label, .sobs-sidebar-compact #sbSidebar .sb-label { opacity: 0; max-width: 0; pointer-events: none; }
+    .sidebar.sidebar-compact .sb-brand-text, .sobs-sidebar-compact #sbSidebar .sb-brand-text { display: none; }
+    .sidebar.sidebar-compact .nav-link, .sobs-sidebar-compact #sbSidebar .nav-link {
       margin: 1px auto;
       width: calc(var(--sb-compact) - 8px);
       padding: .5rem 0;
@@ -38,25 +45,25 @@
       gap: 0;
       text-align: center;
     }
-    .sidebar.sidebar-compact .nav-link i {
+    .sidebar.sidebar-compact .nav-link i, .sobs-sidebar-compact #sbSidebar .nav-link i {
       width: auto;
       min-width: 1.4rem;
       display: inline-flex;
       justify-content: center;
     }
-    .sidebar.sidebar-compact .sb-brand { padding: 0 .6rem; justify-content: center; }
+    .sidebar.sidebar-compact .sb-brand, .sobs-sidebar-compact #sbSidebar .sb-brand { padding: 0 .6rem; justify-content: center; }
     .sb-theme-compact { display: none; }
-    .sidebar.sidebar-compact .sb-footer {
+    .sidebar.sidebar-compact .sb-footer, .sobs-sidebar-compact #sbSidebar .sb-footer {
       display: block;
       border-top: 0 !important;
       padding-top: .5rem !important;
     }
-    .sidebar.sidebar-compact .sb-footer .sb-theme-full { display: none !important; }
-    .sidebar.sidebar-compact .sb-footer .sb-theme-compact {
+    .sidebar.sidebar-compact .sb-footer .sb-theme-full, .sobs-sidebar-compact #sbSidebar .sb-footer .sb-theme-full { display: none !important; }
+    .sidebar.sidebar-compact .sb-footer .sb-theme-compact, .sobs-sidebar-compact #sbSidebar .sb-footer .sb-theme-compact {
       display: flex;
       justify-content: center;
     }
-    .sidebar.sidebar-compact .sb-footer small { display: none; }
+    .sidebar.sidebar-compact .sb-footer small, .sobs-sidebar-compact #sbSidebar .sb-footer small { display: none; }
     /* ===== Sidebar edge toggle button ===== */
     /* Draw border as a right-side half-ring so the menu-side edge stays clean and the icon remains unobstructed. */
     .sb-toggle-btn { position: absolute; right: -14px; top: 64px; z-index: 1200; width: 28px; height: 28px; border-radius: 50%; border: 0; background: var(--bs-tertiary-bg); color: var(--bs-secondary-color); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; transition: background 0.15s, color 0.15s; }
@@ -74,26 +81,26 @@
       .sb-toggle-btn { display: none; }
       .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: var(--sb-full); z-index: 1045; overflow: visible; transform: translateX(-100%); transition: transform 0.25s ease; }
       .sidebar.sb-open { transform: translateX(0); }
-      .sidebar.sidebar-compact { padding-left: 1rem; padding-right: 1rem; }
-      .sidebar.sidebar-compact .sb-label { opacity: 1; max-width: 200px; pointer-events: auto; }
-      .sidebar.sidebar-compact .sb-brand-text { display: inline; }
-      .sidebar.sidebar-compact .nav-link { margin: 1px 4px; padding: .4rem .8rem; justify-content: flex-start; }
-      .sidebar.sidebar-compact .sb-brand { padding: 0; justify-content: flex-start; }
-      .sidebar.sidebar-compact .sb-footer {
+      .sidebar.sidebar-compact, .sobs-sidebar-compact #sbSidebar { padding-left: 1rem; padding-right: 1rem; }
+      .sidebar.sidebar-compact .sb-label, .sobs-sidebar-compact #sbSidebar .sb-label { opacity: 1; max-width: 200px; pointer-events: auto; }
+      .sidebar.sidebar-compact .sb-brand-text, .sobs-sidebar-compact #sbSidebar .sb-brand-text { display: inline; }
+      .sidebar.sidebar-compact .nav-link, .sobs-sidebar-compact #sbSidebar .nav-link { margin: 1px 4px; padding: .4rem .8rem; justify-content: flex-start; }
+      .sidebar.sidebar-compact .sb-brand, .sobs-sidebar-compact #sbSidebar .sb-brand { padding: 0; justify-content: flex-start; }
+      .sidebar.sidebar-compact .sb-footer, .sobs-sidebar-compact #sbSidebar .sb-footer {
         display: block;
         border-top: 1px solid var(--bs-border-color) !important;
         padding-top: 1rem !important;
       }
-      .sidebar.sidebar-compact .sb-footer .sb-theme-full { display: inline-flex !important; }
-      .sidebar.sidebar-compact .sb-footer .sb-theme-compact { display: none !important; }
-      .sidebar.sidebar-compact .sb-footer small { display: inline; }
+      .sidebar.sidebar-compact .sb-footer .sb-theme-full, .sobs-sidebar-compact #sbSidebar .sb-footer .sb-theme-full { display: inline-flex !important; }
+      .sidebar.sidebar-compact .sb-footer .sb-theme-compact, .sobs-sidebar-compact #sbSidebar .sb-footer .sb-theme-compact { display: none !important; }
+      .sidebar.sidebar-compact .sb-footer small, .sobs-sidebar-compact #sbSidebar .sb-footer small { display: inline; }
     }
     .main-content { min-height: 100vh; transition: margin-left 0.22s ease; }
     /* ===== Desktop: sidebar fixed to viewport ===== */
     @media (min-width: 576px) {
       .sidebar { position: fixed; top: 0; left: 0; height: 100vh; }
       .main-content { margin-left: var(--sb-full); }
-      .sidebar.sidebar-compact + .main-content { margin-left: var(--sb-compact); }
+      .sidebar.sidebar-compact + .main-content, .sobs-sidebar-compact .main-content { margin-left: var(--sb-compact); }
     }
     .badge-level-ERROR, .badge-level-FATAL, .badge-level-CRITICAL { background-color: #dc3545 !important; }
     .badge-level-WARN, .badge-level-WARNING { background-color: #fd7e14 !important; }
@@ -211,6 +218,9 @@
       background-color: color-mix(in srgb, var(--bs-info) 12%, transparent);
     }
   </style>
+  {% if turbo_enabled %}
+  <script src="{{ url_for('static', filename='turbo.es2017-umd.js') }}" data-turbo-track="reload"></script>
+  {% endif %}
 </head>
 <body>
 <!-- Overlay backdrop for hamburger sidebar -->
@@ -636,22 +646,30 @@
   var toggleIcon = document.getElementById('sbToggleIcon');
   var hamburgerBtn = document.getElementById('sbHamburgerBtn');
   var backdrop = document.getElementById('sbBackdrop');
+  var rootEl = document.documentElement;
   var mq = window.matchMedia('(max-width: 575.98px)');
   var lastFocusedElement = null;
 
   function isHamburgerMode() { return mq.matches; }
 
+  function applySidebarState(isCompact) {
+    sidebar.classList.toggle('sidebar-compact', isCompact);
+    rootEl.classList.toggle('sobs-sidebar-compact', isCompact);
+    toggleIcon.className = isCompact ? 'bi bi-chevron-right' : 'bi bi-chevron-left';
+  }
+
   // Restore saved state (compact or full) on medium+ screens
   var saved = localStorage.getItem('sobs-sidebar-state') || 'full';
   if (saved === 'compact' && !isHamburgerMode()) {
-    sidebar.classList.add('sidebar-compact');
-    toggleIcon.className = 'bi bi-chevron-right';
+    applySidebarState(true);
+  } else {
+    applySidebarState(false);
   }
 
   // Toggle button: switch between full (State 1) and compact (State 2)
   toggleBtn.addEventListener('click', function () {
-    var isCompact = sidebar.classList.toggle('sidebar-compact');
-    toggleIcon.className = isCompact ? 'bi bi-chevron-right' : 'bi bi-chevron-left';
+    var isCompact = !rootEl.classList.contains('sobs-sidebar-compact');
+    applySidebarState(isCompact);
     localStorage.setItem('sobs-sidebar-state', isCompact ? 'compact' : 'full');
   });
 
@@ -705,11 +723,9 @@
       closeSidebar();
       var restoredState = localStorage.getItem('sobs-sidebar-state') || 'full';
       if (restoredState === 'compact') {
-        sidebar.classList.add('sidebar-compact');
-        toggleIcon.className = 'bi bi-chevron-right';
+        applySidebarState(true);
       } else {
-        sidebar.classList.remove('sidebar-compact');
-        toggleIcon.className = 'bi bi-chevron-left';
+        applySidebarState(false);
       }
     }
   });
@@ -3219,7 +3235,6 @@
    https://turbo.hotwired.dev/
    The UMD build is bundled locally (static/turbo.es2017-umd.js).
    ========================================================================= #}
-<script src="{{ url_for('static', filename='turbo.es2017-umd.js') }}"></script>
 <script>
 (function () {
   if (typeof Turbo === 'undefined') return;
@@ -3271,15 +3286,14 @@
   // then replaces an already-compact sidebar with the preserved one – no flash.
   // ---------------------------------------------------------------------------
   document.addEventListener('turbo:before-render', function (event) {
-    var currentSidebar = document.getElementById('sbSidebar');
-    if (!currentSidebar) return;
     var newBody = event.detail.newBody;
     var newSidebar = newBody.querySelector('#sbSidebar');
     if (!newSidebar) return;
+    var isCompact = document.documentElement.classList.contains('sobs-sidebar-compact');
 
     // Mirror the compact/full state so the incoming body has the right width
     // before it is painted.
-    newSidebar.classList.toggle('sidebar-compact', currentSidebar.classList.contains('sidebar-compact'));
+    newSidebar.classList.toggle('sidebar-compact', isCompact);
 
     // Always enter the new page with the hamburger overlay closed.
     newSidebar.classList.remove('sb-open');

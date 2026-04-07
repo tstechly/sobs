@@ -11,7 +11,7 @@
 <div style="flex: 1 1 {{ flex_basis }}; min-width: 0;">
   <label class="form-label small text-secondary">{{ label }}</label>
   <div class="dropdown sobs-multi-select-wrap" id="dropdown-{{ filter_name }}">
-    <button 
+    <button
       class="form-select form-select-sm sobs-multi-select-toggle"
       type="button"
       id="btn-{{ filter_name }}"
@@ -58,7 +58,6 @@
       {% endfor %}
     </ul>
   </div>
-  <!-- Hidden inputs for form submission (initial state) -->
   <div id="hidden-fields-{{ filter_name }}">
     {%- for value in selected_values %}
     <input type="hidden" name="{{ _input_name }}" value="{{ value }}">
@@ -76,125 +75,133 @@
   const clearBtnId = `clear-${filterName}`;
   const labelId = `label-${filterName}`;
   const hiddenFieldsId = `hidden-fields-${filterName}`;
-  
-  const btn = document.getElementById(btnId);
-  const clearBtn = document.getElementById(clearBtnId);
-  const label = document.getElementById(labelId);
-  const hiddenFieldsContainer = document.getElementById(hiddenFieldsId);
-  const dropdown = document.getElementById(`dropdown-${filterName}`);
-  const dropdownMenu = dropdown ? dropdown.querySelector('.dropdown-menu') : null;
-  
-  // Find all selectable options for this filter
-  const options = document.querySelectorAll(`button[data-filter-option="${filterName}"]`);
-  
-  function getSelectedValues() {
-    return Array.from(options)
-      .filter(option => option.classList.contains('is-selected'))
-      .map(option => option.dataset.optionValue || '');
-  }
 
-  function getSelectedLabels() {
-    return Array.from(options)
-      .filter(option => option.classList.contains('is-selected'))
-      .map(option => {
-        const textNode = option.querySelector('.sobs-multi-select-option-text');
-        return textNode ? textNode.textContent.trim() : (option.dataset.optionValue || '');
-      });
-  }
-
-  function syncOptionVisuals() {
-    options.forEach((option) => {
-      const isActive = option.classList.contains('is-selected');
-      option.setAttribute('aria-pressed', isActive ? 'true' : 'false');
-      const checkmark = option.querySelector('.sobs-multi-select-checkmark');
-      if (checkmark) {
-        checkmark.classList.toggle('visible', isActive);
-      }
-    });
-  }
-  
-  function updateLabel() {
-    const checked = getSelectedValues();
-    const checkedLabels = getSelectedLabels();
-    
-    if (checked.length === 0) {
-      label.textContent = `All {{ label | lower }}`;
-      label.title = `All {{ label | lower }}`;
-    } else if (checked.length === 1) {
-      label.textContent = checkedLabels[0] || checked[0];
-      label.title = checkedLabels[0] || checked[0];
-    } else {
-      label.textContent = `${checked.length} selected`;
-      label.title = checkedLabels.join(', ');
-    }
-
-    if (clearBtn) {
-      clearBtn.hidden = singleSelect || checked.length <= 1;
-    }
-
-    syncOptionVisuals();
-    
-    // Update hidden fields for form submission
-    hiddenFieldsContainer.innerHTML = '';
-    checked.forEach(value => {
-      const input = document.createElement('input');
-      input.type = 'hidden';
-      input.name = inputName;
-      input.value = value;
-      hiddenFieldsContainer.appendChild(input);
-    });
-  }
-
-  function updateMenuWidth() {
-    if (!dropdownMenu || !btn) {
+  function submitForm(form) {
+    if (!form) {
       return;
     }
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+      return;
+    }
+    form.submit();
+  }
 
-    // Clear any previous explicit size before measuring.
-    dropdownMenu.style.width = '';
+  function initialize() {
+    const btn = document.getElementById(btnId);
+    const clearBtn = document.getElementById(clearBtnId);
+    const label = document.getElementById(labelId);
+    const hiddenFieldsContainer = document.getElementById(hiddenFieldsId);
+    const dropdown = document.getElementById(`dropdown-${filterName}`);
+    const dropdownMenu = dropdown ? dropdown.querySelector('.dropdown-menu') : null;
+    if (!btn || !label || !hiddenFieldsContainer || !dropdown) {
+      return;
+    }
+    if (dropdown.dataset.sobsMultiSelectInit === '1') {
+      return;
+    }
+    dropdown.dataset.sobsMultiSelectInit = '1';
 
-    const triggerWidth = Math.ceil(btn.getBoundingClientRect().width);
-    let contentWidth = 0;
+    const options = dropdown.querySelectorAll(`button[data-filter-option="${filterName}"]`);
 
-    const computed = window.getComputedStyle(btn);
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.font = `${computed.fontStyle} ${computed.fontVariant} ${computed.fontWeight} ${computed.fontSize} / ${computed.lineHeight} ${computed.fontFamily}`;
+    function getSelectedValues() {
+      return Array.from(options)
+        .filter(option => option.classList.contains('is-selected'))
+        .map(option => option.dataset.optionValue || '');
     }
 
-    options.forEach((option) => {
-      const text = String(option.dataset.optionValue || '').trim();
-      if (!text) {
+    function getSelectedLabels() {
+      return Array.from(options)
+        .filter(option => option.classList.contains('is-selected'))
+        .map(option => {
+          const textNode = option.querySelector('.sobs-multi-select-option-text');
+          return textNode ? textNode.textContent.trim() : (option.dataset.optionValue || '');
+        });
+    }
+
+    function syncOptionVisuals() {
+      options.forEach((option) => {
+        const isActive = option.classList.contains('is-selected');
+        option.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        const checkmark = option.querySelector('.sobs-multi-select-checkmark');
+        if (checkmark) {
+          checkmark.classList.toggle('visible', isActive);
+        }
+      });
+    }
+
+    function updateLabel() {
+      const checked = getSelectedValues();
+      const checkedLabels = getSelectedLabels();
+
+      if (checked.length === 0) {
+        label.textContent = `All {{ label | lower }}`;
+        label.title = `All {{ label | lower }}`;
+      } else if (checked.length === 1) {
+        label.textContent = checkedLabels[0] || checked[0];
+        label.title = checkedLabels[0] || checked[0];
+      } else {
+        label.textContent = `${checked.length} selected`;
+        label.title = checkedLabels.join(', ');
+      }
+
+      if (clearBtn) {
+        clearBtn.hidden = singleSelect || checked.length <= 1;
+      }
+
+      syncOptionVisuals();
+      hiddenFieldsContainer.innerHTML = '';
+      checked.forEach(value => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = inputName;
+        input.value = value;
+        hiddenFieldsContainer.appendChild(input);
+      });
+    }
+
+    function updateMenuWidth() {
+      if (!dropdownMenu) {
         return;
       }
+
+      dropdownMenu.style.width = '';
+
+      const triggerWidth = Math.ceil(btn.getBoundingClientRect().width);
+      let contentWidth = 0;
+
+      const computed = window.getComputedStyle(btn);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
       if (ctx) {
-        contentWidth = Math.max(contentWidth, Math.ceil(ctx.measureText(text).width));
-      } else {
-        const textNode = option.querySelector('.sobs-multi-select-option-text');
-        if (textNode) {
-          contentWidth = Math.max(contentWidth, Math.ceil(textNode.scrollWidth));
-        }
+        ctx.font = `${computed.fontStyle} ${computed.fontVariant} ${computed.fontWeight} ${computed.fontSize} / ${computed.lineHeight} ${computed.fontFamily}`;
       }
-    });
 
-    // Extra room for menu padding and the right-side checkmark.
-    const horizontalChrome = 72;
-    const desired = Math.max(triggerWidth, contentWidth + horizontalChrome);
-    const viewportCap = Math.floor(window.innerWidth * 0.9);
-    const absoluteCap = 900;
-    const finalWidth = Math.min(desired, viewportCap, absoluteCap);
+      options.forEach((option) => {
+        const text = String(option.dataset.optionValue || '').trim();
+        if (!text) {
+          return;
+        }
+        if (ctx) {
+          contentWidth = Math.max(contentWidth, Math.ceil(ctx.measureText(text).width));
+        } else {
+          const textNode = option.querySelector('.sobs-multi-select-option-text');
+          if (textNode) {
+            contentWidth = Math.max(contentWidth, Math.ceil(textNode.scrollWidth));
+          }
+        }
+      });
 
-    dropdownMenu.style.width = `${finalWidth}px`;
-  }
-  
-  // Wait for DOM to be ready if needed
-  function initialize() {
-    // Initialize
+      const horizontalChrome = 72;
+      const desired = Math.max(triggerWidth, contentWidth + horizontalChrome);
+      const viewportCap = Math.floor(window.innerWidth * 0.9);
+      const absoluteCap = 900;
+      dropdownMenu.style.width = `${Math.min(desired, viewportCap, absoluteCap)}px`;
+    }
+
     updateLabel();
     updateMenuWidth();
-    
-    // Toggle selection state on option click
+
     options.forEach(option => {
       option.addEventListener('click', () => {
         if (singleSelect) {
@@ -204,23 +211,17 @@
           option.classList.toggle('is-selected');
         }
         updateLabel();
-        const event = new CustomEvent('sobs:filters:changed', { bubbles: true });
-        option.dispatchEvent(event);
-        // Auto-submit form when filter changes
-        const form = option.closest('form');
-        if (autoSubmit && form) {
-          form.submit();
+        option.dispatchEvent(new CustomEvent('sobs:filters:changed', { bubbles: true }));
+        if (autoSubmit) {
+          submitForm(option.closest('form'));
         }
       });
     });
-    
-    // Prevent dropdown from closing when clicking inside
-    if (dropdownMenu) {
-      dropdownMenu.addEventListener('click', (e) => {
-        e.stopPropagation();
-      });
 
-      // Recalculate width right before showing in case option content changed.
+    if (dropdownMenu) {
+      dropdownMenu.addEventListener('click', (event) => {
+        event.stopPropagation();
+      });
       dropdown.addEventListener('show.bs.dropdown', updateMenuWidth);
       dropdown.addEventListener('shown.bs.dropdown', updateMenuWidth);
       btn.addEventListener('click', updateMenuWidth);
@@ -228,27 +229,27 @@
     }
 
     if (clearBtn) {
-      clearBtn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+      clearBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
         options.forEach((option) => option.classList.remove('is-selected'));
         updateLabel();
-        const event = new CustomEvent('sobs:filters:changed', { bubbles: true });
-        clearBtn.dispatchEvent(event);
-        const form = clearBtn.closest('form');
-        if (autoSubmit && form) {
-          form.submit();
+        clearBtn.dispatchEvent(new CustomEvent('sobs:filters:changed', { bubbles: true }));
+        if (autoSubmit) {
+          submitForm(clearBtn.closest('form'));
         }
       });
     }
   }
-  
-  // Run immediately if DOM is ready, otherwise wait
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initialize);
-  } else {
-    initialize();
+
+  window.__sobsMultiSelectTurboHandlers = window.__sobsMultiSelectTurboHandlers || {};
+  if (!window.__sobsMultiSelectTurboHandlers[filterName]) {
+    document.addEventListener('turbo:load', initialize);
+    document.addEventListener('turbo:frame-load', initialize);
+    window.__sobsMultiSelectTurboHandlers[filterName] = true;
   }
+
+  initialize();
 })();
 
 (function () {
@@ -256,6 +257,17 @@
     return;
   }
   window.__sobsFilterFormEnhancementsInit = true;
+
+  function submitForm(form) {
+    if (!form) {
+      return;
+    }
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+      return;
+    }
+    form.submit();
+  }
 
   function findSubmitButton(form) {
     return form.querySelector('[data-ai-action-role="filter-submit"], button[type="submit"]');
@@ -267,7 +279,6 @@
       return;
     }
     submitButton.classList.remove('sobs-filter-submit-dirty');
-    // Force reflow so repeated flashes retrigger animation.
     void submitButton.offsetWidth;
     submitButton.classList.add('sobs-filter-submit-dirty');
   }
@@ -297,7 +308,7 @@
     }
     flashSubmitButton(form);
     if (shouldAutoSubmitOnChange(target)) {
-      form.submit();
+      submitForm(form);
     }
   });
 

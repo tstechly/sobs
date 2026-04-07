@@ -179,6 +179,14 @@
     }
     updateTzIndicator();
 
+    function submitForm() {
+      if (typeof formEl.requestSubmit === 'function') {
+        formEl.requestSubmit();
+        return;
+      }
+      formEl.submit();
+    }
+
     if (window.sobsTimezone && typeof window.sobsTimezone.onChange === 'function') {
       window.sobsTimezone.onChange(updateTzIndicator);
     }
@@ -227,7 +235,7 @@
         fromInput.value = toHuman(from);
         toInput.value = '';
         menu.style.display = 'none';
-        formEl.submit();
+        submitForm();
       });
     });
 
@@ -240,7 +248,7 @@
       fromInput.value = dFrom ? toHuman(dFrom) : '';
       toInput.value = dTo ? toHuman(dTo) : '';
       menu.style.display = 'none';
-      formEl.submit();
+      submitForm();
     });
 
     // --- Clear ---
@@ -248,7 +256,7 @@
       fromInput.value = '';
       toInput.value = '';
       menu.style.display = 'none';
-      formEl.submit();
+      submitForm();
     });
 
     // Close when clicking outside
@@ -278,12 +286,13 @@
     });
   }
 
-  // Auto-init on DOMContentLoaded
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
   }
+  document.addEventListener('turbo:load', init);
+  document.addEventListener('turbo:frame-load', init);
 
   window.sobsDateRangePicker = { init: init, attach: attach };
 })();
