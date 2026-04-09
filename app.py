@@ -12216,11 +12216,22 @@ async def view_errors():
     resolved = request.args.get("resolved", "0").strip()
     limit = _parse_limit(100)
     offset = _parse_offset()
-    sort_by, sort_col, sort_dir = _parse_sort(
-        {"Timestamp": "Timestamp", "ServiceName": "ServiceName"},
-        "Timestamp",
-    )
-    order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
+    if grouped_mode:
+        sort_by, sort_col, sort_dir = _parse_sort(
+            {
+                "count": "Count",
+                "last_seen": "LastSeen",
+                "ServiceName": "RepServiceName",
+                # Legacy alias retained for backwards compatibility.
+                "Timestamp": "LastSeen",
+            },
+            "count",
+        )
+    else:
+        sort_by, sort_col, sort_dir = _parse_sort(
+            {"Timestamp": "Timestamp", "ServiceName": "ServiceName"},
+            "Timestamp",
+        )
     resolved_ids = _get_resolved_error_ids(db)
     where_parts = []
     where_params = []
@@ -12232,43 +12243,157 @@ async def view_errors():
     where_parts.extend(time_conditions)
     where_params.extend(time_params)
     where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
-    source_sql = (
-        "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
-        f"FROM ({ERROR_SOURCES_SQL}) {where_sql} "
-        f"{order_clause} LIMIT ? OFFSET ?"
-    )
 
-    if resolved not in ("0", "1"):
+    if grouped_mode:
+        # Best-effort deduplication: probe recent raw events, then aggregate in SQL.
+        probe_limit = max(2000, min(10000, limit * 100))
+        error_id_sql = (
+            "lower(hex(MD5(concat("
+            "toString(Timestamp), '|', ServiceName, '|', "
+            "if(LogAttributes['exception.type'] != '', LogAttributes['exception.type'], 'Error'), '|', "
+            "if(LogAttributes['exception.message'] != '', LogAttributes['exception.message'], Body), '|', "
+            "TraceId, '|', SpanId"
+            "))))"
+        )
+        grouped_where_sql = where_sql
+        if resolved == "1":
+            resolved_condition = f"{error_id_sql} IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+            grouped_where_sql = (
+                f"{grouped_where_sql} AND {resolved_condition}" if grouped_where_sql else f"WHERE {resolved_condition}"
+            )
+        elif resolved == "0":
+            resolved_condition = f"{error_id_sql} NOT IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+            grouped_where_sql = (
+                f"{grouped_where_sql} AND {resolved_condition}" if grouped_where_sql else f"WHERE {resolved_condition}"
+            )
+
+        grouped_probe_sql = (
+            "SELECT "
+            "Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes, "
+            "substring(replaceRegexpAll(lower(ServiceName), '\\s+', ' '), 1, 220) AS GroupService, "
+            "substring("
+            "replaceRegexpAll("
+            "lower(if(LogAttributes['exception.type'] != '', LogAttributes['exception.type'], 'Error')), "
+            "'\\s+', ' '"
+            "), 1, 220"
+            ") AS GroupType, "
+            "substring("
+            "replaceRegexpAll("
+            "lower(if(LogAttributes['exception.message'] != '', LogAttributes['exception.message'], Body)), "
+            "'\\s+', ' '"
+            "), 1, 220"
+            ") AS GroupMessage "
+            f"FROM ({ERROR_SOURCES_SQL}) {grouped_where_sql} "
+            "ORDER BY Timestamp DESC LIMIT ?"
+        )
+        grouped_aggregate_sql = (
+            "SELECT "
+            "GroupService, GroupType, GroupMessage, "
+            "count() AS Count, "
+            "min(Timestamp) AS FirstSeen, "
+            "max(Timestamp) AS LastSeen, "
+            "argMax(Timestamp, Timestamp) AS RepTimestamp, "
+            "argMax(ServiceName, Timestamp) AS RepServiceName, "
+            "argMax(TraceId, Timestamp) AS RepTraceId, "
+            "argMax(SpanId, Timestamp) AS RepSpanId, "
+            "argMax(Body, Timestamp) AS RepBody, "
+            "argMax(LogAttributes, Timestamp) AS RepLogAttributes, "
+            "groupUniqArray(64)(TraceId) AS TraceIds "
+            f"FROM ({grouped_probe_sql}) "
+            "GROUP BY GroupService, GroupType, GroupMessage"
+        )
+
         total = db.execute(
-            f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {where_sql}",
-            where_params,
+            f"SELECT COUNT(*) FROM ({grouped_aggregate_sql})",
+            where_params + [probe_limit],
         ).fetchone()[0]
-        rows = db.execute(source_sql, where_params + [limit, offset]).fetchall()
+        group_rows = db.execute(
+            f"{grouped_aggregate_sql} ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'} LIMIT ? OFFSET ?",
+            where_params + [probe_limit, limit, offset],
+        ).fetchall()
         errors = []
-        for row in rows:
-            item = _build_error_item(dict(row))
-            item["resolved"] = item["id"] in resolved_ids
+        for row in group_rows:
+            item = _build_error_item(
+                {
+                    "Timestamp": row["RepTimestamp"],
+                    "ServiceName": row["RepServiceName"],
+                    "TraceId": row["RepTraceId"],
+                    "SpanId": row["RepSpanId"],
+                    "Body": row["RepBody"],
+                    "LogAttributes": row["RepLogAttributes"],
+                }
+            )
+            if resolved == "1":
+                item["resolved"] = True
+            elif resolved == "0":
+                item["resolved"] = False
+            else:
+                item["resolved"] = item["id"] in resolved_ids
+            item["count"] = int(row["Count"] or 0)
+            item["first_seen"] = str(row["FirstSeen"] or item["ts"])
+            item["last_seen"] = str(row["LastSeen"] or item["ts"])
             errors.append(item)
+
+        if errors:
+            trace_ids_by_group: dict[tuple[str, str, str], list[str]] = {}
+            for row in db.execute(grouped_probe_sql, where_params + [probe_limit]).fetchall():
+                probe_item = _build_error_item(dict(row))
+                group_key = _error_group_key(probe_item)
+                trace_value = str(probe_item.get("trace_id") or "").strip()
+                if not trace_value:
+                    continue
+                trace_bucket = trace_ids_by_group.setdefault(group_key, [])
+                if trace_value not in trace_bucket:
+                    trace_bucket.append(trace_value)
+
+            for item in errors:
+                group_key = _error_group_key(item)
+                trace_values = list(trace_ids_by_group.get(group_key, []))
+                primary_trace = str(item.get("trace_id") or "").strip()
+                if primary_trace and primary_trace not in trace_values:
+                    trace_values.insert(0, primary_trace)
+                if trace_values:
+                    item["trace_ids"] = trace_values
+                    item["trace_ids_csv"] = ",".join(trace_values)
     else:
-        # Keep behavior identical while avoiding full in-memory materialization.
-        target_resolved = resolved == "1"
-        scan_batch = max(200, limit)
-        scan_offset = 0
-        total = 0
-        errors = []
-        while True:
-            batch = db.execute(source_sql, where_params + [scan_batch, scan_offset]).fetchall()
-            if not batch:
-                break
-            for row in batch:
+        order_clause = f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'}"
+        source_sql = (
+            "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
+            f"FROM ({ERROR_SOURCES_SQL}) {where_sql} "
+            f"{order_clause} LIMIT ? OFFSET ?"
+        )
+
+        if resolved not in ("0", "1"):
+            total = db.execute(
+                f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {where_sql}",
+                where_params,
+            ).fetchone()[0]
+            rows = db.execute(source_sql, where_params + [limit, offset]).fetchall()
+            errors = []
+            for row in rows:
                 item = _build_error_item(dict(row))
                 item["resolved"] = item["id"] in resolved_ids
-                if item["resolved"] != target_resolved:
-                    continue
-                if total >= offset and len(errors) < limit:
-                    errors.append(item)
-                total += 1
-            scan_offset += scan_batch
+                errors.append(item)
+        else:
+            # Keep behavior identical while avoiding full in-memory materialization.
+            target_resolved = resolved == "1"
+            scan_batch = max(200, limit)
+            scan_offset = 0
+            total = 0
+            errors = []
+            while True:
+                batch = db.execute(source_sql, where_params + [scan_batch, scan_offset]).fetchall()
+                if not batch:
+                    break
+                for row in batch:
+                    item = _build_error_item(dict(row))
+                    item["resolved"] = item["id"] in resolved_ids
+                    if item["resolved"] != target_resolved:
+                        continue
+                    if total >= offset and len(errors) < limit:
+                        errors.append(item)
+                    total += 1
+                scan_offset += scan_batch
 
     now = time.time()
     services: list[str] = []
@@ -12289,40 +12414,6 @@ async def view_errors():
             _errors_services_cache["services"] = list(services)
             _errors_services_cache["expires_at"] = now + max(1, ERRORS_SERVICES_CACHE_TTL_SEC)
 
-    if grouped_mode and errors:
-        # In grouped mode, fan out a row's Logs link to all trace IDs in that group.
-        probe_limit = max(1000, min(5000, limit * 50))
-        probe_rows = db.execute(
-            "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
-            f"FROM ({ERROR_SOURCES_SQL}) {where_sql} {order_clause} LIMIT ?",
-            where_params + [probe_limit],
-        ).fetchall()
-        trace_ids_by_group: dict[tuple[str, str, str], list[str]] = {}
-        target_resolved = resolved == "1"
-        filter_by_resolved = resolved in ("0", "1")
-        for row in probe_rows:
-            item = _build_error_item(dict(row))
-            item["resolved"] = item["id"] in resolved_ids
-            if filter_by_resolved and item["resolved"] != target_resolved:
-                continue
-            group_key = _error_group_key(item)
-            trace_value = str(item.get("trace_id") or "").strip()
-            if not trace_value:
-                continue
-            trace_bucket = trace_ids_by_group.setdefault(group_key, [])
-            if trace_value not in trace_bucket:
-                trace_bucket.append(trace_value)
-
-        for item in errors:
-            group_key = _error_group_key(item)
-            trace_values = list(trace_ids_by_group.get(group_key, []))
-            primary_trace = str(item.get("trace_id") or "").strip()
-            if primary_trace and primary_trace not in trace_values:
-                trace_values.insert(0, primary_trace)
-            if trace_values:
-                item["trace_ids"] = trace_values
-                item["trace_ids_csv"] = ",".join(trace_values)
-
     work_item_links = _load_work_item_links_for_ref_ids(db, [e["id"] for e in errors])
 
     return await render_template(
@@ -12340,6 +12431,7 @@ async def view_errors():
         services=services,
         sort_by=sort_by,
         sort_dir=sort_dir,
+        grouped_mode=grouped_mode,
         work_item_links=work_item_links,
     )
 
