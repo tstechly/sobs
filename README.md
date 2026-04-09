@@ -3,42 +3,43 @@
 ## This is still very much a WIP - Alpha. Hoping to get a v1 one out by April 10.
 It is functional and being used, needs more polish and the custom (non-OTEL) tables may change.
 
-**SOBS** is a single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), **Web Traffic analytics**, and **AI call transparency** — all in one container you can run as a standalone pod or sidecar.
+**SOBS** is a single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), **Web Traffic analytics**, and **AI call transparency** — all in one container you can run as a standalone pod or sidecar. Taking an AI-first approach it implements an automation layer that can automatically raise GitHub issues and assign GitHub Copilot to create fix PRs and informing the user for a collaborative AI/DevOps experience.
+
 
 ![Summary AI Assistant](static/help/summary_ai_assistant.png)
 
 ## Features
 
-- 🖥️ **Single service** – Python + embedded chDB; 768 MB - 1 GB RAM when supporting millions of rows of data
-- 🗜️ **Compressed storage** – MergeTree schema uses ZSTD with selective Delta/T64 codecs
-- 🔭 **OpenTelemetry** – accepts OTLP (JSON and protobuf) for logs, traces, metrics
-- 🌐 **RUM** – client-side JS snippet with Web Vitals (LCP, CLS, INP, TTFB, FCP)
-- 🗺️ **Web Traffic** – geo map, browser/OS/timezone/language/device analytics from RUM data with date-range filters
-- 🛡️ **CVE enrichment** – daily auto-scan of detected libraries against OSV.dev, with per-finding dispositions
-- 🐛 **Error tracking** – with stack traces, one-click resolve, and grouped/deduplicated view
-- 🤖 **AI transparency** – record LLM prompts, responses and token usage
-- 💬 **Contextual AI Assistant** – bottom-right in-app assistant for page-aware help and guided UI actions
-- 🔍 **Search** – grep (regex, with autocomplete/IntelliSense) and SQL WHERE clause filtering on logs
-- 🎨 **ANSI color rendering** – colorized log output with on/off toggle
-- 🏷️ **Tag-aware log SQL assistant** – `has_tag()` helper, SQL filter validation, and field hints/autocomplete on Logs
-- 📊 **Query statistics** – collapsible logs analytics panel with query-scoped level/service distributions
-- 🧠 **Manual advanced log analysis** – on-demand message pattern clustering, keyword signals, and optimization hints
-- 📚 **Saved reports** – persist and re-apply filter sets across Logs, Traces, Errors, Metrics, RUM, and AI pages
-- 🗃️ **Multi-select filters** – all filter panels support multi-value service/level/status selection
-- 🧷 **GitHub work items** – track agent-created or agent-reused GitHub issues in a dedicated Work Items UI
-- 🧠 **Issue dedupe and noise control** – local-LLM-assisted reuse/link/create decisions before opening more GitHub work
-- 🧮 **Natural-language Query page** – NL→SQL over embedded chDB with read-only SQL guardrails and chart/dashboard actions
-- 🔬 **Table Explorer** – visual schema and sample-data browser for all allowed observability tables
-- 🔔 **Notifications & Webhooks** – Slack, webhook, email, and browser push channels with rule-based dispatch
-- 📡 **Live tail** – SSE endpoint (`/tail`) for real-time streaming of logs and traces
-- ⚡ **Live logs mode** – optional in-page streaming on Logs with pause-on-scroll and queued event counter
-- 📈 **Metrics & Signals** – top-level Metrics page with derived telemetry signals and anomaly status
-- 🧩 **Auto rule generation** – preview/create metric anomaly rules from recent derived-signal history
-- 🗂️ **Auto dashboard generation** – build a derived-signal dashboard directly from active metric rules
-- 💾 **Data Management** – TTL retention windows, S3 backup/restore, optional backup encryption
-- ✨ **First-run visual tour** – one-time onboarding modal with flow overview and quick-tour reopen entry
-- 🎨 **Bootstrap 5 theming** – served locally with light/dark/system theme toggle, no CDN required
-- 🐳 **Docker ready** – Dockerfile + docker-compose + Kubernetes manifests
+- **Single service** – Python + embedded chDB; 768 MB - 1 GB RAM when supporting millions of rows of data
+- **Compressed storage** – MergeTree schema uses ZSTD with selective Delta/T64 codecs
+- **OpenTelemetry** – accepts OTLP (JSON and protobuf) for logs, traces, metrics
+- **RUM** – client-side JS snippet with Web Vitals (LCP, CLS, INP, TTFB, FCP)
+- **Web Traffic** – geo map, browser/OS/timezone/language/device analytics from RUM data with date-range filters
+- **CVE enrichment** – daily auto-scan of detected libraries against OSV.dev, with per-finding dispositions
+- **Error tracking** – with stack traces, one-click resolve, and grouped/deduplicated view
+- **AI transparency** – record LLM prompts, responses and token usage
+- **Contextual AI Assistant** – bottom-right in-app assistant for page-aware help and guided UI actions
+- **Search** – grep (regex, with autocomplete/IntelliSense) and SQL WHERE clause filtering on logs
+- **ANSI color rendering** – colorized log output with on/off toggle
+- **Tag-aware log SQL assistant** – `has_tag()` helper, SQL filter validation, and field hints/autocomplete on Logs
+- **Query statistics** – collapsible logs analytics panel with query-scoped level/service distributions
+- **Manual advanced log analysis** – on-demand message pattern clustering, keyword signals, and optimization hints
+- **Saved reports** – persist and re-apply filter sets across Logs, Traces, Errors, Metrics, RUM, and AI pages
+- **Multi-select filters** – all filter panels support multi-value service/level/status selection
+- **GitHub work items** – track agent-created or agent-reused GitHub issues in a dedicated Work Items UI
+- **Issue dedupe and noise control** – local-LLM-assisted reuse/link/create decisions before opening more GitHub work
+- **Natural-language Query page** – NL→SQL over embedded chDB with read-only SQL guardrails and chart/dashboard actions
+- **Table Explorer** – visual schema and sample-data browser for all allowed observability tables
+- **Notifications & Webhooks** – Slack, webhook, email, and browser push channels with rule-based dispatch
+- **Live tail** – SSE endpoint (`/tail`) for real-time streaming of logs and traces
+- **Live logs mode** – optional in-page streaming on Logs with pause-on-scroll and queued event counter
+- **Metrics & Signals** – top-level Metrics page with derived telemetry signals and anomaly status
+- **Auto rule generation** – preview/create metric anomaly rules from recent derived-signal history
+- **Auto dashboard generation** – build a derived-signal dashboard directly from active metric rules
+- **Data Management** – TTL retention windows, S3 backup/restore, optional backup encryption
+- **First-run visual tour** – one-time onboarding modal with flow overview and quick-tour reopen entry
+- **Bootstrap 5 theming** – served locally with light/dark/system theme toggle, no CDN required
+- **Docker ready** – Dockerfile + docker-compose + Kubernetes manifests
 
 ## Quick Start
 
