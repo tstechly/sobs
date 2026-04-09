@@ -3,8 +3,14 @@
 ## This is still very much a WIP - Alpha. Hoping to get a v1 one out by April 10.
 It is functional and being used, needs more polish and the custom (non-OTEL) tables may change.
 
-**SOBS** is a single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), **Web Traffic analytics**, and **AI call transparency** — all in one container you can run as a standalone pod or sidecar. Taking an AI-first approach it implements an automation layer that can automatically raise GitHub issues and assign GitHub Copilot to create fix PRs and informing the user for a collaborative AI/DevOps experience.
+**SOBS** is a single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), **Web Traffic analytics**, and **AI call transparency** — all in one container you can run as a standalone pod or sidecar. Taking an AI-first approach it implements an automation layer that can automatically raise GitHub issues and assign GitHub Copilot to create fix PRs and inform the user for a collaborative AI/DevOps experience.
 
+### Who is this for?
+- Development: a full-featured observability container for local development.
+- Integration and test environments: includes infrastructure tracking metrics for a 360-degree view of issues and performance, while staying lightweight enough to keep environments truly separate.
+- Multi-tenant setups: each tenant can keep its own data sovereign and isolated.
+
+<br />
 
 ![Summary AI Assistant](static/help/summary_ai_assistant.png)
 
