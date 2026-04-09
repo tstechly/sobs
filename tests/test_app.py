@@ -2217,6 +2217,283 @@ class TestUIPages:
         r = await client.get("/rum")
         assert r.status_code == 200
 
+    async def test_errors_regex_filter(self, client):
+        """Errors page should accept a q parameter and show/hide matching errors."""
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "regex-filter-test",
+                "type": "ValueError",
+                "message": "unique-needle-xyz error occurred",
+                "timestamp": "2024-01-01T00:10:00Z",
+            },
+        )
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "regex-filter-test",
+                "type": "TypeError",
+                "message": "completely different error",
+                "timestamp": "2024-01-01T00:11:00Z",
+            },
+        )
+
+        r = await client.get("/errors?service=regex-filter-test&q=unique-needle-xyz")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "unique-needle-xyz" in body
+        assert "completely different error" not in body
+
+    async def test_errors_invalid_regex_returns_error_msg(self, client):
+        """Errors page should return an error message for an invalid regex."""
+        r = await client.get("/errors?q=[invalid-regex")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Regex error" in body
+
+    async def test_traces_regex_filter(self, client):
+        """Traces page should accept a q parameter and filter on span names."""
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+        from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+        from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+        from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
+
+        unique_span = f"unique-span-regex-{time.time_ns()}"
+        trace_id_bytes = bytes.fromhex("aabbccddeeff001122334455667788aa")
+        span_id_bytes = bytes.fromhex("1122334455667700")
+        start_ns = int(time.time() * 1_000_000_000)
+
+        span = Span(
+            trace_id=trace_id_bytes,
+            span_id=span_id_bytes,
+            name=unique_span,
+            start_time_unix_nano=start_ns,
+            end_time_unix_nano=start_ns + 1_000_000,
+            status=Status(code=1),
+        )
+        req = ExportTraceServiceRequest(
+            resource_spans=[
+                ResourceSpans(
+                    resource=Resource(
+                        attributes=[KeyValue(key="service.name", value=AnyValue(string_value="regex-trace-svc"))]
+                    ),
+                    scope_spans=[ScopeSpans(spans=[span])],
+                )
+            ]
+        )
+        r = await client.post(
+            "/v1/traces",
+            data=req.SerializeToString(),
+            headers={"Content-Type": "application/x-protobuf"},
+        )
+        assert r.status_code == 200
+
+        r = await client.get(f"/traces?q={unique_span}")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert unique_span in body
+
+    async def test_traces_invalid_regex_returns_error_msg(self, client):
+        """Traces page should return an error message for an invalid regex."""
+        r = await client.get("/traces?q=[invalid-regex")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Regex error" in body
+
+    async def test_metrics_regex_filter(self, client):
+        """Metrics page should accept a q parameter and filter by signal name."""
+        svc = f"regex-metrics-svc-{time.time_ns()}"
+        unique_signal = f"regex.metric.unique.{time.time_ns()}"
+        other_signal = f"regex.metric.other.{time.time_ns()}"
+
+        payload_unique = {
+            "resourceMetrics": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": svc}}]},
+                    "scopeMetrics": [
+                        {
+                            "metrics": [
+                                {
+                                    "name": unique_signal,
+                                    "description": "regex test metric",
+                                    "unit": "ms",
+                                    "gauge": {
+                                        "dataPoints": [
+                                            {
+                                                "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                                "asDouble": 1.0,
+                                            }
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        payload_other = {
+            "resourceMetrics": [
+                {
+                    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": svc}}]},
+                    "scopeMetrics": [
+                        {
+                            "metrics": [
+                                {
+                                    "name": other_signal,
+                                    "description": "regex test metric",
+                                    "unit": "ms",
+                                    "gauge": {
+                                        "dataPoints": [
+                                            {
+                                                "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                                "asDouble": 2.0,
+                                            }
+                                        ]
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+        await client.post("/v1/metrics", json=payload_unique)
+        await client.post("/v1/metrics", json=payload_other)
+
+        r = await client.get(f"/metrics?service={svc}&q={unique_signal}")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert unique_signal in body
+        assert other_signal not in body
+
+    async def test_metrics_invalid_regex_returns_error_msg(self, client):
+        """Metrics page should return an error message for an invalid regex."""
+        r = await client.get("/metrics?q=[invalid-regex")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Regex error" in body
+
+    async def test_rum_regex_filter(self, client):
+        """RUM page should accept a q parameter and filter event bodies."""
+        token = str(time.time_ns())
+        unique_url = f"https://example.com/regex-rum-{token}"
+        other_url = f"https://example.com/other-rum-{token}"
+        await client.post(
+            "/v1/rum",
+            json=[
+                {
+                    "type": "pageview",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "sessionId": f"rum-regex-{token}",
+                    "url": unique_url,
+                },
+                {
+                    "type": "pageview",
+                    "timestamp": "2024-01-01T00:00:01Z",
+                    "sessionId": f"rum-regex-{token}-2",
+                    "url": other_url,
+                },
+            ],
+        )
+
+        r = await client.get(f"/rum?view=events&q=regex-rum-{token}")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert unique_url in body
+        assert other_url not in body
+
+    async def test_rum_invalid_regex_returns_error_msg(self, client):
+        """RUM page should return an error message for an invalid regex."""
+        r = await client.get("/rum?q=[invalid-regex")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert "Regex error" in body
+
+    async def test_errors_validate_regex_api(self, client):
+        """POST /api/errors/validate-regex should validate regex patterns."""
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "regex-validate-svc-a",
+                "type": "ValueError",
+                "message": "scope-check-a",
+                "timestamp": "2024-01-01T00:10:00Z",
+            },
+        )
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "regex-validate-svc-b",
+                "type": "ValueError",
+                "message": "scope-check-b",
+                "timestamp": "2024-01-01T00:10:01Z",
+            },
+        )
+
+        r_ok = await client.post("/api/errors/validate-regex", json={"pattern": "\\d+"})
+        assert r_ok.status_code == 200
+        data = await r_ok.get_json()
+        assert data["ok"] is True
+
+        # Validation previews should respect scoped filters when provided.
+        r_scoped = await client.post(
+            "/api/errors/validate-regex",
+            json={"pattern": "scope-check-b", "scope": {"service": "regex-validate-svc-a"}},
+        )
+        assert r_scoped.status_code == 200
+        data = await r_scoped.get_json()
+        assert data["ok"] is True
+        assert data.get("sample") is None
+
+        r_bad = await client.post("/api/errors/validate-regex", json={"pattern": "[unclosed"})
+        assert r_bad.status_code == 200
+        data = await r_bad.get_json()
+        assert data["ok"] is False
+        assert data.get("error")
+
+        r_empty = await client.post("/api/errors/validate-regex", json={"pattern": ""})
+        assert r_empty.status_code == 200
+        data = await r_empty.get_json()
+        assert data["ok"] is True
+        assert data.get("sample") is None
+
+    async def test_traces_validate_regex_api(self, client):
+        """POST /api/traces/validate-regex should validate regex patterns."""
+        r_ok = await client.post("/api/traces/validate-regex", json={"pattern": "\\w+"})
+        assert r_ok.status_code == 200
+        data = await r_ok.get_json()
+        assert data["ok"] is True
+
+        r_bad = await client.post("/api/traces/validate-regex", json={"pattern": "[bad"})
+        assert r_bad.status_code == 200
+        data = await r_bad.get_json()
+        assert data["ok"] is False
+
+    async def test_metrics_validate_regex_api(self, client):
+        """POST /api/metrics/validate-regex should validate regex patterns."""
+        r_ok = await client.post("/api/metrics/validate-regex", json={"pattern": "cpu.*"})
+        assert r_ok.status_code == 200
+        data = await r_ok.get_json()
+        assert data["ok"] is True
+
+        r_bad = await client.post("/api/metrics/validate-regex", json={"pattern": "(**)"})
+        assert r_bad.status_code == 200
+        data = await r_bad.get_json()
+        assert data["ok"] is False
+
+    async def test_rum_validate_regex_api(self, client):
+        """POST /api/rum/validate-regex should validate regex patterns."""
+        r_ok = await client.post("/api/rum/validate-regex", json={"pattern": "error.*"})
+        assert r_ok.status_code == 200
+        data = await r_ok.get_json()
+        assert data["ok"] is True
+
+        r_bad = await client.post("/api/rum/validate-regex", json={"pattern": "[broken"})
+        assert r_bad.status_code == 200
+        data = await r_bad.get_json()
+        assert data["ok"] is False
+
     async def test_rum_page_defaults_to_session_grouped_view(self, client):
         session_id = f"sess-grouped-{time.time_ns()}"
         await client.post(
