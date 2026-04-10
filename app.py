@@ -56,6 +56,8 @@ from quart import (
     url_for,
 )
 
+import masking as _masking
+
 # ---------------------------------------------------------------------------
 # App setup
 # ---------------------------------------------------------------------------
@@ -86,6 +88,211 @@ def jsonify(*args: Any, **kwargs: Any):  # type: ignore[no-redef]
     safe_args = tuple(_coerce_undefined_for_json(arg) for arg in args)
     safe_kwargs = {key: _coerce_undefined_for_json(value) for key, value in kwargs.items()}
     return _base_jsonify(*safe_args, **safe_kwargs)
+
+
+_MASKING_CUSTOM_KEYS_SETTING = "masking.custom_keys"
+_MASKING_CUSTOM_PATTERNS_SETTING = "masking.custom_patterns"
+_MASKING_OUTPUT_ENABLED_SETTING = "masking.output_enabled"
+_MASKING_SQL_OUTPUT_ENABLED_SETTING = "masking.sql_output_enabled"
+_SQL_OUTPUT_MASK_FIELD_NAMES = frozenset({"sql", "query", "sample_sql", "override_sql"})
+_MAX_CUSTOM_MASKING_PATTERN_LENGTH = 512
+_REDOS_NESTED_QUANTIFIER_RE = re.compile(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})")
+_REDOS_AMBIGUOUS_ALTERNATION_RE = re.compile(r"\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})")
+_MASKING_RULES_REFRESH_LOCK = threading.Lock()
+_MASKING_LAST_RULES_SIGNATURE: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+_MASKING_SETTINGS_CACHE_LOCK = threading.Lock()
+_MASKING_SETTINGS_CACHE: dict[str, bool] = {
+    "loaded": False,
+    "output_enabled": True,
+    "sql_output_enabled": True,
+}
+
+
+def _set_masking_settings_cache(
+    *,
+    output_enabled: bool | None = None,
+    sql_output_enabled: bool | None = None,
+    loaded: bool = True,
+) -> None:
+    with _MASKING_SETTINGS_CACHE_LOCK:
+        if output_enabled is not None:
+            _MASKING_SETTINGS_CACHE["output_enabled"] = output_enabled
+        if sql_output_enabled is not None:
+            _MASKING_SETTINGS_CACHE["sql_output_enabled"] = sql_output_enabled
+        _MASKING_SETTINGS_CACHE["loaded"] = loaded
+
+
+def _load_masking_settings_flags(db: "ChDbConnection") -> tuple[bool, bool]:
+    output_enabled = _is_truthy_setting(_get_app_setting(db, _MASKING_OUTPUT_ENABLED_SETTING), default=True)
+    sql_output_enabled = _is_truthy_setting(_get_app_setting(db, _MASKING_SQL_OUTPUT_ENABLED_SETTING), default=True)
+    return output_enabled, sql_output_enabled
+
+
+def _get_masking_settings_flags(db: "ChDbConnection | None" = None) -> tuple[bool, bool]:
+    with _MASKING_SETTINGS_CACHE_LOCK:
+        if _MASKING_SETTINGS_CACHE.get("loaded"):
+            return (
+                bool(_MASKING_SETTINGS_CACHE.get("output_enabled", True)),
+                bool(_MASKING_SETTINGS_CACHE.get("sql_output_enabled", True)),
+            )
+
+    try:
+        resolved_db = db if db is not None else get_db()
+        output_enabled, sql_output_enabled = _load_masking_settings_flags(resolved_db)
+    except Exception:
+        output_enabled, sql_output_enabled = True, True
+
+    _set_masking_settings_cache(
+        output_enabled=output_enabled,
+        sql_output_enabled=sql_output_enabled,
+        loaded=True,
+    )
+    return output_enabled, sql_output_enabled
+
+
+def _mask_json_payload(value: Any) -> Any:
+    """Mask observability payloads before sending them as JSON."""
+    return _mask_payload_for_output_json(value, mask_sql_fields=True)
+
+
+def masked_jsonify(*args: Any, **kwargs: Any) -> Response:
+    """JSON response helper for UI-facing observability data."""
+    masked_args = tuple(_mask_json_payload(arg) for arg in args)
+    masked_kwargs = {key: _mask_json_payload(value) for key, value in kwargs.items()}
+    return _base_jsonify(*masked_args, **masked_kwargs)
+
+
+def _is_truthy_setting(raw: str | None, *, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_js_regex_flags(flag_text: str) -> str:
+    out = ""
+    for ch in flag_text:
+        if ch in "gimsuy" and ch not in out:
+            out += ch
+    return out
+
+
+def _validate_custom_masking_pattern_for_storage(pattern: Any) -> str:
+    normalized = _masking.validate_pattern(pattern)
+    if len(normalized) > _MAX_CUSTOM_MASKING_PATTERN_LENGTH:
+        raise ValueError(f"Safety check failed: pattern is too long (max {_MAX_CUSTOM_MASKING_PATTERN_LENGTH} chars)")
+
+    if "\\1" in normalized or "\\2" in normalized or "\\3" in normalized:
+        raise ValueError("Safety check failed: backreferences are not allowed in custom masking patterns")
+    if _REDOS_NESTED_QUANTIFIER_RE.search(normalized):
+        raise ValueError(
+            "Safety check failed: pattern contains nested quantifiers and may cause catastrophic backtracking"
+        )
+    if _REDOS_AMBIGUOUS_ALTERNATION_RE.search(normalized):
+        raise ValueError(
+            "Safety check failed: pattern contains quantified alternation and may cause catastrophic backtracking"
+        )
+
+    js_pattern = normalized
+    js_flags = "g"
+    inline_match = re.match(r"^\(\?([a-zA-Z]+)\)", js_pattern)
+    if inline_match:
+        js_flags += _normalize_js_regex_flags(inline_match.group(1))
+        js_pattern = js_pattern[len(inline_match.group(0)) :]
+    js_flags = _normalize_js_regex_flags(js_flags)
+
+    # Mirror the browser helper's Python-to-JS compatibility normalization.
+    js_pattern = js_pattern.replace(r"\A", "^").replace(r"\Z", "$")
+    js_pattern = re.sub(r"\(\?P<[^>]+>", "(", js_pattern)
+
+    if "(?<=" in js_pattern or "(?<!" in js_pattern:
+        raise ValueError(
+            "JavaScript compatibility check failed: lookbehind is not supported for screenshot DOM masking helper"
+        )
+
+    try:
+        py_js_flags = 0
+        if "i" in js_flags:
+            py_js_flags |= re.IGNORECASE
+        if "m" in js_flags:
+            py_js_flags |= re.MULTILINE
+        if "s" in js_flags:
+            py_js_flags |= re.DOTALL
+        re.compile(js_pattern, py_js_flags)
+    except re.error as exc:
+        raise ValueError(f"JavaScript compatibility check failed: {exc}") from exc
+
+    # Light smoke-test to fail fast on patterns that are extremely expensive
+    # in either engine shape before persisting.
+    samples = [
+        "a" * 48 + "!",
+        "customerRef=ZXCVBNM1234 email=ops@example.com",
+        "Authorization: Bearer supersecrettoken123",
+    ]
+    try:
+        for sample in samples:
+            re.sub(normalized, _masking.MASK, sample, flags=re.DOTALL)
+            re.sub(js_pattern, _masking.MASK, sample, flags=py_js_flags)
+    except re.error as exc:
+        raise ValueError(f"Runtime smoke-test failed: {exc}") from exc
+
+    return normalized
+
+
+def _mask_payload_for_output_json(
+    value: Any,
+    *,
+    db: "ChDbConnection | None" = None,
+    mask_sql_fields: bool = True,
+) -> Any:
+    safe_value = _coerce_undefined_for_json(value)
+    if not _is_output_masking_enabled(db):
+        return safe_value
+
+    if isinstance(safe_value, dict):
+        masked: dict[Any, Any] = {}
+        for key, item in safe_value.items():
+            key_name = _masking.normalize_sensitive_key(key)
+            if key_name in _masking.SENSITIVE_KEYS:
+                masked[key] = _masking.MASK
+                continue
+            if key_name in _SQL_OUTPUT_MASK_FIELD_NAMES and isinstance(item, str) and not mask_sql_fields:
+                masked[key] = item
+                continue
+            masked[key] = _mask_payload_for_output_json(item, db=db, mask_sql_fields=mask_sql_fields)
+        return masked
+    if isinstance(safe_value, list):
+        return [_mask_payload_for_output_json(item, db=db, mask_sql_fields=mask_sql_fields) for item in safe_value]
+    if isinstance(safe_value, tuple):
+        return tuple(_mask_payload_for_output_json(item, db=db, mask_sql_fields=mask_sql_fields) for item in safe_value)
+    return _mask_value_for_output(safe_value, db)
+
+
+def _is_output_masking_enabled(db: "ChDbConnection | None" = None) -> bool:
+    output_enabled, _sql_output_enabled = _get_masking_settings_flags(db)
+    return output_enabled
+
+
+def _mask_value_for_output(value: Any, db: "ChDbConnection | None" = None) -> Any:
+    if not _is_output_masking_enabled(db):
+        return value
+    return _masking.mask_value(value)
+
+
+def _mask_string_for_output(value: Any, db: "ChDbConnection | None" = None) -> str:
+    if not _is_output_masking_enabled(db):
+        if value is None:
+            return ""
+        return str(value)
+    return _masking.mask_string(value)
+
+
+def _is_sql_output_masking_enabled(db: "ChDbConnection | None" = None) -> bool:
+    _output_enabled, sql_output_enabled = _get_masking_settings_flags(db)
+    return sql_output_enabled
+
+
+def _jsonify_with_optional_sql_output_mask(payload: Any) -> Response:
+    return _base_jsonify(_mask_payload_for_output_json(payload, mask_sql_fields=_is_sql_output_masking_enabled()))
 
 
 _ASYNC_HTTP_CLIENT: httpx.AsyncClient | None = None
@@ -2675,13 +2882,21 @@ def _kubernetes_enabled() -> bool:
 @app.context_processor
 def inject_feature_flags() -> dict:
     try:
+        # Per-issue masking override is only effective when global masking is OFF.
+        raise_issue_mask_toggle_effective = not _is_output_masking_enabled()
         return {
             "query_enabled": _query_page_enabled(),
             "kubernetes_enabled": _kubernetes_enabled(),
+            "raise_issue_mask_toggle_effective": raise_issue_mask_toggle_effective,
             "sobs_version": BUILD_VERSION or "dev",
         }
     except Exception:
-        return {"query_enabled": False, "kubernetes_enabled": False, "sobs_version": BUILD_VERSION or "dev"}
+        return {
+            "query_enabled": False,
+            "kubernetes_enabled": False,
+            "raise_issue_mask_toggle_effective": False,
+            "sobs_version": BUILD_VERSION or "dev",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -3409,6 +3624,7 @@ _AI_ACTION_PAGE_TEMPLATES: dict[str, tuple[str, ...]] = {
     "/settings/agents": ("settings_agents.html",),
     "/settings/notifications": ("settings_notifications.html",),
     "/settings/tags": ("settings_tags.html",),
+    "/settings/masking": ("settings_masking.html",),
 }
 
 # Action types are now defined entirely via template annotations with data-ai-action-type
@@ -4542,9 +4758,18 @@ async def _create_github_issue(
     title: str,
     body_md: str,
     labels: list[str] | None = None,
+    *,
+    mask_output_enabled: bool = True,
 ) -> str:
     """Create a GitHub issue and return the HTML URL."""
-    result = await _create_github_issue_record(github_token, github_repo, title, body_md, labels)
+    result = await _create_github_issue_record(
+        github_token,
+        github_repo,
+        title,
+        body_md,
+        labels,
+        mask_output_enabled=mask_output_enabled,
+    )
     return str(result.get("issue_url", ""))
 
 
@@ -4666,6 +4891,7 @@ async def _choose_github_issue_outcome(
     issue_title: str,
     issue_body: str,
     allow_new_issue: bool,
+    mask_output_enabled: bool = True,
 ) -> dict[str, Any]:
     trigger_fields = _extract_agent_trigger_fields(trigger_context)
     dedup_key = _build_github_work_item_dedup_key(github_repo, trigger_fields)
@@ -4826,6 +5052,7 @@ async def _choose_github_issue_outcome(
             issue_title,
             issue_body,
             ["sobs-agent", "automated"],
+            mask_output_enabled=mask_output_enabled,
         )
 
     creation_error = str(created.get("error") or "")
@@ -5625,6 +5852,8 @@ async def _create_github_issue_record(
     title: str,
     body_md: str,
     labels: list[str] | None = None,
+    *,
+    mask_output_enabled: bool = True,
 ) -> dict[str, Any]:
     if not github_token or not github_repo:
         return {}
@@ -5635,9 +5864,11 @@ async def _create_github_issue_record(
             owner, repo = parts[-2], parts[-1]
     if not owner or not repo:
         return {}
+    issue_title = _mask_string_for_output(title) if mask_output_enabled else str(title or "")
+    issue_body = _mask_string_for_output(body_md) if mask_output_enabled else str(body_md or "")
     issue_payload: dict[str, Any] = {
-        "title": title,
-        "body": body_md,
+        "title": issue_title,
+        "body": issue_body,
         "labels": labels or ["sobs-agent", "automated"],
     }
     client = await _get_async_http_client()
@@ -5907,6 +6138,14 @@ async def _run_agent_flow(
     dlp_url = settings.get("ai.dlp_endpoint_url", "").strip()
     github_repo, github_token = _resolve_agent_github_target(db, settings, trigger_context)
     actions = set(rule.get("actions", []))
+    mask_output_enabled = True
+    extra_raw = trigger_context.get("extra")
+    if isinstance(extra_raw, dict):
+        mask_output_enabled = _parse_bool(extra_raw.get("mask_output"), True)
+    elif extra_raw:
+        parsed_extra = _safe_json_loads(str(extra_raw or ""), {})
+        if isinstance(parsed_extra, dict):
+            mask_output_enabled = _parse_bool(parsed_extra.get("mask_output"), True)
     try:
         parsed_max = int(settings.get("ai.agent_max_issues_per_hour", "") or _AI_AGENT_MAX_ISSUES_DEFAULT)
         max_issues = max(1, min(20, parsed_max))
@@ -6013,6 +6252,7 @@ async def _run_agent_flow(
             issue_title=issue_title,
             issue_body=issue_body,
             allow_new_issue=allow_new_issue,
+            mask_output_enabled=mask_output_enabled,
         )
         github_issue_url = str(issue_outcome.get("issue_url") or "")
 
@@ -11988,6 +12228,10 @@ app.jinja_env.globals["signal_label"] = signal_label
 app.jinja_env.globals["signal_description"] = signal_description
 app.jinja_env.globals["source_label"] = source_label
 
+# Register the ``mask`` Jinja2 filter so any template can write
+# ``{{ value|mask }}`` to redact PII/secrets from OTEL output.
+app.jinja_env.filters["mask"] = _mask_value_for_output
+
 
 # ---------------------------------------------------------------------------
 # Web UI – Metrics (derived signal index)
@@ -14079,7 +14323,8 @@ async def api_raw_span(span_id: str):
         "resource_attributes": resource_attrs,
     }
 
-    raw = json.dumps(payload, ensure_ascii=False, indent=2)
+    masked_payload = cast(dict[str, object], _mask_value_for_output(payload))
+    raw = json.dumps(masked_payload, ensure_ascii=False, indent=2)
     truncated = False
     if len(raw.encode()) > _RAW_SPAN_MAX_BYTES:
         truncated = True
@@ -14093,9 +14338,10 @@ async def api_raw_span(span_id: str):
             k: (v[:_ATTR_TRUNCATE] + "…" if isinstance(v, str) and len(v) > _ATTR_TRUNCATE else v)
             for k, v in resource_attrs.items()
         }
-        raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        masked_payload = cast(dict[str, object], _mask_value_for_output(payload))
+        raw = json.dumps(masked_payload, ensure_ascii=False, indent=2)
 
-    return jsonify({"span": payload, "raw": raw, "truncated": truncated})
+    return masked_jsonify({"span": masked_payload, "raw": raw, "truncated": truncated})
 
 
 # ---------------------------------------------------------------------------
@@ -19400,6 +19646,12 @@ async def data_management_help():
     return await render_template("data_management_help.html")
 
 
+@app.route("/settings/help/masking")
+@require_basic_auth
+async def masking_help():
+    return await render_template("masking_help.html")
+
+
 @app.route("/web-traffic/help")
 @require_basic_auth
 async def web_traffic_help():
@@ -19779,7 +20031,7 @@ async def compile_chart_spec_api():
     except Exception as exc:
         app.logger.exception("Chart spec compile failed")
         return jsonify({"error": _public_dashboard_query_error(exc)}), 400
-    return jsonify({"template_id": template_id, "query": query, "spec": normalized_spec})
+    return _jsonify_with_optional_sql_output_mask({"template_id": template_id, "query": query, "spec": normalized_spec})
 
 
 @app.route("/api/dashboards/spec/dry-run", methods=["POST"])
@@ -19813,7 +20065,7 @@ async def dry_run_chart_spec_api():
         include_records=False,
     )
 
-    return jsonify(
+    return _jsonify_with_optional_sql_output_mask(
         {
             "template_id": template_id,
             "query": query,
@@ -19849,7 +20101,7 @@ async def validate_chart_spec_api():
     except Exception as exc:
         return jsonify({"valid": False, "error": _public_dashboard_query_error(exc)}), 400
 
-    return jsonify(
+    return _jsonify_with_optional_sql_output_mask(
         {
             "valid": True,
             "template_id": template_id,
@@ -19906,7 +20158,9 @@ async def render_chart_spec_api():
     except Exception as exc:
         app.logger.exception("Chart spec render failed")
         return jsonify({"error": _public_dashboard_query_error(exc)}), 400
-    return jsonify({"template_id": template_id, "query": query, "spec": normalized_spec, "option": option})
+    return _jsonify_with_optional_sql_output_mask(
+        {"template_id": template_id, "query": query, "spec": normalized_spec, "option": option}
+    )
 
 
 @app.route("/api/dashboards/render", methods=["POST"])
@@ -20963,6 +21217,7 @@ async def view_settings():
     notification_channels = _load_notification_channels(db)
     notification_rules = _load_notification_rules(db)
     k8s_settings = _load_k8s_settings(db)
+    masking_settings = _load_masking_settings(db)
     backup_enabled = (_get_app_setting(db, "data_management.backup_enabled") or "0") == "1"
     return await render_template(
         "settings.html",
@@ -20972,9 +21227,178 @@ async def view_settings():
         ai_configured=bool(ai_settings.get("ai.endpoint_url") and ai_settings.get("ai.model")),
         notification_channel_count=len(notification_channels),
         notification_rule_count=len(notification_rules),
+        masking_custom_key_count=len(masking_settings["custom_keys"]),
+        masking_custom_pattern_count=len(masking_settings["custom_patterns"]),
         kubernetes_view_enabled=k8s_settings.get("kubernetes.enabled") == "1",
         backup_enabled=backup_enabled,
         query_allowed_tables=sorted(_QUERY_ALLOWED_TABLES),
+    )
+
+
+@app.route("/settings/masking", methods=["GET"])
+@require_basic_auth
+async def view_masking_settings():
+    db = get_db()
+    settings = _load_masking_settings(db)
+    return await render_template(
+        "settings_masking.html",
+        custom_keys=settings["custom_keys"],
+        custom_patterns=settings["custom_patterns"],
+        default_keys=settings["default_keys"],
+        default_patterns=settings["default_patterns"],
+        effective_key_count=len(settings["effective_keys"]),
+        effective_pattern_count=len(settings["effective_patterns"]),
+        output_masking_enabled=settings["output_masking_enabled"],
+        sql_output_masking_enabled=settings["sql_output_masking_enabled"],
+    )
+
+
+@app.route("/settings/masking/keys", methods=["POST"])
+@require_basic_auth
+async def add_masking_key():
+    db = get_db()
+    key = _masking.normalize_sensitive_key((await request.form).get("key"))
+    settings = _load_masking_settings(db)
+    if not key:
+        await flash("Sensitive key name is required", "warning")
+        return redirect(url_for("view_masking_settings"))
+    if key in settings["effective_keys"]:
+        await flash(f"Sensitive key '{key}' is already active", "info")
+        return redirect(url_for("view_masking_settings"))
+
+    custom_keys = [*settings["custom_keys"], key]
+    _save_masking_custom_keys(db, custom_keys)
+    _refresh_masking_runtime_rules(db)
+    await flash(f"Sensitive key '{key}' added", "success")
+    return redirect(url_for("view_masking_settings"))
+
+
+@app.route("/settings/masking/keys/delete", methods=["POST"])
+@require_basic_auth
+async def delete_masking_key():
+    db = get_db()
+    key = _masking.normalize_sensitive_key((await request.form).get("key"))
+    settings = _load_masking_settings(db)
+    if key not in settings["custom_keys"]:
+        await flash("Custom sensitive key not found", "warning")
+        return redirect(url_for("view_masking_settings"))
+
+    custom_keys = [item for item in settings["custom_keys"] if item != key]
+    _save_masking_custom_keys(db, custom_keys)
+    _refresh_masking_runtime_rules(db)
+    await flash(f"Sensitive key '{key}' removed", "success")
+    return redirect(url_for("view_masking_settings"))
+
+
+@app.route("/settings/masking/patterns", methods=["POST"])
+@require_basic_auth
+async def add_masking_pattern():
+    db = get_db()
+    raw_pattern = (await request.form).get("pattern")
+    settings = _load_masking_settings(db)
+    try:
+        pattern = _validate_custom_masking_pattern_for_storage(raw_pattern)
+    except (ValueError, re.error) as exc:
+        await flash(f"Invalid regex pattern: {exc}", "warning")
+        return redirect(url_for("view_masking_settings"))
+
+    if pattern in settings["effective_patterns"]:
+        await flash("That regex pattern is already active", "info")
+        return redirect(url_for("view_masking_settings"))
+
+    custom_patterns = [*settings["custom_patterns"], pattern]
+    _save_masking_custom_patterns(db, custom_patterns)
+    _refresh_masking_runtime_rules(db)
+    await flash("Custom masking pattern added", "success")
+    return redirect(url_for("view_masking_settings"))
+
+
+@app.route("/settings/masking/patterns/delete", methods=["POST"])
+@require_basic_auth
+async def delete_masking_pattern():
+    db = get_db()
+    raw_pattern = (await request.form).get("pattern")
+    settings = _load_masking_settings(db)
+    try:
+        pattern = _validate_custom_masking_pattern_for_storage(raw_pattern)
+    except (ValueError, re.error):
+        await flash("Custom masking pattern not found", "warning")
+        return redirect(url_for("view_masking_settings"))
+
+    if pattern not in settings["custom_patterns"]:
+        await flash("Custom masking pattern not found", "warning")
+        return redirect(url_for("view_masking_settings"))
+
+    custom_patterns = [item for item in settings["custom_patterns"] if item != pattern]
+    _save_masking_custom_patterns(db, custom_patterns)
+    _refresh_masking_runtime_rules(db)
+    await flash("Custom masking pattern removed", "success")
+    return redirect(url_for("view_masking_settings"))
+
+
+@app.route("/settings/masking/output", methods=["POST"])
+@require_basic_auth
+async def update_masking_output_setting():
+    db = get_db()
+    form = await request.form
+    enabled_values = form.getlist("enabled")
+    enabled = any(_is_truthy_setting(value, default=False) for value in enabled_values)
+    _set_app_setting(db, _MASKING_OUTPUT_ENABLED_SETTING, "1" if enabled else "0")
+    await flash(
+        (
+            "Global output masking enabled"
+            if enabled
+            else "Global output masking disabled across UI/JSON/notifications/GitHub issue payloads"
+        ),
+        "success",
+    )
+    return redirect(url_for("view_masking_settings"))
+
+
+@app.route("/settings/masking/sql-output", methods=["POST"])
+@require_basic_auth
+async def update_masking_sql_output_setting():
+    db = get_db()
+    form = await request.form
+    # Browser submissions can send both hidden and checkbox values for the same
+    # field name. Treat the toggle as enabled if any submitted value is truthy.
+    enabled_values = form.getlist("enabled")
+    enabled = any(_is_truthy_setting(value, default=False) for value in enabled_values)
+    _set_app_setting(db, _MASKING_SQL_OUTPUT_ENABLED_SETTING, "1" if enabled else "0")
+    await flash(
+        (
+            "SQL output masking enabled for NLQ/chart endpoints"
+            if enabled
+            else "SQL output masking disabled for NLQ/chart endpoints"
+        ),
+        "success",
+    )
+    return redirect(url_for("view_masking_settings"))
+
+
+@app.route("/api/settings/masking/preview", methods=["POST"])
+@require_basic_auth
+async def api_masking_preview():
+    payload = await request.get_json(silent=True)
+    value = (payload or {}).get("value")
+    masked = _mask_value_for_output(value) if isinstance(value, (dict, list)) else _mask_string_for_output(value)
+    return jsonify({"ok": True, "masked": masked})
+
+
+@app.route("/api/settings/masking/rules", methods=["GET"])
+@require_basic_auth
+async def api_masking_rules():
+    settings = _load_masking_settings(get_db())
+    return jsonify(
+        {
+            "ok": True,
+            "keys": settings["effective_keys"],
+            "patterns": settings["effective_patterns"],
+            "custom_keys": settings["custom_keys"],
+            "custom_patterns": settings["custom_patterns"],
+            "output_masking_enabled": settings["output_masking_enabled"],
+            "sql_output_masking_enabled": settings["sql_output_masking_enabled"],
+        }
     )
 
 
@@ -21565,9 +21989,9 @@ async def api_logs_validate_regex():
             where_parts=where_parts,
             where_params=where_params,
         )
-        return jsonify({"ok": True, "sample": sample})
+        return masked_jsonify({"ok": True, "sample": sample})
     except Exception:
-        return jsonify({"ok": True, "sample": None})
+        return masked_jsonify({"ok": True, "sample": None})
 
 
 # ---------------------------------------------------------------------------
@@ -21614,9 +22038,9 @@ async def api_errors_validate_regex():
             where_parts=where_parts,
             where_params=where_params,
         )
-        return jsonify({"ok": True, "sample": sample})
+        return masked_jsonify({"ok": True, "sample": sample})
     except Exception:
-        return jsonify({"ok": True, "sample": None})
+        return masked_jsonify({"ok": True, "sample": None})
 
 
 # ---------------------------------------------------------------------------
@@ -21667,9 +22091,9 @@ async def api_traces_validate_regex():
             where_parts=where_parts,
             where_params=where_params,
         )
-        return jsonify({"ok": True, "sample": sample})
+        return masked_jsonify({"ok": True, "sample": sample})
     except Exception:
-        return jsonify({"ok": True, "sample": None})
+        return masked_jsonify({"ok": True, "sample": None})
 
 
 # ---------------------------------------------------------------------------
@@ -21728,9 +22152,9 @@ async def api_metrics_validate_regex():
             where_parts=where_parts,
             where_params=where_params,
         )
-        return jsonify({"ok": True, "sample": sample})
+        return masked_jsonify({"ok": True, "sample": sample})
     except Exception:
-        return jsonify({"ok": True, "sample": None})
+        return masked_jsonify({"ok": True, "sample": None})
 
 
 # ---------------------------------------------------------------------------
@@ -21781,9 +22205,9 @@ async def api_rum_validate_regex():
             where_parts=where_parts,
             where_params=where_params,
         )
-        return jsonify({"ok": True, "sample": sample})
+        return masked_jsonify({"ok": True, "sample": sample})
     except Exception:
-        return jsonify({"ok": True, "sample": None})
+        return masked_jsonify({"ok": True, "sample": None})
 
 
 # ---------------------------------------------------------------------------
@@ -22235,8 +22659,26 @@ def _mask_channel_config(channel_type: str, config: dict) -> dict:
     return masked
 
 
-def _build_notification_payload(rule: dict, fired_conditions: list[dict]) -> dict:
+def _notification_channel_mask_output_enabled(channel: dict[str, Any]) -> bool:
+    config = channel.get("config") if isinstance(channel, dict) else {}
+    if not isinstance(config, dict):
+        return True
+    raw = config.get("mask_output_enabled")
+    if raw is None or str(raw).strip() == "":
+        return True
+    return _is_truthy_setting(str(raw), default=True)
+
+
+def _build_notification_payload(
+    rule: dict,
+    fired_conditions: list[dict],
+    *,
+    mask_output_enabled: bool = True,
+) -> dict:
     """Build a notification payload dict from a triggered rule and its matched conditions."""
+    conditions_payload = (
+        _mask_value_for_output(fired_conditions) if mask_output_enabled else copy.deepcopy(fired_conditions)
+    )
     condition_summaries = []
     for cond in fired_conditions:
         comparator_labels = {"gt": ">", "lt": "<", "gte": "≥", "lte": "≤", "eq": "="}
@@ -22248,10 +22690,12 @@ def _build_notification_payload(rule: dict, fired_conditions: list[dict]) -> dic
             f"{cond.get('threshold', 0)} (value={cond.get('_value', 'n/a')})"
         )
     summary = f"[SOBS] Rule '{rule['name']}' triggered ({rule['severity'].upper()}): " + "; ".join(condition_summaries)
+    if mask_output_enabled:
+        summary = _mask_string_for_output(summary)
     return {
         "rule_name": rule["name"],
         "severity": rule["severity"],
-        "conditions": fired_conditions,
+        "conditions": conditions_payload,
         "summary": summary,
         "fired_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -22627,7 +23071,7 @@ async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_i
     if not should_fire:
         return {"rule_id": rule["id"], "fired": False, "reason": "conditions not met"}
 
-    payload = _build_notification_payload(rule, fired_conditions)
+    default_payload = _build_notification_payload(rule, fired_conditions, mask_output_enabled=True)
 
     # Dispatch to each configured channel
     channel_ids = rule.get("channel_ids", [])
@@ -22635,11 +23079,27 @@ async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_i
     for ch_id in channel_ids:
         channel = channels_by_id.get(ch_id)
         if not channel:
-            dispatch_results.append({"channel_id": ch_id, "status": "error", "error": "channel not found"})
+            dispatch_results.append(
+                {
+                    "channel_id": ch_id,
+                    "status": "error",
+                    "error": "channel not found",
+                    "summary": default_payload.get("summary", ""),
+                }
+            )
             continue
         if not channel.get("enabled"):
-            dispatch_results.append({"channel_id": ch_id, "status": "skipped", "error": "channel disabled"})
+            dispatch_results.append(
+                {
+                    "channel_id": ch_id,
+                    "status": "skipped",
+                    "error": "channel disabled",
+                    "summary": default_payload.get("summary", ""),
+                }
+            )
             continue
+        mask_output_enabled = _notification_channel_mask_output_enabled(channel)
+        payload = _build_notification_payload(rule, fired_conditions, mask_output_enabled=mask_output_enabled)
         status = await _dispatch_notification_channel(channel, payload)
         dispatch_results.append(
             {
@@ -22647,6 +23107,7 @@ async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_i
                 "channel_name": channel.get("name", ""),
                 "status": "ok" if status == "ok" else "error",
                 "error": "" if status == "ok" else status,
+                "summary": payload.get("summary", ""),
             }
         )
 
@@ -22665,7 +23126,7 @@ async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_i
                     "FiredAt": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
                     "Status": dr.get("status", "error"),
                     "ErrorMessage": dr.get("error", ""),
-                    "Summary": payload.get("summary", ""),
+                    "Summary": dr.get("summary", default_payload.get("summary", "")),
                 }
             ],
         )
@@ -22706,7 +23167,7 @@ async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_i
         "rule_id": rule["id"],
         "rule_name": rule["name"],
         "fired": True,
-        "summary": payload.get("summary", ""),
+        "summary": default_payload.get("summary", ""),
         "dispatch_results": dispatch_results,
     }
 
@@ -22911,6 +23372,10 @@ def _set_app_setting(db: "ChDbConnection", key: str, value: str) -> None:
         "sobs_app_settings",
         [{"Key": key, "Value": stored, "UpdatedAt": int(time.time() * 1000)}],
     )
+    if key == _MASKING_OUTPUT_ENABLED_SETTING:
+        _set_masking_settings_cache(output_enabled=_is_truthy_setting(value, default=True))
+    elif key == _MASKING_SQL_OUTPUT_ENABLED_SETTING:
+        _set_masking_settings_cache(sql_output_enabled=_is_truthy_setting(value, default=True))
 
 
 def _del_app_setting(db: "ChDbConnection", key: str) -> None:
@@ -22920,6 +23385,113 @@ def _del_app_setting(db: "ChDbConnection", key: str) -> None:
         "sobs_app_settings",
         [{"Key": key, "Value": "", "UpdatedAt": int(time.time() * 1000)}],
     )
+    if key == _MASKING_OUTPUT_ENABLED_SETTING:
+        _set_masking_settings_cache(output_enabled=True)
+    elif key == _MASKING_SQL_OUTPUT_ENABLED_SETTING:
+        _set_masking_settings_cache(sql_output_enabled=True)
+
+
+def _load_json_string_list_setting(db: "ChDbConnection", key: str) -> list[str]:
+    raw = _get_app_setting(db, key) or ""
+    if not raw:
+        return []
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError:
+        app.logger.warning("Invalid JSON list in app setting %s", key)
+        return []
+    if not isinstance(values, list):
+        return []
+    result: list[str] = []
+    for item in values:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _save_json_string_list_setting(db: "ChDbConnection", key: str, values: list[str]) -> None:
+    if not values:
+        _del_app_setting(db, key)
+        return
+    _set_app_setting(db, key, json.dumps(values, ensure_ascii=False))
+
+
+def _load_masking_custom_keys(db: "ChDbConnection") -> list[str]:
+    keys = [
+        _masking.normalize_sensitive_key(value)
+        for value in _load_json_string_list_setting(db, _MASKING_CUSTOM_KEYS_SETTING)
+    ]
+    return sorted({key for key in keys if key})
+
+
+def _save_masking_custom_keys(db: "ChDbConnection", keys: list[str]) -> None:
+    normalized = sorted(
+        {
+            normalized_key
+            for normalized_key in (_masking.normalize_sensitive_key(value) for value in keys)
+            if normalized_key
+        }
+    )
+    _save_json_string_list_setting(db, _MASKING_CUSTOM_KEYS_SETTING, normalized)
+
+
+def _load_masking_custom_patterns(db: "ChDbConnection") -> list[str]:
+    patterns: list[str] = []
+    for value in _load_json_string_list_setting(db, _MASKING_CUSTOM_PATTERNS_SETTING):
+        try:
+            patterns.append(_validate_custom_masking_pattern_for_storage(value))
+        except (ValueError, re.error):
+            app.logger.warning("Ignoring invalid custom masking pattern from settings")
+    return list(dict.fromkeys(patterns))
+
+
+def _save_masking_custom_patterns(db: "ChDbConnection", patterns: list[str]) -> None:
+    normalized = list(dict.fromkeys([_validate_custom_masking_pattern_for_storage(value) for value in patterns]))
+    _save_json_string_list_setting(db, _MASKING_CUSTOM_PATTERNS_SETTING, normalized)
+
+
+def _load_masking_settings(db: "ChDbConnection") -> dict[str, Any]:
+    custom_keys = _load_masking_custom_keys(db)
+    custom_patterns = _load_masking_custom_patterns(db)
+    effective_keys = sorted({*_masking.DEFAULT_SENSITIVE_KEYS, *custom_keys})
+    effective_patterns = [*_masking.DEFAULT_SENSITIVE_PATTERNS, *custom_patterns]
+    return {
+        "custom_keys": custom_keys,
+        "custom_patterns": custom_patterns,
+        "default_keys": sorted(_masking.DEFAULT_SENSITIVE_KEYS),
+        "default_patterns": list(_masking.DEFAULT_SENSITIVE_PATTERNS),
+        "effective_keys": effective_keys,
+        "effective_patterns": effective_patterns,
+        "output_masking_enabled": _is_output_masking_enabled(db),
+        "sql_output_masking_enabled": _is_sql_output_masking_enabled(db),
+    }
+
+
+def _refresh_masking_runtime_rules(db: "ChDbConnection") -> None:
+    global _MASKING_LAST_RULES_SIGNATURE
+    custom_keys = _load_masking_custom_keys(db)
+    custom_patterns = _load_masking_custom_patterns(db)
+    signature = (tuple(custom_keys), tuple(custom_patterns))
+
+    with _MASKING_RULES_REFRESH_LOCK:
+        if _MASKING_LAST_RULES_SIGNATURE == signature:
+            return
+        _masking.configure_runtime_rules(
+            custom_keys=custom_keys,
+            custom_patterns=custom_patterns,
+        )
+        _MASKING_LAST_RULES_SIGNATURE = signature
+
+
+@app.before_request
+async def _refresh_masking_rules_before_request() -> None:
+    if request.endpoint == "static":
+        return
+    try:
+        _refresh_masking_runtime_rules(get_db())
+    except Exception:
+        app.logger.debug("Failed to refresh masking rules for request", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -22994,6 +23566,10 @@ async def create_notification_channel():
     form = await request.form
     name = (form.get("name") or "").strip()
     channel_type = (form.get("channel_type") or "").strip().lower()
+    mask_output_values = form.getlist("mask_output_enabled")
+    mask_output_enabled = any(_is_truthy_setting(value, default=False) for value in mask_output_values)
+    if not mask_output_values:
+        mask_output_enabled = True
 
     if not name:
         await flash("Channel name is required", "warning")
@@ -23035,6 +23611,8 @@ async def create_notification_channel():
         if not config["endpoint"]:
             await flash("Push endpoint is required", "warning")
             return redirect(url_for("view_notifications"))
+
+    config["mask_output_enabled"] = "1" if mask_output_enabled else "0"
 
     channel_id = str(uuid.uuid4())
     stored_config = _encrypt_notification_config(config)
@@ -23146,7 +23724,11 @@ async def test_notification_channel(channel_id: str):
         "rule_name": "Test",
         "severity": "info",
         "conditions": [],
-        "summary": f"[SOBS] Test notification from channel '{channel['name']}'",
+        "summary": (
+            _mask_string_for_output(f"[SOBS] Test notification from channel '{channel['name']}'")
+            if _notification_channel_mask_output_enabled(channel)
+            else f"[SOBS] Test notification from channel '{channel['name']}'"
+        ),
         "fired_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await _dispatch_notification_channel(channel, test_payload)
@@ -25529,6 +26111,7 @@ async def raise_issue_from_user_observation():
     payload = await request.get_json(force=True, silent=True) or {}
     source_page = str(payload.get("source_page") or "errors").strip().lower()
     assign_copilot = _parse_bool(payload.get("assign_copilot"), False)
+    mask_output = _parse_bool(payload.get("mask_output"), True)
 
     db = get_db()
     settings = _load_all_ai_settings(db)
@@ -25544,6 +26127,9 @@ async def raise_issue_from_user_observation():
         )
 
     trigger_context = _build_user_issue_trigger_context(source_page, payload)
+    trigger_extra = trigger_context.get("extra")
+    if isinstance(trigger_extra, dict):
+        trigger_extra["mask_output"] = mask_output
     github_repo, github_token = _resolve_agent_github_target(db, settings, trigger_context)
     if not github_repo or not github_token:
         return (
@@ -27460,7 +28046,7 @@ async def api_query_ask():
         },
     )
 
-    return jsonify(
+    return _jsonify_with_optional_sql_output_mask(
         {
             "ok": True,
             "trace_id": trace_id,
@@ -27721,7 +28307,7 @@ async def api_query_run():
         },
     )
 
-    return jsonify(
+    return _jsonify_with_optional_sql_output_mask(
         {
             "ok": True,
             "trace_id": trace_id,

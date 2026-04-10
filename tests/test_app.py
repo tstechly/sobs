@@ -53,6 +53,492 @@ async def client():
 
 
 # ---------------------------------------------------------------------------
+# Masking helpers
+# ---------------------------------------------------------------------------
+class TestMasking:
+    """Tests for the shared masking module (masking.py)."""
+
+    def test_email_is_masked_in_string(self):
+        import masking
+
+        result = masking.mask_value("User john.doe@example.com logged in")
+        assert "john.doe@example.com" not in result
+        assert "****" in result
+        assert "User" in result
+        assert "logged in" in result
+
+    def test_bearer_token_is_masked_in_string(self):
+        import masking
+
+        result = masking.mask_value("Authorization: Bearer supersecrettoken123")
+        assert "supersecrettoken123" not in result
+        assert "****" in result
+
+    def test_jwt_is_masked_in_string(self):
+        import masking
+
+        jwt = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        result = masking.mask_value(f"token={jwt}")
+        assert jwt not in result
+        assert "****" in result
+
+    def test_ssn_is_masked_in_string(self):
+        import masking
+
+        result = masking.mask_value("SSN: 123-45-6789 found in event")
+        assert "123-45-6789" not in result
+        assert "****" in result
+
+    def test_credit_card_is_masked_in_string(self):
+        import masking
+
+        result = masking.mask_value("card 4111111111111111 charged")
+        assert "4111111111111111" not in result
+        assert "****" in result
+
+    def test_aws_key_is_masked_in_string(self):
+        import masking
+
+        result = masking.mask_value("AKIAIOSFODNN7EXAMPLE was exposed")
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert "****" in result
+
+    def test_sensitive_key_masked_in_dict(self):
+        import masking
+
+        d = {"username": "alice", "password": "supersecret", "service": "myapp"}
+        result = masking.mask_value(d)
+        assert result["password"] == "****"
+        assert result["username"] == "alice"
+        assert result["service"] == "myapp"
+
+    def test_sensitive_key_masked_case_insensitive(self):
+        import masking
+
+        d = {"Password": "s3cr3t", "API_KEY": "abc123", "host": "localhost"}
+        result = masking.mask_value(d)
+        assert result["Password"] == "****"
+        assert result["API_KEY"] == "****"
+        assert result["host"] == "localhost"
+
+    def test_nested_dict_masked(self):
+        import masking
+
+        d = {"outer": {"inner": {"token": "secrettoken", "metric": "42"}}}
+        result = masking.mask_value(d)
+        assert result["outer"]["inner"]["token"] == "****"
+        assert result["outer"]["inner"]["metric"] == "42"
+
+    def test_list_of_dicts_masked(self):
+        import masking
+
+        data = [{"api_key": "KEY123", "name": "svc-a"}, {"api_key": "KEY456", "name": "svc-b"}]
+        result = masking.mask_value(data)
+        assert result[0]["api_key"] == "****"
+        assert result[1]["api_key"] == "****"
+        assert result[0]["name"] == "svc-a"
+
+    def test_non_sensitive_metrics_pass_through(self):
+        import masking
+
+        text = "http_requests_total 1234 latency_p99 42ms error_rate 0.01"
+        assert masking.mask_value(text) == text
+
+    def test_non_sensitive_dict_fields_pass_through(self):
+        import masking
+
+        d = {"service": "myapp", "status": "ok", "duration_ms": 120}
+        result = masking.mask_value(d)
+        assert result == d
+
+    def test_none_returns_none(self):
+        import masking
+
+        assert masking.mask_value(None) is None
+
+    def test_mask_string_coerces_dict_to_json_with_keys_masked(self):
+        import masking
+
+        result = masking.mask_string({"password": "secret", "service": "test"})
+        assert "secret" not in result
+        assert "****" in result
+        assert "test" in result
+
+    def test_mask_string_on_none_returns_empty(self):
+        import masking
+
+        assert masking.mask_string(None) == ""
+
+    def test_mask_value_fail_closed_when_nested_value_cannot_be_copied(self):
+        import masking
+
+        class _NoDeepCopy:
+            def __reduce_ex__(self, protocol):
+                raise TypeError("deepcopy disabled")
+
+            def __str__(self):
+                return "password=hunter2"
+
+        result = masking.mask_value({"payload": _NoDeepCopy(), "service": "checkout"})
+        assert result["payload"] == "****"
+        assert result["service"] == "checkout"
+
+    def test_mask_string_fail_closed_when_nested_value_cannot_be_copied(self):
+        import masking
+
+        class _NoDeepCopy:
+            def __reduce_ex__(self, protocol):
+                raise TypeError("deepcopy disabled")
+
+            def __str__(self):
+                return "password=hunter2"
+
+        result = masking.mask_string({"payload": _NoDeepCopy(), "service": "checkout"})
+        assert "hunter2" not in result
+        assert "****" in result
+        assert "checkout" in result
+
+    def test_original_dict_not_mutated(self):
+        import masking
+
+        original = {"password": "mysecret", "service": "svc"}
+        _ = masking.mask_value(original)
+        assert original["password"] == "mysecret"
+
+    def test_jinja_mask_filter_registered(self):
+        from app import app
+
+        assert "mask" in app.jinja_env.filters
+
+    async def test_jinja_mask_filter_redacts_email_in_rendered_html(self, client):
+        """The ``mask`` Jinja filter must redact a sensitive value when a template
+        renders it, without disrupting normal HTML output.
+        """
+        from quart.templating import render_template_string
+
+        async with app.app_context():
+            rendered = await render_template_string(
+                "{{ value|mask }}",
+                value="Contact us at support@secret.example.com for help",
+            )
+        assert "support@secret.example.com" not in rendered
+        assert "****" in rendered
+        assert "Contact us at" in rendered
+
+    async def test_jinja_mask_filter_passes_through_non_sensitive(self, client):
+        from quart.templating import render_template_string
+
+        async with app.app_context():
+            rendered = await render_template_string(
+                "{{ value|mask }}",
+                value="GET /api/health 200 OK 5ms",
+            )
+        assert "GET /api/health 200 OK 5ms" in rendered
+
+    async def test_jinja_mask_filter_can_be_globally_disabled(self, client):
+        from quart.templating import render_template_string
+
+        from app import _set_app_setting, get_db
+
+        db = get_db()
+        _set_app_setting(db, "masking.output_enabled", "0")
+        try:
+            async with app.app_context():
+                rendered = await render_template_string(
+                    "{{ value|mask }}",
+                    value="Contact us at support@secret.example.com for help",
+                )
+            assert "support@secret.example.com" in rendered
+            assert "****" not in rendered
+        finally:
+            _set_app_setting(db, "masking.output_enabled", "1")
+
+    def test_notification_summary_email_masked(self):
+        """Notification summary should have emails masked before dispatch."""
+        import app as sobs_app
+
+        rule = {"name": "alert rule", "severity": "warning"}
+        cond = {
+            "source": "logs",
+            "signal": "error_rate",
+            "service": "admin@internal.example.com",
+            "comparator": "gt",
+            "threshold": 5,
+            "_value": 10,
+        }
+        payload = sobs_app._build_notification_payload(rule, [cond])
+        assert "admin@internal.example.com" not in payload["summary"]
+        assert "****" in payload["summary"]
+        # Non-sensitive parts should remain readable
+        assert "alert rule" in payload["summary"]
+        assert "WARNING" in payload["summary"]
+
+    def test_github_issue_body_email_masked(self):
+        """GitHub issue title and body should have sensitive data masked."""
+        import masking
+
+        title = "Error in service billing@finance.example.com"
+        body = "## Issue\n\nUser email: ops@company.example.com\npassword=hunter2\n"
+        masked_title = masking.mask_string(title)
+        masked_body = masking.mask_string(body)
+        assert "billing@finance.example.com" not in masked_title
+        assert "ops@company.example.com" not in masked_body
+        assert "hunter2" not in masked_body
+        assert "****" in masked_title
+        assert "****" in masked_body
+        # Structure remains
+        assert "Error in service" in masked_title
+        assert "## Issue" in masked_body
+
+    async def test_settings_masking_page_loads(self, client):
+        r = await client.get("/settings/masking")
+        assert r.status_code == 200
+        text = await r.get_data(as_text=True)
+        assert "Output Masking" in text
+        assert "Custom Regex Patterns" in text
+        assert "Preview Current Rules" in text
+
+    async def test_settings_masking_help_page_loads(self, client):
+        r = await client.get("/settings/help/masking")
+        assert r.status_code == 200
+        text = await r.get_data(as_text=True)
+        assert "Output Masking Help" in text
+        assert "Client-Side Screenshot Workflow" in text
+
+    async def test_masking_rules_api_returns_effective_rules(self, client):
+        r = await client.get("/api/settings/masking/rules")
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert data["ok"] is True
+        assert isinstance(data.get("keys"), list)
+        assert isinstance(data.get("patterns"), list)
+        assert isinstance(data.get("custom_keys"), list)
+        assert isinstance(data.get("custom_patterns"), list)
+        assert isinstance(data.get("output_masking_enabled"), bool)
+        assert isinstance(data.get("sql_output_masking_enabled"), bool)
+
+    async def test_output_masking_toggle_route_updates_setting(self, client):
+        enabled = await client.post(
+            "/settings/masking/output",
+            form=[("enabled", "0"), ("enabled", "1")],
+        )
+        assert enabled.status_code in (200, 302)
+
+        enabled_rules = await client.get("/api/settings/masking/rules")
+        assert enabled_rules.status_code == 200
+        enabled_data = await enabled_rules.get_json()
+        assert enabled_data["output_masking_enabled"] is True
+
+        disabled = await client.post("/settings/masking/output", form={"enabled": "0"})
+        assert disabled.status_code in (200, 302)
+
+        disabled_rules = await client.get("/api/settings/masking/rules")
+        assert disabled_rules.status_code == 200
+        disabled_data = await disabled_rules.get_json()
+        assert disabled_data["output_masking_enabled"] is False
+
+        # Reset for isolation with later tests.
+        await client.post("/settings/masking/output", form=[("enabled", "0"), ("enabled", "1")])
+
+    async def test_sql_output_masking_toggle_route_updates_setting(self, client):
+        enabled = await client.post(
+            "/settings/masking/sql-output",
+            form=[("enabled", "0"), ("enabled", "1")],
+        )
+        assert enabled.status_code in (200, 302)
+
+        enabled_rules = await client.get("/api/settings/masking/rules")
+        assert enabled_rules.status_code == 200
+        enabled_data = await enabled_rules.get_json()
+        assert enabled_data["sql_output_masking_enabled"] is True
+
+        disabled = await client.post("/settings/masking/sql-output", form={"enabled": "0"})
+        assert disabled.status_code in (200, 302)
+
+        disabled_rules = await client.get("/api/settings/masking/rules")
+        assert disabled_rules.status_code == 200
+        disabled_data = await disabled_rules.get_json()
+        assert disabled_data["sql_output_masking_enabled"] is False
+
+    async def test_custom_masking_key_route_updates_preview_behavior(self, client):
+        preview_payload = {"customer_id": "CUST-12345678", "service": "checkout"}
+
+        before = await client.post("/api/settings/masking/preview", json={"value": preview_payload})
+        assert before.status_code == 200
+        before_data = await before.get_json()
+        assert before_data["masked"]["customer_id"] == "CUST-12345678"
+
+        created = await client.post("/settings/masking/keys", form={"key": "customer_id"})
+        assert created.status_code in (200, 302)
+
+        during = await client.post("/api/settings/masking/preview", json={"value": preview_payload})
+        assert during.status_code == 200
+        during_data = await during.get_json()
+        assert during_data["masked"]["customer_id"] == "****"
+
+        deleted = await client.post("/settings/masking/keys/delete", form={"key": "customer_id"})
+        assert deleted.status_code in (200, 302)
+
+        after = await client.post("/api/settings/masking/preview", json={"value": preview_payload})
+        assert after.status_code == 200
+        after_data = await after.get_json()
+        assert after_data["masked"]["customer_id"] == "CUST-12345678"
+
+    async def test_masking_preview_respects_global_output_toggle(self, client):
+        sensitive = {"password": "hunter2", "email": "ops@example.com"}
+
+        await client.post("/settings/masking/output", form={"enabled": "0"})
+        preview_raw = await client.post("/api/settings/masking/preview", json={"value": sensitive})
+        assert preview_raw.status_code == 200
+        preview_raw_data = await preview_raw.get_json()
+        assert preview_raw_data["masked"]["password"] == "hunter2"
+        assert preview_raw_data["masked"]["email"] == "ops@example.com"
+
+        await client.post("/settings/masking/output", form=[("enabled", "0"), ("enabled", "1")])
+        preview_masked = await client.post("/api/settings/masking/preview", json={"value": sensitive})
+        assert preview_masked.status_code == 200
+        preview_masked_data = await preview_masked.get_json()
+        assert preview_masked_data["masked"]["password"] == "****"
+        assert preview_masked_data["masked"]["email"] == "****"
+
+    async def test_custom_masking_pattern_route_updates_preview_behavior(self, client):
+        preview_text = "customerRef=ZXCVBNM1234"
+
+        before = await client.post("/api/settings/masking/preview", json={"value": preview_text})
+        assert before.status_code == 200
+        before_data = await before.get_json()
+        assert before_data["masked"] == preview_text
+
+        created = await client.post(
+            "/settings/masking/patterns",
+            form={"pattern": r"customerRef=[A-Z0-9]+"},
+        )
+        assert created.status_code in (200, 302)
+
+        during = await client.post("/api/settings/masking/preview", json={"value": preview_text})
+        assert during.status_code == 200
+        during_data = await during.get_json()
+        assert "ZXCVBNM1234" not in during_data["masked"]
+        assert "****" in during_data["masked"]
+
+        deleted = await client.post(
+            "/settings/masking/patterns/delete",
+            form={"pattern": r"customerRef=[A-Z0-9]+"},
+        )
+        assert deleted.status_code in (200, 302)
+
+        after = await client.post("/api/settings/masking/preview", json={"value": preview_text})
+        assert after.status_code == 200
+        after_data = await after.get_json()
+        assert after_data["masked"] == preview_text
+
+    async def test_custom_masking_pattern_route_rejects_nested_quantifier_pattern(self, client):
+        risky_pattern = r"(a+)+$"
+        created = await client.post("/settings/masking/patterns", form={"pattern": risky_pattern})
+        assert created.status_code in (200, 302)
+
+        rules = await client.get("/api/settings/masking/rules")
+        assert rules.status_code == 200
+        data = await rules.get_json()
+        assert risky_pattern not in (data.get("custom_patterns") or [])
+
+    async def test_custom_masking_pattern_route_rejects_lookbehind_for_js_compat(self, client):
+        js_incompatible_pattern = r"(?<=token=)[A-Za-z0-9]+"
+        created = await client.post("/settings/masking/patterns", form={"pattern": js_incompatible_pattern})
+        assert created.status_code in (200, 302)
+
+        rules = await client.get("/api/settings/masking/rules")
+        assert rules.status_code == 200
+        data = await rules.get_json()
+        assert js_incompatible_pattern not in (data.get("custom_patterns") or [])
+
+    async def test_masking_preview_masks_replay_and_screenshot_metadata(self, client):
+        replay_payload = {
+            "artifact": {
+                "type": "screenshot",
+                "id": "shot-123",
+                "url": "https://example.com/artifacts/shot-123.png?owner=ops@example.com",
+                "annotation": "api_key=sk_live_test_123",
+            },
+            "replay": {
+                "id": "replay-123",
+                "url": "https://example.com/replays/replay-123?email=ops@example.com",
+            },
+            "breadcrumbs": {
+                "console": [
+                    {
+                        "message": "Authorization: Bearer supersecrettoken123",
+                    }
+                ]
+            },
+        }
+
+        r = await client.post("/api/settings/masking/preview", json={"value": replay_payload})
+        assert r.status_code == 200
+        data = await r.get_json()
+        masked = data["masked"]
+
+        masked_json = json.dumps(masked)
+        assert "ops@example.com" not in masked_json
+        assert "supersecrettoken123" not in masked_json
+        assert "sk_live_test_123" not in masked_json
+        assert "****" in masked_json
+
+    async def test_summary_page_masks_recent_log_and_error_output(self, client):
+        ts_ns = int(time.time() * 1_000_000_000)
+        log_email = f"summary-log-{ts_ns}@example.com"
+        error_email = f"summary-error-{ts_ns}@example.com"
+
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {
+                            "attributes": [{"key": "service.name", "value": {"stringValue": "summary-mask-svc"}}]
+                        },
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(ts_ns),
+                                        "severityText": "ERROR",
+                                        "severityNumber": 17,
+                                        "body": {"stringValue": f"user email {log_email}"},
+                                        "traceId": "",
+                                        "spanId": "",
+                                        "attributes": [],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "summary-mask-svc",
+                "type": "ValueError",
+                "message": f"contact {error_email}",
+                "timestamp": "2024-01-01T00:00:00Z",
+            },
+        )
+
+        r = await client.get("/")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert log_email not in body
+        assert error_email not in body
+        assert "****" in body
+
+
+# ---------------------------------------------------------------------------
 # Compression helpers
 # ---------------------------------------------------------------------------
 class TestCompression:
@@ -1022,6 +1508,55 @@ class TestErrorsIngest:
         assert "raiseIssueModal" in body  # Bootstrap modal replaces window.confirm
         assert "window.confirm" not in body
 
+    async def test_errors_page_raise_issue_mask_toggle_is_disabled_when_global_masking_enabled(self, client):
+        db = sobs_app.get_db()
+        sobs_app._set_app_setting(db, "masking.output_enabled", "1")
+        await client.post(
+            "/v1/errors",
+            json={
+                "service": "raise-toggle-svc",
+                "type": "ToggleTestError",
+                "message": "toggle disabled regression",
+            },
+        )
+        r = await client.get("/errors?service=raise-toggle-svc")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+        assert 'id="raiseIssueMaskOutput"' in body
+        assert re.search(
+            r'id="raiseIssueMaskOutput"[^>]*\sdisabled(?:\s|>)',
+            body,
+        )
+        assert "This toggle is disabled while Global Output Masking is enabled." in body
+
+    async def test_errors_page_raise_issue_mask_toggle_is_enabled_when_global_masking_disabled(self, client):
+        db = sobs_app.get_db()
+        previous = sobs_app._get_app_setting(db, "masking.output_enabled")
+        sobs_app._set_app_setting(db, "masking.output_enabled", "0")
+        try:
+            await client.post(
+                "/v1/errors",
+                json={
+                    "service": "raise-toggle-svc-off",
+                    "type": "ToggleTestError",
+                    "message": "toggle enabled regression",
+                },
+            )
+            r = await client.get("/errors?service=raise-toggle-svc-off")
+            assert r.status_code == 200
+            body = await r.get_data(as_text=True)
+            assert 'id="raiseIssueMaskOutput"' in body
+            assert not re.search(
+                r'id="raiseIssueMaskOutput"[^>]*\sdisabled(?:\s|>)',
+                body,
+            )
+            assert "Global output masking is off. Use this to opt in/out of masking for this issue payload." in body
+        finally:
+            if previous is None:
+                sobs_app._del_app_setting(db, "masking.output_enabled")
+            else:
+                sobs_app._set_app_setting(db, "masking.output_enabled", previous)
+
     async def test_ingest_error_stack_is_source_mapped_when_enabled(self, client, monkeypatch):
         monkeypatch.setattr(sobs_app, "SOURCE_MAP_ENABLE", True)
 
@@ -1383,6 +1918,45 @@ class TestRumIngest:
         assert "Orders" in body
         assert "screenshot" in body
         assert "Replay" in body
+
+    async def test_errors_page_masks_replay_and_artifact_sensitive_metadata(self, client):
+        sensitive_email = "owner+mask-test@example.com"
+        sensitive_api_key = "sk_live_super_secret_123"
+        artifact_url = f"https://example.com/artifacts/shot-mask-001.png?owner={sensitive_email}"
+        replay_url = (
+            "https://example.com/replays/replay-mask-001" f"?api_key={sensitive_api_key}&email={sensitive_email}"
+        )
+        r = await client.post(
+            "/v1/rum",
+            json=[
+                {
+                    "type": "error",
+                    "sessionId": "sess-replay-mask-001",
+                    "traceId": "trace-replay-mask-001",
+                    "spanId": "span-replay-mask-001",
+                    "url": "https://example.com/app",
+                    "message": "Replay and artifact masking check",
+                    "errorType": "TypeError",
+                    "artifact": {
+                        "type": "screenshot",
+                        "id": "shot-mask-001",
+                        "url": artifact_url,
+                    },
+                    "replay": {
+                        "id": "replay-mask-001",
+                        "url": replay_url,
+                    },
+                }
+            ],
+        )
+        assert r.status_code == 200
+
+        page = await client.get("/errors")
+        assert page.status_code == 200
+        body = await page.get_data(as_text=True)
+        assert 'data-rum-view-url="https://example.com/artifacts/shot-mask-001.png' in body
+        assert 'data-rum-view-url="https://example.com/replays/replay-mask-001' in body
+        assert "****" in body
 
     async def test_ingest_dict_payload(self, client):
         r = await client.post(
@@ -2773,6 +3347,33 @@ class TestUIPages:
         r = await client.get("/ai")
         assert r.status_code == 200
 
+    async def test_ai_page_masks_sensitive_content_and_raw_json(self, client):
+        sensitive_email = "ai-mask-owner@example.com"
+        sensitive_api_key = "sk_live_ai_mask_secret_123"
+
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "ai-mask-svc",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "prompt": f"Contact {sensitive_email} api_key={sensitive_api_key}",
+                "response": f"Authorization: Bearer {sensitive_api_key}",
+                "tokens_in": 10,
+                "tokens_out": 4,
+                "duration_ms": 120,
+            },
+        )
+        assert r.status_code == 200
+
+        page = await client.get("/ai?service=ai-mask-svc")
+        assert page.status_code == 200
+        body = await page.get_data(as_text=True)
+
+        assert sensitive_email not in body
+        assert sensitive_api_key not in body
+        assert "****" in body
+
     async def test_first_run_tour_modal_present(self, client):
         r = await client.get("/")
         assert r.status_code == 200
@@ -3561,6 +4162,46 @@ class TestUIPages:
 
         parsed = _json.loads(data["raw"])
         assert parsed["span_id"] == span_id_hex
+
+    async def test_raw_span_endpoint_masks_sensitive_attribute_values(self, client):
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+        from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+        from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+        from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
+
+        span_bytes = bytes.fromhex("abcd1234beef9999")
+        trace_id_bytes = bytes.fromhex("00112233445566778899aabbccddeeff")
+        start_ns = 1704067200_000_000_000
+        email_value = "span-owner@example.com"
+
+        span = Span(
+            trace_id=trace_id_bytes,
+            span_id=span_bytes,
+            name="raw-span-secret-op",
+            start_time_unix_nano=start_ns,
+            end_time_unix_nano=start_ns + 500_000_000,
+            status=Status(code=1),
+            attributes=[
+                KeyValue(key="customer.email", value=AnyValue(string_value=email_value)),
+                KeyValue(key="api_key", value=AnyValue(string_value="supersecretkey")),
+            ],
+        )
+        resource = Resource(attributes=[KeyValue(key="service.name", value=AnyValue(string_value="raw-span-mask-svc"))])
+        msg = ExportTraceServiceRequest(
+            resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[span])])]
+        )
+        r = await client.post(
+            "/v1/traces", data=msg.SerializeToString(), headers={"Content-Type": "application/x-protobuf"}
+        )
+        assert r.status_code == 200
+
+        span_id_hex = span_bytes.hex()
+        r = await client.get(f"/api/traces/span/{span_id_hex}")
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert data["span"]["attributes"]["api_key"] == "****"
+        assert email_value not in data["raw"]
+        assert "****" in data["raw"]
 
     async def test_raw_span_endpoint_not_found(self, client):
         """GET /api/traces/span/<span_id> returns 404 for unknown span_id."""
@@ -6631,6 +7272,53 @@ class TestCustomDashboards:
         data = await r.get_json()
         assert data["template_id"] == "derived_signal_overlay"
         assert "FROM v_derived_signals_anomaly" in data["query"]
+
+    async def test_chart_spec_compile_masks_query_when_enabled(self, client):
+        db = sobs_app.get_db()
+        sobs_app._set_app_setting(db, "masking.sql_output_enabled", "1")
+
+        r = await client.post(
+            "/api/dashboards/spec/compile",
+            json={
+                "spec": {
+                    "template_id": "anomaly_overlay",
+                    "sql": {
+                        "mode": "raw",
+                        "override_sql": (
+                            "SELECT 'owner@example.com' AS owner_email, " "'api_key=sk_live_compile_test_123' AS secret"
+                        ),
+                    },
+                }
+            },
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert "owner@example.com" not in data["query"]
+        assert "sk_live_compile_test_123" not in data["query"]
+        assert "****" in data["query"]
+
+    async def test_chart_spec_compile_does_not_mask_query_when_disabled(self, client):
+        db = sobs_app.get_db()
+        sobs_app._set_app_setting(db, "masking.sql_output_enabled", "0")
+
+        r = await client.post(
+            "/api/dashboards/spec/compile",
+            json={
+                "spec": {
+                    "template_id": "anomaly_overlay",
+                    "sql": {
+                        "mode": "raw",
+                        "override_sql": (
+                            "SELECT 'owner@example.com' AS owner_email, " "'api_key=sk_live_compile_test_456' AS secret"
+                        ),
+                    },
+                }
+            },
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert "owner@example.com" in data["query"]
+        assert "sk_live_compile_test_456" in data["query"]
 
     async def test_chart_spec_compile_builder_supports_base_table_source(self, client):
         r = await client.post(
@@ -10952,6 +11640,98 @@ class TestAISettingsAndAgentFlows:
         assert calls[0][1]["title"] == "fixture issue"
         assert calls[0][1]["labels"] == ["security"]
 
+    async def test_create_github_issue_record_respects_mask_output_toggle(self, monkeypatch):
+        calls: list[tuple[str, dict]] = []
+
+        class _FakeResponse:
+            def __init__(self, payload: dict):
+                self._payload = payload
+                self.content = b"{}"
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class _FakeClient:
+            async def post(self, url, json=None, headers=None, timeout=None):
+                calls.append((str(url), dict(json or {})))
+                return _FakeResponse({"html_url": "https://github.com/acme/demo/issues/11", "number": 11})
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(sobs_app, "_get_async_http_client", _fake_get_client)
+
+        title = "Issue for ops@example.com"
+        body = "password=hunter2"
+        await sobs_app._create_github_issue_record(
+            "ghp-test-token",
+            "acme/demo",
+            title,
+            body,
+            ["security"],
+            mask_output_enabled=False,
+        )
+        assert calls[-1][1]["title"] == title
+        assert calls[-1][1]["body"] == body
+
+        await sobs_app._create_github_issue_record(
+            "ghp-test-token",
+            "acme/demo",
+            title,
+            body,
+            ["security"],
+            mask_output_enabled=True,
+        )
+        assert "ops@example.com" not in calls[-1][1]["title"]
+        assert "hunter2" not in calls[-1][1]["body"]
+        assert "****" in calls[-1][1]["title"]
+        assert "****" in calls[-1][1]["body"]
+
+    async def test_create_github_issue_record_global_disable_overrides_mask_output_toggle(self, monkeypatch):
+        calls: list[tuple[str, dict]] = []
+
+        class _FakeResponse:
+            def __init__(self, payload: dict):
+                self._payload = payload
+                self.content = b"{}"
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class _FakeClient:
+            async def post(self, url, json=None, headers=None, timeout=None):
+                calls.append((str(url), dict(json or {})))
+                return _FakeResponse({"html_url": "https://github.com/acme/demo/issues/12", "number": 12})
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(sobs_app, "_get_async_http_client", _fake_get_client)
+
+        db = sobs_app.get_db()
+        sobs_app._set_app_setting(db, "masking.output_enabled", "0")
+        try:
+            title = "Issue for ops@example.com"
+            body = "password=hunter2"
+            await sobs_app._create_github_issue_record(
+                "ghp-test-token",
+                "acme/demo",
+                title,
+                body,
+                ["security"],
+                mask_output_enabled=True,
+            )
+            assert calls[-1][1]["title"] == title
+            assert calls[-1][1]["body"] == body
+        finally:
+            sobs_app._set_app_setting(db, "masking.output_enabled", "1")
+
     async def test_assign_issue_to_copilot_uses_supported_issue_assignment_api(self, monkeypatch):
         calls: list[tuple[str, dict]] = []
 
@@ -11208,7 +11988,53 @@ class TestAISettingsAndAgentFlows:
         assert isinstance(extra, dict)
         assert str(extra["initiated_by"]) == "user"
         assert str(extra["source"]) == "errors"
+        assert bool(extra.get("mask_output")) is True
         assert str(trigger["trigger_ref_id"]) == "err-123"
+
+    async def test_raise_user_issue_routes_mask_output_toggle(self, client, monkeypatch):
+        from app import _save_ai_setting, get_db
+
+        db = get_db()
+        _save_ai_setting(db, "ai.endpoint_url", "https://analysis.example.com/v1")
+        _save_ai_setting(db, "ai.model", "analysis-model")
+
+        captured: dict[str, object] = {}
+
+        async def _fake_run_agent_rule_instance(db_arg, rule, settings, trigger_context):
+            captured["trigger_context"] = trigger_context
+            return {
+                "ok": True,
+                "run_id": "run-user-raise-mask-off",
+                "result": {
+                    "status": "completed",
+                    "github_issue_url": "https://github.com/acme/demo/issues/99",
+                    "dedup_decision": "new_issue",
+                },
+            }
+
+        monkeypatch.setattr(sobs_app, "_run_agent_rule_instance", _fake_run_agent_rule_instance)
+        monkeypatch.setattr(
+            sobs_app, "_resolve_agent_github_target", lambda *_args, **_kwargs: ("acme/demo", "ghp-test")
+        )
+
+        r = await client.post(
+            "/api/issues/raise",
+            json={
+                "source_page": "errors",
+                "service": "checkout-api",
+                "err_type": "RuntimeError",
+                "message": "something broke",
+                "error_id": "err-mask-off",
+                "mask_output": False,
+            },
+        )
+        assert r.status_code == 200
+
+        trigger = captured["trigger_context"]
+        assert isinstance(trigger, dict)
+        extra = trigger.get("extra")
+        assert isinstance(extra, dict)
+        assert bool(extra.get("mask_output")) is False
 
     async def test_raise_user_issue_requires_github_target(self, client, monkeypatch):
         from app import _save_ai_setting, get_db
@@ -12057,6 +12883,143 @@ class TestNotifications:
         text = (await r2.get_data()).decode()
         assert "Test Webhook" in text
 
+    async def test_notification_channel_masking_defaults_to_enabled(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": "Mask Default Channel",
+                "channel_type": "webhook",
+                "webhook_url": "https://example.com/default-mask",
+                "webhook_method": "POST",
+            },
+        )
+        channels = sobs_app._load_notification_channels(sobs_app.get_db())
+        ch = next((c for c in channels if c["name"] == "Mask Default Channel"), None)
+        assert ch is not None
+        assert str(ch["config"].get("mask_output_enabled", "1")) in {"1", "true", "True"}
+
+    async def test_notification_channel_masking_can_be_disabled(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": "Mask Disabled Channel",
+                "channel_type": "webhook",
+                "webhook_url": "https://example.com/raw-mask",
+                "webhook_method": "POST",
+                "mask_output_enabled": "0",
+            },
+        )
+        channels = sobs_app._load_notification_channels(sobs_app.get_db())
+        ch = next((c for c in channels if c["name"] == "Mask Disabled Channel"), None)
+        assert ch is not None
+        assert str(ch["config"].get("mask_output_enabled", "1")) == "0"
+
+    async def test_check_notification_rule_applies_per_channel_masking(self, monkeypatch):
+        db = sobs_app.get_db()
+        rule = {
+            "id": f"mask-rule-{time.time_ns()}",
+            "name": "Mask routing rule",
+            "enabled": True,
+            "logic_operator": "any",
+            "conditions": [
+                {
+                    "source": "logs",
+                    "signal": "error_volume",
+                    "service": "owner@example.com",
+                    "comparator": "gt",
+                    "threshold": 1,
+                    "window_minutes": 5,
+                }
+            ],
+            "channel_ids": ["masked-channel", "raw-channel"],
+            "severity": "warning",
+            "cooldown_seconds": 0,
+        }
+        channels_by_id = {
+            "masked-channel": {
+                "id": "masked-channel",
+                "name": "Masked",
+                "enabled": True,
+                "channel_type": "webhook",
+                "config": {"url": "https://example.com/masked", "mask_output_enabled": "1"},
+            },
+            "raw-channel": {
+                "id": "raw-channel",
+                "name": "Raw",
+                "enabled": True,
+                "channel_type": "webhook",
+                "config": {"url": "https://example.com/raw", "mask_output_enabled": "0"},
+            },
+        }
+
+        monkeypatch.setattr(sobs_app, "_evaluate_signal_condition", lambda _db, _cond: (True, 42.0))
+        seen: dict[str, dict] = {}
+
+        async def _fake_dispatch(channel, payload):
+            seen[str(channel.get("id"))] = payload
+            return "ok"
+
+        monkeypatch.setattr(sobs_app, "_dispatch_notification_channel", _fake_dispatch)
+
+        result = await sobs_app._check_notification_rule(db, rule, channels_by_id)
+        assert result["fired"] is True
+        assert "masked-channel" in seen
+        assert "raw-channel" in seen
+        assert "owner@example.com" not in str(seen["masked-channel"].get("summary") or "")
+        assert seen["masked-channel"]["conditions"][0]["service"] == "****"
+        assert "owner@example.com" in str(seen["raw-channel"].get("summary") or "")
+        assert seen["raw-channel"]["conditions"][0]["service"] == "owner@example.com"
+
+    async def test_check_notification_rule_global_output_disable_bypasses_channel_masking(self, monkeypatch):
+        db = sobs_app.get_db()
+        sobs_app._set_app_setting(db, "masking.output_enabled", "0")
+        try:
+            rule = {
+                "id": f"mask-rule-global-off-{time.time_ns()}",
+                "name": "Mask routing global-off rule",
+                "enabled": True,
+                "logic_operator": "any",
+                "conditions": [
+                    {
+                        "source": "logs",
+                        "signal": "error_volume",
+                        "service": "owner@example.com",
+                        "comparator": "gt",
+                        "threshold": 1,
+                        "window_minutes": 5,
+                    }
+                ],
+                "channel_ids": ["masked-channel"],
+                "severity": "warning",
+                "cooldown_seconds": 0,
+            }
+            channels_by_id = {
+                "masked-channel": {
+                    "id": "masked-channel",
+                    "name": "Masked",
+                    "enabled": True,
+                    "channel_type": "webhook",
+                    "config": {"url": "https://example.com/masked", "mask_output_enabled": "1"},
+                }
+            }
+
+            monkeypatch.setattr(sobs_app, "_evaluate_signal_condition", lambda _db, _cond: (True, 42.0))
+            seen: dict[str, str] = {}
+
+            async def _fake_dispatch(channel, payload):
+                seen[str(channel.get("id"))] = str(payload.get("summary") or "")
+                return "ok"
+
+            monkeypatch.setattr(sobs_app, "_dispatch_notification_channel", _fake_dispatch)
+
+            result = await sobs_app._check_notification_rule(db, rule, channels_by_id)
+            assert result["fired"] is True
+            assert "masked-channel" in seen
+            assert "owner@example.com" in seen["masked-channel"]
+            assert "****" not in seen["masked-channel"]
+        finally:
+            sobs_app._set_app_setting(db, "masking.output_enabled", "1")
+
     async def test_create_slack_channel(self, client):
         r = await client.post(
             "/settings/notifications/channels",
@@ -12481,6 +13444,24 @@ class TestNotifications:
         assert payload["severity"] == "warning"
         assert "Test Rule" in payload["summary"]
         assert "error_volume" in payload["summary"]
+
+    def test_build_notification_payload_masks_structured_conditions(self):
+        from app import _build_notification_payload
+
+        rule = {"name": "Masked Rule", "severity": "warning"}
+        conditions = [
+            {
+                "source": "logs",
+                "signal": "error_volume",
+                "service": "owner@example.com",
+                "comparator": "gt",
+                "threshold": 1,
+                "_value": 42.0,
+            }
+        ]
+        payload = _build_notification_payload(rule, conditions, mask_output_enabled=True)
+        assert payload["conditions"][0]["service"] == "****"
+        assert payload["summary"].count("****") >= 1
 
     def test_mask_channel_config_hides_password(self):
         from app import _mask_channel_config
@@ -13750,6 +14731,124 @@ class TestQueryRoutes:
         assert data["rows"] == [[1]]
         assert data["retry_count"] == 0
         assert data["error"] == ""
+
+    async def test_query_run_masks_sql_field_when_enabled(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+
+        import pandas as pd
+
+        monkeypatch.setattr(sobs_app, "_vanna_run_query", lambda _db, _sql: (pd.DataFrame([{"x": 1}]), ""))
+        monkeypatch.setattr(sobs_app, "_vanna_explain_sql", lambda _db, _sql: "")
+        monkeypatch.setattr(sobs_app, "_check_guard_model", AsyncMock(return_value=(True, "allowed", {})))
+        sobs_app._set_app_setting(sobs_app.get_db(), "masking.sql_output_enabled", "1")
+
+        sql_text = "SELECT 'owner@example.com' AS owner, 'api_key=sk_live_run_test_123' AS secret"
+        r = await client.post(
+            "/api/query/run",
+            json={"sql": sql_text, "question": "mask sql", "chart": False},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "owner@example.com" not in data["sql"]
+        assert "sk_live_run_test_123" not in data["sql"]
+        assert "****" in data["sql"]
+
+    async def test_query_run_does_not_mask_sql_field_when_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+
+        import pandas as pd
+
+        monkeypatch.setattr(sobs_app, "_vanna_run_query", lambda _db, _sql: (pd.DataFrame([{"x": 1}]), ""))
+        monkeypatch.setattr(sobs_app, "_vanna_explain_sql", lambda _db, _sql: "")
+        monkeypatch.setattr(sobs_app, "_check_guard_model", AsyncMock(return_value=(True, "allowed", {})))
+        sobs_app._set_app_setting(sobs_app.get_db(), "masking.sql_output_enabled", "0")
+
+        sql_text = "SELECT 'owner@example.com' AS owner, 'api_key=sk_live_run_test_456' AS secret"
+        r = await client.post(
+            "/api/query/run",
+            json={"sql": sql_text, "question": "mask sql", "chart": False},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "owner@example.com" in data["sql"]
+        assert "sk_live_run_test_456" in data["sql"]
+
+    async def test_query_run_masks_rows_even_when_sql_field_masking_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+
+        import pandas as pd
+
+        monkeypatch.setattr(
+            sobs_app,
+            "_vanna_run_query",
+            lambda _db, _sql: (
+                pd.DataFrame([{"owner": "owner@example.com", "secret": "api_key=sk_live_result_test_123"}]),
+                "",
+            ),
+        )
+        monkeypatch.setattr(sobs_app, "_vanna_explain_sql", lambda _db, _sql: "")
+        monkeypatch.setattr(sobs_app, "_check_guard_model", AsyncMock(return_value=(True, "allowed", {})))
+        sobs_app._set_app_setting(sobs_app.get_db(), "masking.output_enabled", "1")
+        sobs_app._set_app_setting(sobs_app.get_db(), "masking.sql_output_enabled", "0")
+
+        sql_text = "SELECT 'owner@example.com' AS owner, 'api_key=sk_live_sql_passthrough_123' AS secret"
+        r = await client.post(
+            "/api/query/run",
+            json={"sql": sql_text, "question": "mask rows only", "chart": False},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "owner@example.com" in data["sql"]
+        assert "sk_live_sql_passthrough_123" in data["sql"]
+        assert data["rows"][0][0] == "****"
+        assert data["rows"][0][1] == "****"
+
+    async def test_query_ask_masks_sql_and_dataset_sql_when_enabled(self, client, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_load_all_ai_settings",
+            lambda _db: self._configured_query_settings(),
+        )
+        monkeypatch.setattr(sobs_app, "_check_guard_model", AsyncMock(return_value=(True, "allowed", {})))
+
+        async def _fake_llm(*_a, **_kw):
+            return "SELECT 'owner@example.com' AS owner, 'api_key=sk_live_ask_test_123' AS secret", {}
+
+        monkeypatch.setattr(sobs_app, "_call_llm_endpoint", _fake_llm)
+        sobs_app._set_app_setting(sobs_app.get_db(), "masking.sql_output_enabled", "1")
+
+        r = await client.post(
+            "/api/query/ask",
+            json={"question": "show sample", "execute": False, "chart": False},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "owner@example.com" not in data["sql"]
+        assert "sk_live_ask_test_123" not in data["sql"]
+        assert "****" in data["sql"]
+
+    async def test_query_ask_does_not_mask_sql_when_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_load_all_ai_settings",
+            lambda _db: self._configured_query_settings(),
+        )
+        monkeypatch.setattr(sobs_app, "_check_guard_model", AsyncMock(return_value=(True, "allowed", {})))
+
+        async def _fake_llm(*_a, **_kw):
+            return "SELECT 'owner@example.com' AS owner, 'api_key=sk_live_ask_test_456' AS secret", {}
+
+        monkeypatch.setattr(sobs_app, "_call_llm_endpoint", _fake_llm)
+        sobs_app._set_app_setting(sobs_app.get_db(), "masking.sql_output_enabled", "0")
+
+        r = await client.post(
+            "/api/query/ask",
+            json={"question": "show sample", "execute": False, "chart": False},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "owner@example.com" in data["sql"]
+        assert "sk_live_ask_test_456" in data["sql"]
 
     async def test_query_run_endpoint_chart_handles_date_values(self, client, monkeypatch):
         monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())

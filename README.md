@@ -974,3 +974,109 @@ chmod +x .githooks/pre-commit
 
 If formatting changes are applied, the hook re-stages those Python files before commit.
 
+## Output Masking (PII / Secret Redaction)
+
+SOBS redacts PII and secrets from web UI output, outbound notification
+messages, and GitHub issue bodies using `masking.py` - a shared rule-based masking layer
+backed by the [`loggingredactor`](https://pypi.org/project/loggingredactor/) library.
+
+### What is masked
+
+| Category | Examples |
+|---|---|
+| Email addresses | `user@company.com` |
+| JWT tokens | `eyJhbGci…` |
+| Bearer tokens | `Authorization: Bearer …` |
+| AWS access key IDs | `AKIA…` |
+| US Social Security Numbers | `123-45-6789` |
+| Credit card numbers | Visa, Mastercard, Amex, Discover |
+| PEM private keys | `-----BEGIN PRIVATE KEY-----…` |
+| Dict/object keys | `password`, `api_key`, `token`, `secret`, … |
+
+Masking is **display-only** – it does not modify the data stored in the database.
+
+### Using the `mask` Jinja filter
+
+Any template can use the `mask` filter to redact a value before rendering:
+
+```html
+{{ log.body|mask }}
+{{ event.attributes|mask }}
+```
+
+### Extending the rule set
+
+Edit `masking.py`:
+
+* **New sensitive value patterns** – add a regex string to `SENSITIVE_PATTERNS`.
+  The full regex match is replaced with `****`.
+
+  ```python
+  SENSITIVE_PATTERNS.append(r"\bMY_SECRET_PATTERN\b")
+  masking.build_redacting_filter()   # rebuild singleton
+  ```
+
+* **New sensitive key names** – add a lowercase name to `SENSITIVE_KEYS`.
+  Any dict key whose lowercased name is in this set will have its value masked,
+  regardless of the value content.
+
+  ```python
+  # masking.py
+  SENSITIVE_KEYS = frozenset({
+      ...
+      "my_new_sensitive_key",
+  })
+  ```
+
+Masking is also applied automatically to:
+* Outbound notification payloads (`summary` field sent to Slack/webhook/email)
+* GitHub issue titles and bodies created by the agent flow
+
+### Settings UI and APIs
+
+SOBS now includes a dedicated masking settings page:
+
+* `GET /settings/masking` for managing custom sensitive keys and regex patterns
+* `GET /settings/help/masking` for implementation guidance and screenshot workflow notes
+* `POST /api/settings/masking/preview` to preview redaction output for text/JSON values
+* `GET /api/settings/masking/rules` to fetch effective key/pattern rules for browser helpers
+
+### Global Output Masking Toggle
+
+Global masking across UI/API output surfaces is controlled via:
+
+* `POST /settings/masking/output`
+
+When enabled (default), masking is applied to template `mask` filter output, masking preview
+responses, masked JSON display payloads, notification summaries, and GitHub issue payload masking.
+When disabled, masking is bypassed for those output surfaces.
+
+### Per-Issue Masking Toggle (Raise Issue Modal)
+
+On Errors/Traces raise-issue modals, the per-issue `mask_output` checkbox follows this contract:
+
+* **Global masking ON**: checkbox is disabled, and issue payload masking is forced on.
+* **Global masking OFF**: checkbox is enabled, and the posted `mask_output` value controls whether that specific issue payload is masked.
+
+This keeps secure-by-default behavior when global masking is active while still allowing
+explicit per-issue masking control during raw-debug workflows when global masking is off.
+
+### SQL Output Masking Toggle
+
+SQL text returned by NLQ/chart endpoints can be controlled independently via:
+
+* `POST /settings/masking/sql-output`
+
+When enabled, SOBS masks sensitive fragments in SQL/query fields (`sql`, `query`,
+`sample_sql`, `override_sql`) for query/chart responses. When disabled, SQL text is
+returned unmasked for debugging workflows.
+
+The SQL toggle is evaluated only when global output masking is enabled.
+
+### Replay and Artifact URLs
+
+Replay/artifact metadata remains masked in visible labels and summaries, while action URLs
+used by "View Replay", "View Artifact", and "Open Raw" remain functional so operators can
+open attached resources directly from the UI.
+
+
