@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_filter_macros.html" import render_filter_accordion %}
+{% from "_filter_macros.html" import render_filter_accordion, render_tz_init_script %}
 {% from "_multi_select_filter.html" import render_single_select %}
 {% block title %}Work Items{% endblock %}
 {% block content %}
@@ -11,7 +11,21 @@
     {% endif %}
   </h4>
   <div class="d-flex align-items-center gap-2">
+    <button class="btn btn-sm btn-outline-primary"
+            type="button"
+            data-bs-toggle="modal"
+            data-bs-target="#workItemsTourModal"
+            title="Work items walkthrough"
+            aria-label="Open work items walkthrough"
+            data-ai-action-id="work.items.tour.open"
+            data-ai-action-type="open_modal"
+            data-ai-handler="openModal"
+            data-ai-args='{"modal_id":"workItemsTourModal"}'
+            data-ai-label="Open work items walkthrough modal">
+      <i class="bi bi-mortarboard me-1"></i>Walkthrough
+    </button>
     <span class="text-secondary small"><i class="bi bi-clock me-1"></i>Auto-created by agent rules</span>
+    <a href="{{ url_for('work_items_help') }}" class="link-secondary text-decoration-none" title="Work Items Help" aria-label="Work Items Help" style="opacity:.75; font-size:1.1rem; line-height:1;"><i class="bi bi-question-circle"></i></a>
   </div>
 </div>
 
@@ -162,6 +176,8 @@
   </div>
 </div>
 
+{% include "_work_items_walkthrough_modal.html" %}
+
 <!-- Work Item Detail Modal -->
 <div class="modal fade" id="workItemDetailModal" tabindex="-1" aria-labelledby="workItemDetailTitle" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -249,22 +265,7 @@ document.querySelectorAll('.work-item-detail-btn').forEach(function (btn) {
   });
 });
 
-function initWorkItemsTimezone() {
-  if (!window.sobsTimezone || typeof window.sobsTimezone.initPage !== 'function') return false;
-  window.sobsTimezone.initPage({
-    formSelector: '#workItemsFiltersPanel form[method="get"]',
-    fromInputId: 'work-items-from-ts',
-    toInputId: 'work-items-to-ts',
-    badgeButtonId: 'work-items-tz-badge-btn',
-    badgeLabelId: 'work-items-tz-badge-label',
-    timestampSelector: '.sobs-tz-ts[data-utc-ts]'
-  });
-  return true;
-}
-
-if (!initWorkItemsTimezone()) {
-  window.addEventListener('load', initWorkItemsTimezone, { once: true });
-}
+{{ render_tz_init_script('initWorkItemsTimezone', 'workItemsFiltersPanel', 'work-items-tz-badge-btn', 'work-items-tz-badge-label', 'work-items-from-ts', 'work-items-to-ts') }}
 
 (function () {
   'use strict';
@@ -318,4 +319,5 @@ if (!initWorkItemsTimezone()) {
   });
 })();
 </script>
+{% include "_work_items_walkthrough_script.html" %}
 {% endblock %}
