@@ -10326,6 +10326,21 @@ def _compute_advanced_log_analysis(rows: list[dict], level_stats: dict, service_
 # ---------------------------------------------------------------------------
 # Web UI – Logs
 # ---------------------------------------------------------------------------
+def _validate_re2_pattern(db: "ChDbConnection", pattern: str) -> str | None:
+    value = str(pattern or "").strip()
+    if not value:
+        return None
+    try:
+        # chDB uses RE2 for match(), which is stricter than Python's re.
+        db.execute("SELECT match('', ?)", [value]).fetchone()
+    except Exception as exc:
+        msg = str(exc).strip()
+        if ": while executing function" in msg:
+            msg = msg.split(": while executing function", 1)[0].strip()
+        return f"Regex error: {msg}"
+    return None
+
+
 @app.route("/logs")
 @require_basic_auth
 async def view_logs():
@@ -10371,6 +10386,10 @@ async def view_logs():
             re.compile(q, re.IGNORECASE)
         except re.error as exc:
             error_msg = f"Regex error: {exc}"
+        if not error_msg:
+            re2_error = _validate_re2_pattern(db, q)
+            if re2_error:
+                error_msg = re2_error
 
     if error_msg:
         pass
@@ -12305,10 +12324,15 @@ async def view_metrics():
     if q and not error_msg:
         try:
             re.compile(q, re.IGNORECASE)
-            where_parts.append("match(SignalName, ?)")
-            params.append(q)
         except re.error as exc:
             error_msg = f"Regex error: {exc}"
+        if not error_msg:
+            re2_error = _validate_re2_pattern(db, q)
+            if re2_error:
+                error_msg = re2_error
+            else:
+                where_parts.append("match(SignalName, ?)")
+                params.append(q)
 
     if hour_clause:
         params.append(hours)
@@ -13056,6 +13080,10 @@ async def view_errors():
             re.compile(q, re.IGNORECASE)
         except re.error as exc:
             error_msg = f"Regex error: {exc}"
+        if not error_msg:
+            re2_error = _validate_re2_pattern(db, q)
+            if re2_error:
+                error_msg = re2_error
     resolved_ids = _get_resolved_error_ids(db)
     where_parts = []
     where_params = []
@@ -13326,6 +13354,43 @@ def _build_span_tree(spans: list[dict]) -> list[dict]:
     return result
 
 
+def _slice_span_tree_with_ancestors(
+    full_span_tree: list[dict],
+    offset: int,
+    limit: int,
+) -> tuple[list[dict], int, int]:
+    """Return a paged span-tree slice plus required ancestors for context.
+
+    The returned tuple is ``(rows, page_end, context_rows)`` where:
+    - ``rows`` are in the original DFS order.
+    - ``page_end`` reflects the end index of the raw page window (without
+      ancestor expansion).
+    - ``context_rows`` is how many extra ancestor rows were prepended.
+    """
+    if not full_span_tree:
+        return [], 0, 0
+
+    total = len(full_span_tree)
+    page_start = max(0, min(offset, total))
+    page_end = min(page_start + max(1, limit), total)
+    page_rows = full_span_tree[page_start:page_end]
+    if not page_rows:
+        return [], page_end, 0
+
+    by_id = {str(row.get("span_id") or ""): row for row in full_span_tree}
+    included_ids = {str(row.get("span_id") or "") for row in page_rows}
+
+    for row in page_rows:
+        parent_id = str(row.get("parent_span_id") or "")
+        while parent_id and parent_id in by_id and parent_id not in included_ids:
+            included_ids.add(parent_id)
+            parent_id = str(by_id[parent_id].get("parent_span_id") or "")
+
+    rows = [row for row in full_span_tree if str(row.get("span_id") or "") in included_ids]
+    context_rows = max(0, len(rows) - len(page_rows))
+    return rows, page_end, context_rows
+
+
 def _compute_active_timeline_ms(spans: list[dict]) -> float:
     """Return merged active time across span intervals in milliseconds."""
     merged = _merge_span_intervals(spans)
@@ -13420,6 +13485,12 @@ def _build_trace_timeline_segments(
             )
 
     return segments
+
+
+_TRACE_DETAIL_HARD_CAP = 5000
+_TRACE_DETAIL_DEFAULT_LIMIT = 200
+_TRACE_DETAIL_MAX_LIMIT = 1000
+_TRACE_DETAIL_COLLAPSE_THRESHOLD = 300
 
 
 def _build_trace_window_overlay_segments(
@@ -13954,6 +14025,13 @@ async def view_traces():
     from_ts, to_ts, time_error = _parse_time_window_args()
     limit = _parse_limit(100)
     offset = _parse_offset()
+    trace_span_limit = _coerce_positive_int(
+        request.args.get("trace_span_limit"),
+        _TRACE_DETAIL_DEFAULT_LIMIT,
+        1,
+        _TRACE_DETAIL_MAX_LIMIT,
+    )
+    trace_span_offset = _coerce_positive_int(request.args.get("trace_span_offset"), 0, 0, _TRACE_DETAIL_HARD_CAP)
     sort_by, sort_col, sort_dir = _parse_sort(
         {
             "Timestamp": "Timestamp",
@@ -13974,6 +14052,10 @@ async def view_traces():
             re.compile(q, re.IGNORECASE)
         except re.error as exc:
             q_error = f"Regex error: {exc}"
+        if not q_error:
+            re2_error = _validate_re2_pattern(db, q)
+            if re2_error:
+                q_error = re2_error
     if selected_services:
         placeholders = ",".join(["?"] * len(selected_services))
         conditions.append(f"ServiceName IN ({placeholders})")
@@ -13988,15 +14070,22 @@ async def view_traces():
         conditions.append("match(SpanName, ?)")
         params.append(q)
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    if not where:
-        total = _active_part_rows(db, "otel_traces")
+    if trace_id and not time_error:
+        total = 0
+        rows = []
     else:
-        total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
-    rows = db.execute(
-        f"SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode, SpanAttributes "
-        f"FROM otel_traces {where} {order_clause} LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+        if not where:
+            total = _active_part_rows(db, "otel_traces")
+        else:
+            total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
+        rows = db.execute(
+            (
+                "SELECT Timestamp, TraceId, SpanId, ParentSpanId, "
+                "SpanName, ServiceName, Duration, StatusCode, SpanAttributes "
+                f"FROM otel_traces {where} {order_clause} LIMIT ? OFFSET ?"
+            ),
+            params + [limit, offset],
+        ).fetchall()
 
     spans = []
     for r in rows:
@@ -14027,11 +14116,15 @@ async def view_traces():
     # When a specific trace is selected build an enriched detail view.
     trace_detail: dict | None = None
     if trace_id and not time_error:
+        trace_total_spans = int(
+            db.execute("SELECT COUNT(*) FROM otel_traces WHERE TraceId=?", [trace_id]).fetchone()[0] or 0
+        )
+        detail_fetch_limit = min(trace_total_spans, _TRACE_DETAIL_HARD_CAP)
         detail_rows = db.execute(
             "SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, "
             "Duration, StatusCode, SpanAttributes "
-            "FROM otel_traces WHERE TraceId=? ORDER BY Timestamp ASC",
-            [trace_id],
+            "FROM otel_traces WHERE TraceId=? ORDER BY Timestamp ASC, SpanId ASC LIMIT ?",
+            [trace_id, detail_fetch_limit],
         ).fetchall()
         if detail_rows:
             all_trace_spans = []
@@ -14202,8 +14295,24 @@ async def view_traces():
 
             trace_window_segments = _build_trace_window_overlay_segments(all_trace_spans, trace_windows)
 
+            full_span_tree = _build_span_tree(all_trace_spans)
+            capped_total_spans = len(full_span_tree)
+            if trace_span_offset >= capped_total_spans and capped_total_spans > 0:
+                trace_span_offset = max(0, ((capped_total_spans - 1) // trace_span_limit) * trace_span_limit)
+            trace_page_spans, trace_page_end, trace_context_rows = _slice_span_tree_with_ancestors(
+                full_span_tree,
+                trace_span_offset,
+                trace_span_limit,
+            )
+            detail_prev_offset = max(0, trace_span_offset - trace_span_limit)
+            detail_next_offset = trace_span_offset + trace_span_limit
+            detail_hard_capped = trace_total_spans > _TRACE_DETAIL_HARD_CAP
+            default_collapsed = capped_total_spans > _TRACE_DETAIL_COLLAPSE_THRESHOLD
+
+            total = trace_total_spans
+
             trace_detail = {
-                "span_tree": _build_span_tree(all_trace_spans),
+                "span_tree": trace_page_spans,
                 "trace_start_ts": str(all_trace_spans[0]["ts"]),
                 "trace_end_ts": str(all_trace_spans[-1]["ts"]),
                 "trace_start_ms": round(trace_start_ms),
@@ -14222,6 +14331,19 @@ async def view_traces():
                 "raw_windows": trace_windows,
                 "raw_window_segments": trace_window_segments,
                 "metrics_context": trace_metrics_context,
+                "total_spans": trace_total_spans,
+                "capped_total_spans": capped_total_spans,
+                "hard_cap": _TRACE_DETAIL_HARD_CAP,
+                "hard_capped": detail_hard_capped,
+                "default_collapsed": default_collapsed,
+                "page_limit": trace_span_limit,
+                "page_offset": trace_span_offset,
+                "page_end": trace_page_end,
+                "context_rows": trace_context_rows,
+                "prev_offset": detail_prev_offset,
+                "next_offset": detail_next_offset,
+                "has_prev_page": trace_span_offset > 0,
+                "has_next_page": detail_next_offset < capped_total_spans,
             }
 
     # Build work-item pre-check map for trace-detail errors so "Raise issue" shows as
@@ -15659,6 +15781,10 @@ async def view_rum():
             re.compile(q, re.IGNORECASE)
         except re.error as exc:
             q_error = f"Regex error: {exc}"
+        if not q_error:
+            re2_error = _validate_re2_pattern(db, q)
+            if re2_error:
+                q_error = re2_error
 
     conditions = []
     params = []
