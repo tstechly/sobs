@@ -22,8 +22,7 @@
     .agents-runs-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
 
     .agents-btn-label { display: none; }
-    .btn > .agents-btn-label ~ i,
-    .btn > i:has(~ .agents-btn-label) { margin-right: 0 !important; }
+    .btn:has(> .agents-btn-label) i { margin-right: 0 !important; }
   }
 </style>{% endblock %}
 {% block content %}
