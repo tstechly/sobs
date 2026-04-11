@@ -327,6 +327,15 @@
 <script src="{{ url_for('static', filename='echarts.min.js') }}"></script>
 <script>
 (function () {
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   var form = document.getElementById('queryForm');
   var questionInput = document.getElementById('questionInput');
   var executeCheck = document.getElementById('executeCheck');
@@ -1191,13 +1200,13 @@
     var endIdx = Math.min(startIdx + pageSize, total);
     var pageRows = rows.slice(startIdx, endIdx);
 
-    var theadCells = columns.map(function (c) { return '<th>' + String(c) + '</th>'; }).join('');
+    var theadCells = columns.map(function (c) { return '<th>' + escHtml(c) + '</th>'; }).join('');
     var tbodyRows = pageRows.map(function (row) {
       var tds = columns.map(function (c, ci) {
         var v = row[ci];
-        var txt = formatCellValue(v, null);
+        var txt = escHtml(formatCellValue(v, null));
         if (txt.length > 140) txt = txt.slice(0, 140) + '...';
-        return '<td data-label="' + String(c || '').replace(/"/g, '&quot;') + '">' + txt + '</td>';
+        return '<td data-label="' + escHtml(c) + '">' + txt + '</td>';
       }).join('');
       return '<tr>' + tds + '</tr>';
     }).join('');
