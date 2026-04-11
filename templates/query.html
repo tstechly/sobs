@@ -776,7 +776,7 @@
       var tr = document.createElement('tr');
       row.forEach(function (cell, idx) {
         var td = document.createElement('td');
-        td.setAttribute('data-label', currentColumns[idx] !== undefined ? String(currentColumns[idx]) : '');
+        td.setAttribute('data-label', escHtml(currentColumns[idx] !== undefined ? String(currentColumns[idx]) : ''));
         var meta = fieldTypeByIndex(idx);
         td.textContent = formatCellValue(cell, meta);
         if (cell === null || cell === undefined) {

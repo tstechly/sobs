@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Kubernetes Health{% endblock %}
 {% block styles %}{{ super() }}<style>
+  /* Page-specific layout helpers */
   .k8s-pager-controls {
     align-items: stretch !important;
     margin-left: auto;
@@ -31,6 +32,7 @@
     min-height: 92px;
   }
 
+  /* Responsive mobile card table + button label rules */
   @media (max-width: 575.98px) {
     .k8s-btn-label { display: none; }
     .btn:has(> .k8s-btn-label) i { margin-right: 0 !important; }
