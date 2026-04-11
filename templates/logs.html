@@ -2,14 +2,7 @@
 {% from '_multi_select_filter.html' import render_multi_select %}
 {% from '_filter_macros.html' import render_filter_accordion, render_regex_filter %}
 {% block title %}Logs{% endblock %}
-{% block content %}
-{% set live = request.args.get('live', '') %}
-{% set analyze = '1' if run_advanced_analysis else '' %}
-{% set stats_open = request.args.get('stats', '') == '1' %}
-{% set stats_updated = request.args.get('stats_updated', '') == '1' %}
-{% set from_ts = from_ts or request.args.get('from_ts', '') %}
-{% set to_ts = to_ts or request.args.get('to_ts', '') %}
-<style>
+{% block styles %}{{ super() }}<style>
   @keyframes liveRowFlash {
     0% { background-color: rgba(13, 202, 240, 0.38); }
     100% { background-color: transparent; }
@@ -31,7 +24,26 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-</style>
+  @media (max-width: 575.98px) {
+    .logs-mobile-card-table thead { display: none; }
+    .logs-mobile-card-table,
+    .logs-mobile-card-table tbody,
+    .logs-mobile-card-table tr,
+    .logs-mobile-card-table td { display: block; width: 100%; }
+    .logs-mobile-card-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .logs-mobile-card-table td { border: 0; padding: 0.2rem 0; }
+    .logs-mobile-card-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+    .logs-btn-label { display: none; }
+    .btn:has(> .logs-btn-label) i { margin-right: 0 !important; }
+  }
+</style>{% endblock %}
+{% block content %}
+{% set live = request.args.get('live', '') %}
+{% set analyze = '1' if run_advanced_analysis else '' %}
+{% set stats_open = request.args.get('stats', '') == '1' %}
+{% set stats_updated = request.args.get('stats_updated', '') == '1' %}
+{% set from_ts = from_ts or request.args.get('from_ts', '') %}
+{% set to_ts = to_ts or request.args.get('to_ts', '') %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-journal-text me-2 text-info"></i>Logs</h4>
   <div class="d-flex align-items-center gap-2">
@@ -47,8 +59,9 @@
       data-ai-risk="low"
       data-ai-confirm="false"
       data-ai-action-role="toggle-live-mode"
+      title="Live mode"
     >
-      <i class="bi bi-broadcast-pin me-1"></i>Live mode
+      <i class="bi bi-broadcast-pin me-1"></i><span class="logs-btn-label">Live mode</span>
     </button>
     <button id="liveNewCountBtn" type="button" class="btn btn-sm btn-outline-info d-none">
       0 new
@@ -327,7 +340,7 @@
 {% endif %}
 
 <div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
-  <table class="table table-sm table-hover align-middle">
+  <table class="table table-sm table-hover align-middle logs-mobile-card-table">
     <thead>
       {% set ts_next_dir = 'asc' if (sort_by == 'Timestamp' and sort_dir == 'desc') else 'desc' %}
       {% set level_next_dir = 'asc' if (sort_by == 'SeverityText' and sort_dir == 'desc') else 'desc' %}
@@ -355,10 +368,10 @@
     <tbody id="logsTableBody">
       {% for log in logs %}
       <tr>
-        <td class="text-secondary small font-monospace sobs-tz-ts" data-utc-ts="{{ log.ts }}">{{ log.ts[:23] }}</td>
-        <td><span class="badge badge-level-{{ log.level }}">{{ log.level }}</span></td>
-        <td><span class="badge bg-secondary">{{ log.service or '—' }}</span></td>
-        <td class="log-body">
+        <td class="text-secondary small font-monospace sobs-tz-ts" data-utc-ts="{{ log.ts }}" data-label="Timestamp">{{ log.ts[:23] }}</td>
+        <td data-label="Level"><span class="badge badge-level-{{ log.level }}">{{ log.level }}</span></td>
+        <td data-label="Service"><span class="badge bg-secondary">{{ log.service or '—' }}</span></td>
+        <td class="log-body" data-label="Message">
           <span class="log-body-text">{{ log.body }}</span>
           {% if log.tags %}
           <div class="d-flex flex-wrap gap-1 mt-1">
@@ -374,7 +387,7 @@
           </div>
           {% endif %}
         </td>
-        <td>
+        <td data-label="Trace">
           {% if log.trace_id %}
           <a href="{{ url_for('view_traces', trace_id=log.trace_id, from_ts=from_ts, to_ts=to_ts) }}" class="trace-link text-truncate d-inline-block" style="max-width:110px;" title="{{ log.trace_id }}">
             {{ log.trace_id[:12] }}…
@@ -576,11 +589,11 @@
     if (on) {
       toggleBtn.classList.remove("btn-outline-success");
       toggleBtn.classList.add("btn-success");
-      toggleBtn.innerHTML = '<i class="bi bi-pause-circle me-1"></i>Stop live';
+      toggleBtn.innerHTML = '<i class="bi bi-pause-circle me-1"></i><span class="logs-btn-label">Stop live</span>';
     } else {
       toggleBtn.classList.remove("btn-success");
       toggleBtn.classList.add("btn-outline-success");
-      toggleBtn.innerHTML = '<i class="bi bi-broadcast-pin me-1"></i>Live mode';
+      toggleBtn.innerHTML = '<i class="bi bi-broadcast-pin me-1"></i><span class="logs-btn-label">Live mode</span>';
     }
   }
 
@@ -646,6 +659,7 @@
 
   function createTraceCell(traceId) {
     const td = document.createElement("td");
+    td.setAttribute('data-label', 'Trace');
     if (!traceId) {
       const placeholder = document.createElement("span");
       placeholder.className = "text-secondary";
@@ -673,15 +687,18 @@
     const ts = document.createElement("td");
     ts.className = "text-secondary small font-monospace sobs-tz-ts";
     ts.setAttribute('data-utc-ts', String(event.ts || ''));
+    ts.setAttribute('data-label', 'Timestamp');
     ts.textContent = formatTs(event.ts);
 
     const level = document.createElement("td");
+    level.setAttribute('data-label', 'Level');
     const levelBadge = document.createElement("span");
     levelBadge.className = `badge badge-level-${String(event.level || "INFO").toUpperCase()}`;
     levelBadge.textContent = String(event.level || "INFO").toUpperCase();
     level.appendChild(levelBadge);
 
     const service = document.createElement("td");
+    service.setAttribute('data-label', 'Service');
     const serviceBadge = document.createElement("span");
     serviceBadge.className = "badge bg-secondary";
     serviceBadge.textContent = event.service || "—";
@@ -689,6 +706,7 @@
 
     const body = document.createElement("td");
     body.className = "log-body";
+    body.setAttribute('data-label', 'Message');
     const bodyText = document.createElement("span");
     bodyText.className = "log-body-text";
     bodyText.textContent = event.body || "";
