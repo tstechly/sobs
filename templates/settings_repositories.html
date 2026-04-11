@@ -1,5 +1,42 @@
 {% extends "base.html" %}
 {% block title %}GitHub Repositories{% endblock %}
+{% block styles %}{{ super() }}<style>
+  #repo-settings-root input::-webkit-credentials-auto-fill-button,
+  #repo-settings-root input::-webkit-contacts-auto-fill-button {
+    visibility: hidden;
+    display: none !important;
+    pointer-events: none;
+  }
+
+  #repo-settings-root[data-color-mode='dark'] input:-webkit-autofill,
+  #repo-settings-root[data-color-mode='dark'] textarea:-webkit-autofill,
+  #repo-settings-root[data-color-mode='dark'] select:-webkit-autofill {
+    -webkit-text-fill-color: var(--bs-body-color);
+    -webkit-box-shadow: 0 0 0 1000px var(--bs-body-bg) inset;
+    caret-color: var(--bs-body-color);
+  }
+
+  #repo-settings-root[data-color-mode='light'] input:-webkit-autofill,
+  #repo-settings-root[data-color-mode='light'] textarea:-webkit-autofill,
+  #repo-settings-root[data-color-mode='light'] select:-webkit-autofill {
+    -webkit-text-fill-color: var(--bs-body-color);
+    -webkit-box-shadow: 0 0 0 1000px var(--bs-body-bg) inset;
+    caret-color: var(--bs-body-color);
+  }
+
+  @media (max-width: 575.98px) {
+    .repositories-table thead { display: none; }
+    .repositories-table,
+    .repositories-table tbody,
+    .repositories-table tr,
+    .repositories-table td { display: block; width: 100%; }
+    .repositories-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .repositories-table td { border: 0; padding: 0.2rem 0; }
+    .repositories-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+
+    .repositories-btn-label { display: none; }
+  }
+</style>{% endblock %}
 {% block content %}
 <div id="repo-settings-root" data-color-mode="{{ 'dark' if request.cookies.get('theme') == 'dark' else 'light' }}">
 <div class="d-flex align-items-center justify-content-between mb-3">
@@ -142,7 +179,7 @@
   <div class="card-body p-0">
     {% if apps %}
     <div class="table-responsive">
-      <table class="table table-sm table-hover mb-0 align-middle">
+      <table class="table table-sm table-hover mb-0 align-middle repositories-table">
         <thead>
           <tr>
             <th>App</th>
@@ -155,25 +192,25 @@
         <tbody>
           {% for app in apps %}
           <tr>
-            <td>
+            <td data-label="App">
               <div class="small fw-semibold">{{ app.name }}</div>
               <div class="text-secondary" style="font-size:.75rem;">{{ app.slug }}</div>
             </td>
-            <td>
-              <a href="{{ app.repo_url }}" target="_blank" rel="noopener" class="small font-monospace text-decoration-none">{{ app.repo_url }}</a>
+            <td data-label="Repo">
+              <a href="{{ app.repo_url }}" target="_blank" rel="noopener" class="small font-monospace text-decoration-none" style="word-break:break-all;">{{ app.repo_url }}</a>
             </td>
-            <td>
+            <td data-label="Releases">
               <div class="small">{{ app.release_count }} total</div>
               <div class="text-secondary" style="font-size:.75rem;">{{ app.latest_versions | join(', ') if app.latest_versions else 'none' }}</div>
             </td>
-            <td>
+            <td data-label="Status">
               {% if app.enabled %}
               <span class="badge text-bg-success">enabled</span>
               {% else %}
               <span class="badge text-bg-secondary">disabled</span>
               {% endif %}
             </td>
-            <td>
+            <td data-label="Actions">
               <form method="post" action="{{ url_for('update_settings_repository', app_id=app.id) }}" class="d-flex gap-1 align-items-center mb-1">
                 <input type="url" name="repo_url" class="form-control form-control-sm font-monospace" value="{{ app.repo_url }}" autocomplete="url" spellcheck="false" required>
                 <button type="submit" class="btn btn-sm btn-outline-primary">Save</button>
@@ -210,30 +247,6 @@
 {% endblock %}
 
 {% block scripts %}
-<style>
-  #repo-settings-root input::-webkit-credentials-auto-fill-button,
-  #repo-settings-root input::-webkit-contacts-auto-fill-button {
-    visibility: hidden;
-    display: none !important;
-    pointer-events: none;
-  }
-
-  #repo-settings-root[data-color-mode='dark'] input:-webkit-autofill,
-  #repo-settings-root[data-color-mode='dark'] textarea:-webkit-autofill,
-  #repo-settings-root[data-color-mode='dark'] select:-webkit-autofill {
-    -webkit-text-fill-color: var(--bs-body-color);
-    -webkit-box-shadow: 0 0 0 1000px var(--bs-body-bg) inset;
-    caret-color: var(--bs-body-color);
-  }
-
-  #repo-settings-root[data-color-mode='light'] input:-webkit-autofill,
-  #repo-settings-root[data-color-mode='light'] textarea:-webkit-autofill,
-  #repo-settings-root[data-color-mode='light'] select:-webkit-autofill {
-    -webkit-text-fill-color: var(--bs-body-color);
-    -webkit-box-shadow: 0 0 0 1000px var(--bs-body-bg) inset;
-    caret-color: var(--bs-body-color);
-  }
-</style>
 <script>
   (function () {
     var root = document.getElementById('repo-settings-root');

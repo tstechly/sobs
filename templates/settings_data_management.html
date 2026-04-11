@@ -1,14 +1,37 @@
 {% extends "base.html" %}
 {% block title %}Data Management Settings{% endblock %}
+{% block styles %}{{ super() }}<style>
+  @media (max-width: 575.98px) {
+    .dm-stats-table thead { display: none; }
+    .dm-stats-table,
+    .dm-stats-table tbody,
+    .dm-stats-table tr,
+    .dm-stats-table td { display: block; width: 100%; }
+    .dm-stats-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .dm-stats-table td { border: 0; padding: 0.2rem 0; }
+    .dm-stats-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+
+    .dm-backups-table thead { display: none; }
+    .dm-backups-table,
+    .dm-backups-table tbody,
+    .dm-backups-table tr,
+    .dm-backups-table td { display: block; width: 100%; }
+    .dm-backups-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .dm-backups-table td { border: 0; padding: 0.2rem 0; }
+    .dm-backups-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+
+    .dm-btn-label { display: none; }
+  }
+</style>{% endblock %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-database-down me-2 text-danger"></i>Data Management</h4>
   <div class="d-flex gap-2">
-    <a class="btn btn-sm btn-outline-info" href="{{ url_for('data_management_help') }}">
-      <i class="bi bi-question-circle me-1"></i>Help
+    <a class="btn btn-sm btn-outline-info" href="{{ url_for('data_management_help') }}" title="Help">
+      <i class="bi bi-question-circle me-1"></i><span class="dm-btn-label">Help</span>
     </a>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_settings') }}">
-      <i class="bi bi-arrow-left me-1"></i>Back to Settings
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_settings') }}" title="Back to Settings">
+      <i class="bi bi-arrow-left me-1"></i><span class="dm-btn-label">Back to Settings</span>
     </a>
   </div>
 </div>
@@ -81,15 +104,15 @@
           {% if db_stats.tables %}
           <div class="px-3 pb-2 pt-1">
             <div class="text-secondary small mb-1">Top tables by size</div>
-            <table class="table table-sm table-hover mb-0">
+            <table class="table table-sm table-hover mb-0 dm-stats-table">
               <thead><tr><th>Table</th><th>Size</th><th>Ratio</th><th>Rows</th></tr></thead>
               <tbody>
                 {% for t in db_stats.tables %}
                 <tr>
-                  <td class="small font-monospace text-truncate" style="max-width:140px;" title="{{ t.table }}">{{ t.table }}</td>
-                  <td class="small">{{ fmt_bytes(t.compressed_bytes) }}</td>
-                  <td class="small">{% if t.compression_ratio is not none %}{{ t.compression_ratio }}×{% else %}—{% endif %}</td>
-                  <td class="small">{{ "{:,}".format(t.rows) }}</td>
+                  <td class="small font-monospace text-truncate" style="max-width:140px;" title="{{ t.table }}" data-label="Table">{{ t.table }}</td>
+                  <td class="small" data-label="Size">{{ fmt_bytes(t.compressed_bytes) }}</td>
+                  <td class="small" data-label="Ratio">{% if t.compression_ratio is not none %}{{ t.compression_ratio }}×{% else %}—{% endif %}</td>
+                  <td class="small" data-label="Rows">{{ "{:,}".format(t.rows) }}</td>
                 </tr>
                 {% endfor %}
               </tbody>
@@ -543,17 +566,17 @@
         container.innerHTML = '<p class="text-secondary small py-3 px-3 mb-0">No backups found.</p>';
         return;
       }
-      let html = '<div class="table-responsive"><table class="table table-sm table-hover mb-0 align-middle small">'
+      let html = '<div class="table-responsive"><table class="table table-sm table-hover mb-0 align-middle small dm-backups-table">'
         + '<thead><tr><th>Name</th><th>Status</th><th>Started</th><th>Ended</th><th>Files</th><th>Size</th></tr></thead><tbody>';
       data.backups.forEach(b => {
         const size = b.total_size ? (parseInt(b.total_size, 10) / BYTES_TO_MB).toFixed(1) + ' MB' : '—';
         html += '<tr>'
-          + '<td class="font-monospace">' + escHtml(b.name) + '</td>'
-          + '<td>' + escHtml(b.status) + '</td>'
-          + '<td>' + escHtml(b.start_time) + '</td>'
-          + '<td>' + escHtml(b.end_time) + '</td>'
-          + '<td>' + escHtml(b.num_files) + '</td>'
-          + '<td>' + size + '</td>'
+          + '<td class="font-monospace" data-label="Name">' + escHtml(b.name) + '</td>'
+          + '<td data-label="Status">' + escHtml(b.status) + '</td>'
+          + '<td data-label="Started">' + escHtml(b.start_time) + '</td>'
+          + '<td data-label="Ended">' + escHtml(b.end_time) + '</td>'
+          + '<td data-label="Files">' + escHtml(b.num_files) + '</td>'
+          + '<td data-label="Size">' + size + '</td>'
           + '</tr>';
       });
       html += '</tbody></table></div>';

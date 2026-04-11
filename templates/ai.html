@@ -10,8 +10,7 @@
   <div class="prompt-box ai-md-content" style="max-height:150px;">{{ instructions|mask }}</div>
 </div>
 {% endif %}{% endmacro %}
-{% block content %}
-<style>
+{% block styles %}{{ super() }}<style>
   .ai-row-grid {
     display: grid;
     grid-template-columns: minmax(118px, 1.05fr) minmax(108px, .9fr) minmax(132px, 1.05fr) minmax(0, 2.7fr) minmax(105px, .8fr) minmax(84px, .65fr) minmax(148px, .95fr);
@@ -134,7 +133,8 @@
       text-align: left;
     }
   }
-</style>
+</style>{% endblock %}
+{% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-cpu me-2 text-success"></i>AI Transparency</h4>
   <div class="d-flex align-items-center gap-2">
