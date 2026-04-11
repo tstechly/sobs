@@ -241,7 +241,7 @@
               {% endif %}
             </td>
             <td class="small font-monospace" data-label="Sample">{{ r.sample_count }}</td>
-            <td data-label="">
+            <td data-label="Actions">
               {% if r.related_target == 'logs' %}
               <a class="btn btn-sm btn-outline-info"
                  href="{{ url_for('view_logs', service=r.service, from_ts=r.time, window_s=60, stats='1') }}">
