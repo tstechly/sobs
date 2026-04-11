@@ -11,6 +11,7 @@
   <div class="d-flex align-items-center gap-3">
     <span class="text-secondary small">{{ total }} spans</span>
     {% if trace_detail %}<a href="{{ url_for('view_traces') }}" class="btn btn-sm btn-outline-secondary">← All Traces</a>{% endif %}
+    <a href="{{ url_for('traces_help') }}" class="link-secondary text-decoration-none" title="Traces Help" aria-label="Traces Help" style="opacity:.75; font-size:1.1rem; line-height:1;"><i class="bi bi-question-circle"></i></a>
   </div>
 </div>
 
@@ -869,7 +870,7 @@ if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
             '</div>' +
             '<pre class="mb-0 p-2 rounded small font-monospace" ' +
             '  style="white-space:pre-wrap; word-break:break-all; max-height:400px; overflow-y:auto; ' +
-            '         background:var(--bs-code-bg,#1e1e1e); color:var(--bs-body-color);">' +
+            '         background:var(--bs-tertiary-bg); color:var(--bs-body-color); border:1px solid var(--bs-border-color);">' +
             _escHtml(data.raw) +
             '</pre>';
 
