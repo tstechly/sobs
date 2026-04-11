@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ dashboard.name }}{% endblock %}
-{% block content %}
-<style>
+{% block styles %}{{ super() }}<style>
   #addChartModal .modal-dialog {
     margin: 0.5rem auto;
     height: calc(100vh - 1rem);
@@ -54,7 +53,13 @@
       padding-left: var(--sb-compact);
     }
   }
-</style>
+
+  @media (max-width: 575.98px) {
+    .custom-dashboard-btn-label { display: none; }
+    .btn:has(> .custom-dashboard-btn-label) i { margin-right: 0 !important; }
+  }
+</style>{% endblock %}
+{% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <div>
     <nav aria-label="breadcrumb">
@@ -84,6 +89,7 @@
       </div>
     </div>
     <button class="btn btn-primary btn-sm js-add-chart-btn" data-bs-toggle="modal" data-bs-target="#addChartModal"
+            title="Add Chart"
             data-ai-action-id="dashboard.chart.modal.open"
             data-ai-action-type="open_modal"
             data-ai-handler="openModal"
@@ -91,10 +97,10 @@
             data-ai-label="Open add chart modal"
             data-ai-risk="low"
             data-ai-confirm="false">
-      <i class="bi bi-plus-lg me-1"></i>Add Chart
+      <i class="bi bi-plus-lg me-1"></i><span class="custom-dashboard-btn-label">Add Chart</span>
     </button>
-    <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#importChartModal" title="Import chart from JSON template">
-      <i class="bi bi-upload me-1"></i>Import Chart
+    <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#importChartModal" title="Import Chart from JSON template">
+      <i class="bi bi-upload me-1"></i><span class="custom-dashboard-btn-label">Import Chart</span>
     </button>
         <form method="post" action="{{ url_for('delete_dashboard', dashboard_id=dashboard.id) }}"
           data-confirm-title="Delete Dashboard"
@@ -102,6 +108,7 @@
           data-confirm-ok-label="Delete"
           data-confirm-ok-class="btn-danger">
       <button type="submit" class="btn btn-outline-danger btn-sm"
+              title="Delete Dashboard"
               data-ai-action-id="dashboard.delete"
               data-ai-action-type="submit_form"
               data-ai-handler="submitForm"
@@ -109,7 +116,7 @@
               data-ai-risk="high"
               data-ai-confirm="true"
               data-ai-action-role="delete-dashboard-submit">
-        <i class="bi bi-trash me-1"></i>Delete
+        <i class="bi bi-trash me-1"></i><span class="custom-dashboard-btn-label">Delete</span>
       </button>
     </form>
   </div>
@@ -1499,9 +1506,9 @@
     }).join('') + '</tr></thead>';
     var sampleRows = (rows || []).slice(0, 8);
     var body = '<tbody>' + sampleRows.map(function (r) {
-      return '<tr>' + columns.map(function (_c, idx) {
+      return '<tr>' + columns.map(function (c, idx) {
         var v = r && r[idx] !== undefined && r[idx] !== null ? String(r[idx]) : '—';
-        return '<td class="small font-monospace">' + v + '</td>';
+        return '<td class="small font-monospace" data-label="' + c.replace(/"/g, '&quot;') + '">' + v + '</td>';
       }).join('') + '</tr>';
     }).join('') + '</tbody>';
     dryRunTable.innerHTML = head + body;
