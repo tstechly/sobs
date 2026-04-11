@@ -1,13 +1,26 @@
 {% extends "base.html" %}
 {% block title %}RUM Help{% endblock %}
+{% block styles %}{{ super() }}<style>
+@media (max-width: 575.98px) {
+  .help-ref-table thead { display: none; }
+  .help-ref-table,
+  .help-ref-table tbody,
+  .help-ref-table tr,
+  .help-ref-table td { display: block; width: 100%; }
+  .help-ref-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+  .help-ref-table td { border: 0; padding: 0.2rem 0; }
+  .help-ref-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+  .help-btn-label { display: none; }
+}
+</style>{% endblock %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <div>
     <h4 class="fw-semibold mb-1">RUM Help</h4>
     <p class="text-secondary mb-0">Real User Monitoring session replay, performance data, and browser event browsing.</p>
   </div>
-  <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('view_rum') }}">
-    <i class="bi bi-arrow-left me-1"></i>Back to RUM
+  <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('view_rum') }}" title="Back to RUM">
+    <i class="bi bi-arrow-left me-1"></i><span class="help-btn-label">Back to RUM</span>
   </a>
 </div>
 
@@ -41,7 +54,7 @@
 <div class="card border-secondary mb-3">
   <div class="card-header fw-semibold"><i class="bi bi-funnel me-2 text-primary"></i>Filter Controls</div>
   <div class="card-body p-0">
-    <table class="table table-dark table-sm align-middle mb-0">
+    <table class="table table-dark table-sm align-middle mb-0 help-ref-table">
       <thead>
         <tr>
           <th style="width:20%">Control</th>
@@ -50,16 +63,16 @@
       </thead>
       <tbody>
         <tr>
-          <td class="font-monospace">Service</td>
-          <td>Filter to a specific application or service that emits RUM events.</td>
+          <td class="font-monospace" data-label="Control">Service</td>
+          <td data-label="Description">Filter to a specific application or service that emits RUM events.</td>
         </tr>
         <tr>
-          <td class="font-monospace">Session ID</td>
-          <td>Paste a session ID to load the full event timeline for a single user session.</td>
+          <td class="font-monospace" data-label="Control">Session ID</td>
+          <td data-label="Description">Paste a session ID to load the full event timeline for a single user session.</td>
         </tr>
         <tr>
-          <td class="font-monospace">From / To</td>
-          <td>Date-time range for the session start timestamp.</td>
+          <td class="font-monospace" data-label="Control">From / To</td>
+          <td data-label="Description">Date-time range for the session start timestamp.</td>
         </tr>
       </tbody>
     </table>
@@ -85,7 +98,7 @@
 <div class="card border-secondary mb-0">
   <div class="card-header fw-semibold"><i class="bi bi-database me-2"></i>Ingest &amp; API</div>
   <div class="card-body p-0">
-    <table class="table table-dark table-sm align-middle mb-0">
+    <table class="table table-dark table-sm align-middle mb-0 help-ref-table">
       <thead>
         <tr>
           <th style="width:35%">Endpoint</th>
@@ -94,12 +107,12 @@
       </thead>
       <tbody>
         <tr>
-          <td class="font-monospace small">POST /v1/rum</td>
-          <td>RUM event batch submission. The SOBS RUM SDK posts rrweb snapshots and performance events here.</td>
+          <td class="font-monospace small" data-label="Endpoint">POST /v1/rum</td>
+          <td data-label="Description">RUM event batch submission. The SOBS RUM SDK posts rrweb snapshots and performance events here.</td>
         </tr>
         <tr>
-          <td class="font-monospace small">GET /rum</td>
-          <td>UI page. Accepts <code>service</code>, <code>session_id</code>, <code>from_ts</code>, <code>to_ts</code> query parameters.</td>
+          <td class="font-monospace small" data-label="Endpoint">GET /rum</td>
+          <td data-label="Description">UI page. Accepts <code>service</code>, <code>session_id</code>, <code>from_ts</code>, <code>to_ts</code> query parameters.</td>
         </tr>
       </tbody>
     </table>
