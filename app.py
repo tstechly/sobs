@@ -10341,6 +10341,89 @@ def _validate_re2_pattern(db: "ChDbConnection", pattern: str) -> str | None:
     return None
 
 
+def _split_regex_filter_expression_terms(expression: str) -> list[str]:
+    """Split expression by unescaped && while preserving escaped literal \\&& tokens."""
+    parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(expression)
+    while i < n:
+        if i + 1 < n and expression[i] == "&" and expression[i + 1] == "&":
+            backslashes = 0
+            j = i - 1
+            while j >= 0 and expression[j] == "\\":
+                backslashes += 1
+                j -= 1
+            if backslashes % 2 == 0:
+                parts.append("".join(buf).strip())
+                buf = []
+                i += 2
+                continue
+        buf.append(expression[i])
+        i += 1
+    parts.append("".join(buf).strip())
+    return parts
+
+
+def _unescape_regex_filter_term(term: str) -> str:
+    """Interpret \\&& as literal && within a regex term."""
+    return term.replace(r"\&&", "&&")
+
+
+def _parse_regex_filter_expression(raw: str) -> tuple[list[str], list[str], str | None]:
+    """Parse `include && !exclude` style regex expressions from filter inputs."""
+    expression = str(raw or "").strip()
+    if not expression:
+        return [], [], None
+
+    parts = _split_regex_filter_expression_terms(expression)
+    if not parts or any(not part for part in parts):
+        return [], [], "Regex error: invalid expression around '&&'"
+
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
+    for part in parts:
+        negate = part.startswith("!")
+        token = part[1:].strip() if negate else part
+        token = _unescape_regex_filter_term(token)
+        if not token:
+            return [], [], "Regex error: expected a pattern after '!'"
+        try:
+            re.compile(token, re.IGNORECASE)
+        except re.error as exc:
+            return [], [], f"Regex error: {exc}"
+        if negate:
+            exclude_patterns.append(token)
+        else:
+            include_patterns.append(token)
+
+    return include_patterns, exclude_patterns, None
+
+
+def _validate_re2_patterns(db: "ChDbConnection", patterns: list[str]) -> str | None:
+    for pattern in patterns:
+        re2_error = _validate_re2_pattern(db, pattern)
+        if re2_error:
+            return re2_error
+    return None
+
+
+def _append_regex_expression_clauses(
+    *,
+    conditions: list[str],
+    params: list[Any],
+    column: str,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+) -> None:
+    for pattern in include_patterns:
+        conditions.append(f"match({column}, ?)")
+        params.append(pattern)
+    for pattern in exclude_patterns:
+        conditions.append(f"NOT match({column}, ?)")
+        params.append(pattern)
+
+
 @app.route("/logs")
 @require_basic_auth
 async def view_logs():
@@ -10377,17 +10460,18 @@ async def view_logs():
     stats_generated_age_s = 0
     where = ""
     params: list = []
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
 
     if time_error:
         error_msg = time_error
 
     if q:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            error_msg = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
+        if parse_error:
+            error_msg = parse_error
         if not error_msg:
-            re2_error = _validate_re2_pattern(db, q)
+            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
             if re2_error:
                 error_msg = re2_error
 
@@ -10462,8 +10546,17 @@ async def view_logs():
             query_where = where
             query_params = list(params)
             if q:
-                query_where = f"{query_where} AND match(Body, ?)" if query_where else "WHERE match(Body, ?)"
-                query_params.append(q)
+                regex_conditions: list[str] = []
+                _append_regex_expression_clauses(
+                    conditions=regex_conditions,
+                    params=query_params,
+                    column="Body",
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                )
+                if regex_conditions:
+                    regex_sql = " AND ".join(regex_conditions)
+                    query_where = f"{query_where} AND {regex_sql}" if query_where else f"WHERE {regex_sql}"
 
             select_base = (
                 "SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId " f"FROM otel_logs {query_where} "
@@ -12321,18 +12414,24 @@ async def view_metrics():
     rows: list[dict] = []
     total = 0
     error_msg = time_error
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     if q and not error_msg:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            error_msg = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
+        if parse_error:
+            error_msg = parse_error
         if not error_msg:
-            re2_error = _validate_re2_pattern(db, q)
+            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
             if re2_error:
                 error_msg = re2_error
             else:
-                where_parts.append("match(SignalName, ?)")
-                params.append(q)
+                _append_regex_expression_clauses(
+                    conditions=where_parts,
+                    params=params,
+                    column="SignalName",
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                )
 
     if hour_clause:
         params.append(hours)
@@ -13074,14 +13173,15 @@ async def view_errors():
             "Timestamp",
         )
     q = request.args.get("q", "").strip()
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     error_msg = time_error or ""
     if q and not error_msg:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            error_msg = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
+        if parse_error:
+            error_msg = parse_error
         if not error_msg:
-            re2_error = _validate_re2_pattern(db, q)
+            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
             if re2_error:
                 error_msg = re2_error
     resolved_ids = _get_resolved_error_ids(db)
@@ -13095,8 +13195,13 @@ async def view_errors():
     where_parts.extend(time_conditions)
     where_params.extend(time_params)
     if q and not error_msg:
-        where_parts.append("match(Body, ?)")
-        where_params.append(q)
+        _append_regex_expression_clauses(
+            conditions=where_parts,
+            params=where_params,
+            column="Body",
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
     where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     if grouped_mode:
@@ -14047,13 +14152,14 @@ async def view_traces():
     params = []
     q = request.args.get("q", "").strip()
     q_error = ""
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     if q:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            q_error = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
+        if parse_error:
+            q_error = parse_error
         if not q_error:
-            re2_error = _validate_re2_pattern(db, q)
+            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
             if re2_error:
                 q_error = re2_error
     if selected_services:
@@ -14067,8 +14173,13 @@ async def view_traces():
     conditions.extend(time_conditions)
     params.extend(time_params)
     if q and not q_error:
-        conditions.append("match(SpanName, ?)")
-        params.append(q)
+        _append_regex_expression_clauses(
+            conditions=conditions,
+            params=params,
+            column="SpanName",
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     if trace_id and not time_error:
         total = 0
@@ -15776,13 +15887,14 @@ async def view_rum():
 
     q = request.args.get("q", "").strip()
     q_error = ""
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     if q:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            q_error = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
+        if parse_error:
+            q_error = parse_error
         if not q_error:
-            re2_error = _validate_re2_pattern(db, q)
+            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
             if re2_error:
                 q_error = re2_error
 
@@ -15798,8 +15910,13 @@ async def view_rum():
     conditions.extend(time_conditions)
     params.extend(time_params)
     if q and not q_error:
-        conditions.append("match(Body, ?)")
-        params.append(q)
+        _append_regex_expression_clauses(
+            conditions=conditions,
+            params=params,
+            column="Body",
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     total = 0
     events: list[dict[str, Any]] = []
@@ -22109,26 +22226,47 @@ def _regex_scope_time_conditions(scope: dict[str, Any], column: str) -> tuple[li
     return conditions, params
 
 
+def _parse_and_validate_regex_expression_for_api(db: Any, expression: str) -> tuple[list[str], list[str], str | None]:
+    include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(expression)
+    if parse_error:
+        return [], [], parse_error.replace("Regex error: ", "", 1)
+    re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
+    if re2_error:
+        return [], [], re2_error.replace("Regex error: ", "", 1)
+    return include_patterns, exclude_patterns, None
+
+
 def _regex_best_effort_sample(
     db: Any,
     *,
     from_sql: str,
     sample_column: str,
     order_column: str,
-    pattern: str,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
     where_parts: list[str],
     where_params: list[Any],
 ) -> str | None:
     """Return a bounded sample match by probing only recent candidate rows."""
     where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    regex_conditions: list[str] = []
+    regex_params: list[Any] = []
+    _append_regex_expression_clauses(
+        conditions=regex_conditions,
+        params=regex_params,
+        column="sample_value",
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+    )
+    regex_where_sql = ("WHERE " + " AND ".join(regex_conditions)) if regex_conditions else ""
     sql = (
-        f"SELECT {sample_column} FROM ("
-        f"SELECT {sample_column} FROM {from_sql} "
+        "SELECT sample_value FROM ("
+        f"SELECT {sample_column} AS sample_value FROM {from_sql} "
         f"{where_sql} ORDER BY {order_column} DESC LIMIT ?"
         ") "
-        f"WHERE match({sample_column}, ?) LIMIT 1"
+        f"{regex_where_sql} LIMIT 1"
     )
-    params = [*where_params, _REGEX_VALIDATE_CANDIDATE_LIMIT, pattern]
+    params = [*where_params, _REGEX_VALIDATE_CANDIDATE_LIMIT, *regex_params]
     row = db.execute(sql, params).fetchone()
     return _truncate_sample(row[0] if row else None)
 
@@ -22149,14 +22287,13 @@ async def api_logs_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     # Attempt a cheap LIMIT 1 probe to surface a real sample match.
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22183,7 +22320,8 @@ async def api_logs_validate_regex():
             from_sql="otel_logs",
             sample_column="Body",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22208,13 +22346,12 @@ async def api_errors_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22232,7 +22369,8 @@ async def api_errors_validate_regex():
             from_sql=f"({ERROR_SOURCES_SQL})",
             sample_column="Body",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22257,13 +22395,12 @@ async def api_traces_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22285,7 +22422,8 @@ async def api_traces_validate_regex():
             from_sql="otel_traces",
             sample_column="SpanName",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22310,13 +22448,12 @@ async def api_metrics_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22346,7 +22483,8 @@ async def api_metrics_validate_regex():
             from_sql="v_derived_signals_anomaly",
             sample_column="SignalName",
             order_column="time",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22371,13 +22509,12 @@ async def api_rum_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22399,7 +22536,8 @@ async def api_rum_validate_regex():
             from_sql="hyperdx_sessions",
             sample_column="Body",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
