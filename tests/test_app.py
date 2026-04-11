@@ -10077,6 +10077,66 @@ class TestTagRules:
         assert "Tag Rules" in text
         assert "Create Tag Rule" in text
 
+    async def test_tag_rule_condition_suggestions_api(self, client):
+        token = str(time.time_ns())
+        service_name = f"tag-suggest-{token}"
+        attr_key = f"http.route.suggest.{token}"
+        attr_value = f"/checkout/{token}"
+
+        r_seed = await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                        "severityText": "ERROR",
+                                        "body": {"stringValue": "tag suggestions seed"},
+                                        "attributes": [
+                                            {"key": attr_key, "value": {"stringValue": attr_value}},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        assert r_seed.status_code == 200
+
+        service_qs = (
+            "/api/settings/tags/condition-suggestions?target=value"
+            f"&field=service_name&operator=contains&q={service_name}"
+        )
+        r_service = await client.get(service_qs)
+        assert r_service.status_code == 200
+        service_data = await r_service.get_json()
+        assert service_data["ok"] is True
+        assert any(service_name in str(v) for v in (service_data.get("suggestions") or []))
+
+        r_attr_key = await client.get(
+            f"/api/settings/tags/condition-suggestions?target=attr_key&field=attribute&q={attr_key}"
+        )
+        assert r_attr_key.status_code == 200
+        attr_key_data = await r_attr_key.get_json()
+        assert attr_key_data["ok"] is True
+        assert any(attr_key in str(v) for v in (attr_key_data.get("suggestions") or []))
+
+        attr_value_qs = (
+            "/api/settings/tags/condition-suggestions?target=value"
+            f"&field=attribute&attr_key={attr_key}&q={attr_value}"
+        )
+        r_attr_value = await client.get(attr_value_qs)
+        assert r_attr_value.status_code == 200
+        attr_value_data = await r_attr_value.get_json()
+        assert attr_value_data["ok"] is True
+        assert any(attr_value in str(v) for v in (attr_value_data.get("suggestions") or []))
+
     async def test_auto_tag_rules_preview(self, client):
         ts_ns = int(time.time() * 1_000_000_000)
         payload = {
@@ -10701,6 +10761,93 @@ class TestTagRules:
         }
         # Invalid regex must not raise, just return False
         assert _match_tag_rule(rule, "log", "svc", "ERROR", "any body", {}) is False
+
+    def test_match_tag_rule_composite_all_conditions_match(self):
+        from app import _match_tag_rule
+
+        # Legacy match_field says "severity=ERROR" but conditions include an additional
+        # body check – composite mode should evaluate ONLY the conditions list.
+        rule = {
+            "record_types": ["all"],
+            "match_field": "severity",
+            "match_operator": "eq",
+            "match_value": "ERROR",
+            "match_attr_key": "",
+            "tag_key": "k",
+            "tag_value": "v",
+            "conditions": [
+                {"match_field": "severity", "match_operator": "eq", "match_value": "ERROR", "match_attr_key": ""},
+                {"match_field": "body", "match_operator": "contains", "match_value": "timeout", "match_attr_key": ""},
+            ],
+        }
+        # Both conditions match → True
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "connection timeout error", {}) is True
+        # Legacy field would match (severity=ERROR), but body condition fails → False proves
+        # composite conditions take precedence over the legacy single-condition fields.
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "success message", {}) is False
+
+    def test_match_tag_rule_composite_with_attribute_condition(self):
+        from app import _match_tag_rule
+
+        rule = {
+            "record_types": ["all"],
+            "match_field": "severity",
+            "match_operator": "eq",
+            "match_value": "ERROR",
+            "match_attr_key": "",
+            "tag_key": "k",
+            "tag_value": "v",
+            "conditions": [
+                {"match_field": "severity", "match_operator": "eq", "match_value": "ERROR", "match_attr_key": ""},
+                {
+                    "match_field": "attribute",
+                    "match_operator": "eq",
+                    "match_value": "500",
+                    "match_attr_key": "http.status_code",
+                },
+            ],
+        }
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "", {"http.status_code": "500"}) is True
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "", {"http.status_code": "200"}) is False
+
+    def test_match_tag_rule_composite_wrong_record_type(self):
+        from app import _match_tag_rule
+
+        rule = {
+            "record_types": ["trace"],
+            "match_field": "severity",
+            "match_operator": "eq",
+            "match_value": "ERROR",
+            "match_attr_key": "",
+            "tag_key": "k",
+            "tag_value": "v",
+            "conditions": [
+                {"match_field": "severity", "match_operator": "eq", "match_value": "ERROR", "match_attr_key": ""},
+                {"match_field": "body", "match_operator": "contains", "match_value": "timeout", "match_attr_key": ""},
+            ],
+        }
+        # Record type doesn't match → False regardless of conditions
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "connection timeout error", {}) is False
+        assert _match_tag_rule(rule, "trace", "svc", "ERROR", "connection timeout error", {}) is True
+
+    def test_parse_tag_rule_conditions_json_handles_invalid_payloads(self):
+        from app import _parse_tag_rule_conditions_json
+
+        assert _parse_tag_rule_conditions_json("") == []
+        assert _parse_tag_rule_conditions_json("{bad-json") == []
+        assert _parse_tag_rule_conditions_json('{"match_field":"severity"}') == []
+
+        parsed = _parse_tag_rule_conditions_json(
+            '[{"match_field":"severity","match_operator":"eq","match_value":"ERROR"}]'
+        )
+        assert parsed == [
+            {
+                "match_field": "severity",
+                "match_operator": "eq",
+                "match_value": "ERROR",
+                "match_attr_key": "",
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------

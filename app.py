@@ -1201,6 +1201,7 @@ CREATE TABLE IF NOT EXISTS sobs_tag_rules (
     MatchAttrKey String CODEC(ZSTD(1)),
     TagKey String CODEC(ZSTD(1)),
     TagValue String CODEC(ZSTD(1)),
+    ConditionsJson String DEFAULT '' CODEC(ZSTD(1)),
     IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
     Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
 ) ENGINE = ReplacingMergeTree(Version)
@@ -1992,6 +1993,7 @@ def _ensure_post_schema_state(db: ChDbConnection) -> None:
     _ensure_notification_schema(db)
     _ensure_ai_memory_schema(db)
     _ensure_github_work_item_schema(db)
+    _ensure_tag_rule_schema(db)
     _ensure_raw_metrics_retention(db)
     _prime_log_attr_key_cache(db)
     _seed_app_release_registry_from_env(db)
@@ -2143,6 +2145,14 @@ def _ensure_github_work_item_schema(db: ChDbConnection) -> None:
             "CopilotAssignmentStatus LowCardinality(String) DEFAULT 'not_requested'"
         ),
         "ALTER TABLE sobs_github_work_items ADD COLUMN IF NOT EXISTS CopilotAssignmentReason String DEFAULT ''",
+    ]
+    for statement in migration_statements:
+        db.execute(statement)
+
+
+def _ensure_tag_rule_schema(db: ChDbConnection) -> None:
+    migration_statements = [
+        "ALTER TABLE sobs_tag_rules ADD COLUMN IF NOT EXISTS ConditionsJson String DEFAULT ''",
     ]
     for statement in migration_statements:
         db.execute(statement)
@@ -11634,11 +11644,38 @@ def _record_id_for_span(trace_id: str, span_id: str) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def _parse_tag_rule_conditions_json(raw: Any) -> list[dict[str, str]]:
+    """Best-effort decode for ConditionsJson with safe fallback semantics."""
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "match_field": str(item.get("match_field", "") or ""),
+                "match_operator": str(item.get("match_operator", "") or ""),
+                "match_value": str(item.get("match_value", "") or ""),
+                "match_attr_key": str(item.get("match_attr_key", "") or ""),
+            }
+        )
+    return normalized
+
+
 def _load_tag_rules(db: ChDbConnection) -> list[dict]:
     """Load all active tag rules."""
     rows = db.execute(
         "SELECT Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, "
-        "MatchAttrKey, TagKey, TagValue "
+        "MatchAttrKey, TagKey, TagValue, ConditionsJson "
         "FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name"
     ).fetchall()
     return [
@@ -11652,6 +11689,7 @@ def _load_tag_rules(db: ChDbConnection) -> list[dict]:
             "match_attr_key": str(row["MatchAttrKey"]),
             "tag_key": str(row["TagKey"]),
             "tag_value": str(row["TagValue"]),
+            "conditions": _parse_tag_rule_conditions_json(row["ConditionsJson"]),
         }
         for row in rows
     ]
@@ -11667,12 +11705,52 @@ def _match_tag_rule(
     span_name: str = "",
     event_type: str = "",
 ) -> bool:
-    """Return True if the tag rule matches the given record fields."""
+    """Return True if the tag rule matches the given record fields.
+
+    For composite rules (non-empty ``conditions`` list), *all* conditions must
+    match.  For simple rules the single ``match_field``/``match_operator``/
+    ``match_value`` triple is evaluated as before.
+    """
     rule_types = rule["record_types"]
     if rule_types and "all" not in rule_types and record_type not in rule_types:
         return False
 
-    field = rule["match_field"]
+    conditions: list[dict] = rule.get("conditions") or []
+    if conditions:
+        # Composite rule – every condition in the list must match.
+        return all(
+            _match_single_condition(cond, service, severity, body, attrs, span_name, event_type) for cond in conditions
+        )
+
+    # Simple (legacy) rule – evaluate the single condition stored directly on
+    # the rule dict.
+    return _match_single_condition(
+        {
+            "match_field": rule["match_field"],
+            "match_operator": rule["match_operator"],
+            "match_value": rule["match_value"],
+            "match_attr_key": rule["match_attr_key"],
+        },
+        service,
+        severity,
+        body,
+        attrs,
+        span_name,
+        event_type,
+    )
+
+
+def _match_single_condition(
+    cond: dict,
+    service: str,
+    severity: str,
+    body: str,
+    attrs: dict,
+    span_name: str = "",
+    event_type: str = "",
+) -> bool:
+    """Evaluate a single condition dict against the record fields."""
+    field = cond.get("match_field", "")
     if field == "service_name":
         value = service
     elif field == "severity":
@@ -11684,12 +11762,12 @@ def _match_tag_rule(
     elif field == "event_type":
         value = event_type
     elif field == "attribute":
-        value = str(attrs.get(rule["match_attr_key"], "")) if isinstance(attrs, dict) else ""
+        value = str(attrs.get(cond.get("match_attr_key", ""), "")) if isinstance(attrs, dict) else ""
     else:
         value = ""
 
-    operator = rule["match_operator"]
-    match_value = rule["match_value"]
+    operator = cond.get("match_operator", "")
+    match_value = cond.get("match_value", "")
     if operator == "eq":
         return value == match_value
     if operator == "contains":
@@ -11700,6 +11778,118 @@ def _match_tag_rule(
         except re.error:
             return False
     return False
+
+
+def _tag_rule_attribute_key_suggestions(db: ChDbConnection, query_text: str, limit: int) -> list[str]:
+    keys: set[str] = set()
+    for record_type in _ATTR_KEY_RECORD_TYPES:
+        keys.update(_get_cached_attr_keys(db, record_type))
+
+    q = query_text.strip().lower()
+    ranked = sorted(
+        (k for k in keys if k),
+        key=lambda k: (
+            0 if q and k.lower().startswith(q) else 1,
+            0 if q and q in k.lower() else 1,
+            k.lower(),
+        ),
+    )
+    if q:
+        ranked = [k for k in ranked if q in k.lower()]
+    return ranked[:limit]
+
+
+def _tag_rule_value_suggestions(
+    db: ChDbConnection,
+    field: str,
+    operator: str,
+    query_text: str,
+    attr_key: str,
+    limit: int,
+) -> list[str]:
+    del operator  # Reserved for future operator-specific ranking.
+
+    field_name = (field or "").strip().lower()
+    q = (query_text or "").strip().lower()
+
+    def _run(sql: str, params: list[Any]) -> list[str]:
+        rows = db.execute(sql, params).fetchall()
+        out: list[str] = []
+        for row in rows:
+            v = str(row[0] or "").strip()
+            if not v:
+                continue
+            out.append(v)
+        return out
+
+    if field_name == "service_name":
+        return _run(
+            "SELECT value FROM ("
+            "SELECT ServiceName AS value FROM otel_logs WHERE ServiceName != '' "
+            "UNION ALL "
+            "SELECT ServiceName AS value FROM otel_traces WHERE ServiceName != ''"
+            ") "
+            "WHERE (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "severity":
+        return _run(
+            "SELECT SeverityText FROM otel_logs "
+            "WHERE SeverityText != '' AND (? = '' OR positionCaseInsensitive(SeverityText, ?) > 0) "
+            "GROUP BY SeverityText ORDER BY count() DESC, SeverityText LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "span_name":
+        return _run(
+            "SELECT SpanName FROM otel_traces "
+            "WHERE SpanName != '' AND (? = '' OR positionCaseInsensitive(SpanName, ?) > 0) "
+            "GROUP BY SpanName ORDER BY count() DESC, SpanName LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "event_type":
+        return _run(
+            "SELECT value FROM ("
+            "SELECT EventName AS value FROM otel_logs WHERE EventName != '' "
+            "UNION ALL "
+            "SELECT EventName AS value FROM hyperdx_sessions WHERE EventName != ''"
+            ") "
+            "WHERE (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "body":
+        return _run(
+            "SELECT value FROM ("
+            "SELECT Body AS value FROM otel_logs WHERE Body != '' ORDER BY Timestamp DESC LIMIT 4000"
+            ") "
+            "WHERE (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "attribute":
+        key = (attr_key or "").strip()
+        if not key:
+            return []
+        return _run(
+            "SELECT value FROM ("
+            "SELECT LogAttributes[?] AS value FROM otel_logs WHERE LogAttributes[?] != '' "
+            "ORDER BY Timestamp DESC LIMIT 2500 "
+            "UNION ALL "
+            "SELECT SpanAttributes[?] AS value FROM otel_traces WHERE SpanAttributes[?] != '' "
+            "ORDER BY Timestamp DESC LIMIT 2500"
+            ") "
+            "WHERE value != '' AND (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [key, key, key, key, q, q, limit],
+        )
+
+    return []
 
 
 def _apply_tag_rules(
@@ -21742,6 +21932,36 @@ async def view_tag_rules():
     )
 
 
+@app.route("/api/settings/tags/condition-suggestions", methods=["GET"])
+@require_basic_auth
+async def api_tag_rule_condition_suggestions():
+    db = get_db()
+    field = (request.args.get("field") or "").strip().lower()
+    operator = (request.args.get("operator") or "eq").strip().lower()
+    query_text = (request.args.get("q") or "").strip()
+    attr_key = (request.args.get("attr_key") or "").strip()
+    target = (request.args.get("target") or "value").strip().lower()
+    try:
+        limit = max(3, min(20, int(request.args.get("limit") or 8)))
+    except (TypeError, ValueError):
+        limit = 8
+
+    if target == "attr_key":
+        suggestions = _tag_rule_attribute_key_suggestions(db, query_text, limit)
+    else:
+        suggestions = _tag_rule_value_suggestions(db, field, operator, query_text, attr_key, limit)
+
+    return masked_jsonify(
+        {
+            "ok": True,
+            "field": field,
+            "operator": operator,
+            "target": target,
+            "suggestions": suggestions,
+        }
+    )
+
+
 @app.route("/settings/tags/auto", methods=["POST"])
 @require_basic_auth
 async def auto_tag_rules():
@@ -21804,6 +22024,17 @@ async def auto_tag_rules():
                     "MatchAttrKey": str(candidate["match_attr_key"]),
                     "TagKey": str(candidate["tag_key"]),
                     "TagValue": str(candidate["tag_value"]),
+                    "ConditionsJson": json.dumps(
+                        [
+                            {
+                                "match_field": str(candidate["match_field"]),
+                                "match_operator": str(candidate["match_operator"]),
+                                "match_value": str(candidate["match_value"]),
+                                "match_attr_key": str(candidate["match_attr_key"]),
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
                     "IsDeleted": 0,
                     "Version": version + idx,
                 }
@@ -21849,36 +22080,82 @@ async def create_tag_rule():
     form = await request.form
     name = (form.get("name") or "").strip()
     record_types_list = form.getlist("record_types")
-    match_field = (form.get("match_field") or "").strip().lower()
-    match_operator = (form.get("match_operator") or "eq").strip().lower()
-    match_value = (form.get("match_value") or "").strip()
-    match_attr_key = (form.get("match_attr_key") or "").strip()
     tag_key = (form.get("tag_key") or "").strip()
     tag_value = (form.get("tag_value") or "").strip()
 
-    if not name or not match_field or not tag_key or not tag_value:
-        await flash("Name, match field, tag key, and tag value are required", "warning")
+    # --- Composite conditions ---------------------------------------------------
+    # The form may submit multiple conditions via parallel lists:
+    #   condition_field[]  condition_operator[]  condition_value[]  condition_attr_key[]
+    # When at least two conditions are present the rule is "composite".
+    # When exactly one condition is provided it is stored both as ConditionsJson
+    # (for forward-compat reads) AND in the legacy MatchField/MatchOperator/MatchValue
+    # columns (for backward compat with existing query paths).
+    cond_fields = form.getlist("condition_field")
+    cond_operators = form.getlist("condition_operator")
+    cond_values = form.getlist("condition_value")
+    cond_attr_keys = form.getlist("condition_attr_key")
+
+    # Zip together, padding shorter lists with empty strings
+    n = max(len(cond_fields), len(cond_operators), len(cond_values), len(cond_attr_keys))
+
+    def _get(lst: list, i: int) -> str:
+        return lst[i].strip() if i < len(lst) else ""
+
+    conditions: list[dict] = []
+    for i in range(n):
+        f = _get(cond_fields, i).lower()
+        op = _get(cond_operators, i).lower() or "eq"
+        val = _get(cond_values, i)
+        attr = _get(cond_attr_keys, i)
+        if f:
+            conditions.append({"match_field": f, "match_operator": op, "match_value": val, "match_attr_key": attr})
+
+    # Fall back to single-condition fields if no composite conditions supplied
+    if not conditions:
+        match_field = (form.get("match_field") or "").strip().lower()
+        match_operator = (form.get("match_operator") or "eq").strip().lower()
+        match_value = (form.get("match_value") or "").strip()
+        match_attr_key = (form.get("match_attr_key") or "").strip()
+        if match_field:
+            conditions = [
+                {
+                    "match_field": match_field,
+                    "match_operator": match_operator,
+                    "match_value": match_value,
+                    "match_attr_key": match_attr_key,
+                }
+            ]
+
+    if not name or not conditions or not tag_key or not tag_value:
+        await flash("Name, at least one match condition, tag key, and tag value are required", "warning")
         return redirect(url_for("view_tag_rules"))
-    if match_field not in _TAG_RULE_FIELDS:
-        await flash(f"Invalid match field: {match_field}", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_operator not in _TAG_RULE_OPERATORS:
-        await flash(f"Invalid match operator: {match_operator}", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_field == "attribute" and not match_attr_key:
-        await flash("Attribute key is required when match field is 'attribute'", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_operator == "regex":
-        try:
-            re.compile(match_value)
-        except re.error as exc:
-            await flash(f"Invalid regex pattern: {exc}", "warning")
+
+    valid_fields = set(_TAG_RULE_FIELDS)
+    valid_ops = set(_TAG_RULE_OPERATORS)
+    for cond in conditions:
+        if cond["match_field"] not in valid_fields:
+            await flash(f"Invalid match field: {cond['match_field']}", "warning")
             return redirect(url_for("view_tag_rules"))
+        if cond["match_operator"] not in valid_ops:
+            await flash(f"Invalid match operator: {cond['match_operator']}", "warning")
+            return redirect(url_for("view_tag_rules"))
+        if cond["match_field"] == "attribute" and not cond["match_attr_key"]:
+            await flash("Attribute key is required when match field is 'attribute'", "warning")
+            return redirect(url_for("view_tag_rules"))
+        if cond["match_operator"] == "regex":
+            try:
+                re.compile(cond["match_value"])
+            except re.error as exc:
+                await flash(f"Invalid regex pattern: {exc}", "warning")
+                return redirect(url_for("view_tag_rules"))
 
     # Normalise record types
     valid_types = set(_TAG_RULE_RECORD_TYPES)
     chosen = [t.strip() for t in record_types_list if t.strip() in valid_types]
     record_types_str = ",".join(chosen) if chosen else "all"
+
+    # For the legacy single-condition columns use the first condition.
+    primary = conditions[0]
 
     rule_id = str(uuid.uuid4())
     _insert_rows_json_each_row(
@@ -21889,12 +22166,13 @@ async def create_tag_rule():
                 "Id": rule_id,
                 "Name": name,
                 "RecordTypes": record_types_str,
-                "MatchField": match_field,
-                "MatchOperator": match_operator,
-                "MatchValue": match_value,
-                "MatchAttrKey": match_attr_key,
+                "MatchField": primary["match_field"],
+                "MatchOperator": primary["match_operator"],
+                "MatchValue": primary["match_value"],
+                "MatchAttrKey": primary["match_attr_key"],
                 "TagKey": tag_key,
                 "TagValue": tag_value,
+                "ConditionsJson": json.dumps(conditions, ensure_ascii=False),
                 "IsDeleted": 0,
                 "Version": int(time.time() * 1000),
             }
@@ -21929,6 +22207,7 @@ async def delete_tag_rule(rule_id: str):
                 "MatchAttrKey": "",
                 "TagKey": "",
                 "TagValue": "",
+                "ConditionsJson": "[]",
                 "IsDeleted": 1,
                 "Version": int(time.time() * 1000),
             }
