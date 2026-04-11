@@ -2,13 +2,27 @@
 {% from "_multi_select_filter.html" import render_multi_select %}
 {% from "_filter_macros.html" import render_filter_accordion, render_regex_filter, render_tz_init_script %}
 {% block title %}Metrics{% endblock %}
+{% block styles %}{{ super() }}<style>
+@media (max-width: 575.98px) {
+  .metrics-mobile-card-table thead { display: none; }
+  .metrics-mobile-card-table,
+  .metrics-mobile-card-table tbody,
+  .metrics-mobile-card-table tr,
+  .metrics-mobile-card-table td { display: block; width: 100%; }
+  .metrics-mobile-card-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+  .metrics-mobile-card-table td { border: 0; padding: 0.2rem 0; }
+  .metrics-mobile-card-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+  .metrics-btn-label { display: none; }
+  .btn:has(> .metrics-btn-label) i { margin-right: 0 !important; }
+}
+</style>{% endblock %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-graph-up-arrow me-2 text-info"></i>Metrics & Signals</h4>
   <div class="d-flex align-items-center gap-3">
     <div class="small text-secondary">Derived 1-minute telemetry signals with anomaly state</div>
-    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_metrics_rules') }}">
-      <i class="bi bi-sliders me-1"></i>Manage Rules
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_metrics_rules') }}" title="Manage Rules">
+      <i class="bi bi-sliders me-1"></i><span class="metrics-btn-label">Manage Rules</span>
     </a>
     <a href="{{ url_for('metrics_help') }}" class="link-secondary text-decoration-none" title="Metrics Help" aria-label="Metrics Help" style="opacity:.75; font-size:1.1rem; line-height:1;"><i class="bi bi-question-circle"></i></a>
   </div>
@@ -83,7 +97,7 @@
     <span class="small text-secondary">{{ total }} series</span>
   </div>
   <div class="table-responsive">
-    <table class="table table-dark table-sm align-middle mb-0">
+    <table class="table table-dark table-sm align-middle mb-0 metrics-mobile-card-table">
       <thead>
         <tr>
           {% set last_time_next_dir = 'asc' if (sort_by == 'last_time' and sort_dir == 'desc') else 'desc' %}
@@ -112,21 +126,21 @@
         {% if rows %}
           {% for r in rows %}
           <tr>
-            <td class="small font-monospace sobs-tz-ts" data-utc-ts="{{ r.last_time }}">{{ r.last_time }}</td>
-            <td class="small">{{ r.service }}</td>
-            <td class="small" title="{{ r.source }}">{{ source_label(r.source) }}</td>
-            <td class="small" title="{{ r.signal }}{% if signal_description(r.source, r.signal) %} – {{ signal_description(r.source, r.signal) }}{% endif %}">
+            <td class="small font-monospace sobs-tz-ts" data-utc-ts="{{ r.last_time }}" data-label="Last Seen">{{ r.last_time }}</td>
+            <td class="small" data-label="Service">{{ r.service }}</td>
+            <td class="small" title="{{ r.source }}" data-label="Source">{{ source_label(r.source) }}</td>
+            <td class="small" title="{{ r.signal }}{% if signal_description(r.source, r.signal) %} – {{ signal_description(r.source, r.signal) }}{% endif %}" data-label="Signal">
               {{ signal_label(r.source, r.signal) }}
               <span class="text-secondary font-monospace signal-raw-id">{{ r.signal }}</span>
             </td>
-            <td class="small font-monospace">{{ r.last_value }}</td>
-            <td class="small font-monospace">{{ r.last_anomaly_score }}</td>
-            <td>
+            <td class="small font-monospace" data-label="Value">{{ r.last_value }}</td>
+            <td class="small font-monospace" data-label="Z">{{ r.last_anomaly_score }}</td>
+            <td data-label="State">
               <span class="badge {% if r.last_anomaly_state == 'outlier' %}bg-danger{% elif r.last_anomaly_state == 'warning' %}bg-warning text-dark{% else %}bg-success{% endif %}">
                 {{ r.last_anomaly_state }}
               </span>
             </td>
-            <td class="small">
+            <td class="small" data-label="Rule">
               {% if r.rule_name %}
               <span class="badge {% if r.rule_state == 'outlier' %}bg-danger{% elif r.rule_state == 'warning' %}bg-warning text-dark{% else %}bg-secondary{% endif %}" title="{{ r.rule_reason }}">
                 {{ r.rule_name }}
@@ -135,9 +149,9 @@
               <span class="text-secondary">—</span>
               {% endif %}
             </td>
-            <td class="small font-monospace">{{ r.last_sample_count }}</td>
-            <td class="small font-monospace">{{ r.point_count }}</td>
-            <td>
+            <td class="small font-monospace" data-label="Sample">{{ r.last_sample_count }}</td>
+            <td class="small font-monospace" data-label="Points">{{ r.point_count }}</td>
+            <td data-label="Actions">
               <a class="btn btn-sm btn-outline-info"
                  href="{{ url_for('view_metrics_anomaly', service=r.service, signal=r.signal, source=r.source, attr_fp=r.attr_fp, hours=hours) }}">
                 Details
