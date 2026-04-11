@@ -11678,8 +11678,21 @@ def _load_tag_rules(db: ChDbConnection) -> list[dict]:
         "MatchAttrKey, TagKey, TagValue, ConditionsJson "
         "FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name"
     ).fetchall()
-    return [
-        {
+    def _build_rule(row: Any) -> dict:
+        conditions = _parse_tag_rule_conditions_json(row["ConditionsJson"])
+        # For legacy rules created before ConditionsJson was introduced, synthesize
+        # the conditions list from the flat legacy columns so that the edit form
+        # can pre-populate the condition fields correctly.
+        if not conditions and str(row["MatchField"]).strip():
+            conditions = [
+                {
+                    "match_field": str(row["MatchField"]),
+                    "match_operator": str(row["MatchOperator"]) or "eq",
+                    "match_value": str(row["MatchValue"]),
+                    "match_attr_key": str(row["MatchAttrKey"]),
+                }
+            ]
+        return {
             "id": str(row["Id"]),
             "name": str(row["Name"]),
             "record_types": [t.strip() for t in str(row["RecordTypes"]).split(",") if t.strip()],
@@ -11689,10 +11702,10 @@ def _load_tag_rules(db: ChDbConnection) -> list[dict]:
             "match_attr_key": str(row["MatchAttrKey"]),
             "tag_key": str(row["TagKey"]),
             "tag_value": str(row["TagValue"]),
-            "conditions": _parse_tag_rule_conditions_json(row["ConditionsJson"]),
+            "conditions": conditions,
         }
-        for row in rows
-    ]
+
+    return [_build_rule(row) for row in rows]
 
 
 def _match_tag_rule(
