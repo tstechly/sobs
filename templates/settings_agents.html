@@ -1,6 +1,30 @@
 {% extends "base.html" %}
 {% from '_multi_select_filter.html' import render_single_select %}
 {% block title %}Agent Rules{% endblock %}
+{% block styles %}{{ super() }}<style>
+  @media (max-width: 575.98px) {
+    .agents-rules-table thead { display: none; }
+    .agents-rules-table,
+    .agents-rules-table tbody,
+    .agents-rules-table tr,
+    .agents-rules-table td { display: block; width: 100%; }
+    .agents-rules-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .agents-rules-table td { border: 0; padding: 0.2rem 0; }
+    .agents-rules-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+
+    .agents-runs-table thead { display: none; }
+    .agents-runs-table,
+    .agents-runs-table tbody,
+    .agents-runs-table tr,
+    .agents-runs-table td { display: block; width: 100%; }
+    .agents-runs-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .agents-runs-table td { border: 0; padding: 0.2rem 0; }
+    .agents-runs-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+
+    .agents-btn-label { display: none; }
+    .btn:has(> .agents-btn-label) i { margin-right: 0 !important; }
+  }
+</style>{% endblock %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-lightning-charge me-2 text-warning"></i>Automated Agent Flows</h4>
@@ -16,13 +40,13 @@
             data-ai-handler="openModal"
             data-ai-args='{"modal_id":"workItemsTourModal"}'
             data-ai-label="Open work items walkthrough modal">
-      <i class="bi bi-mortarboard me-1"></i>Walkthrough
+      <i class="bi bi-mortarboard me-1"></i><span class="agents-btn-label">Walkthrough</span>
     </button>
-    <a href="{{ url_for('view_ai_settings') }}" class="btn btn-sm btn-outline-primary">
-      <i class="bi bi-gear me-1"></i>AI Settings
+    <a href="{{ url_for('view_ai_settings') }}" class="btn btn-sm btn-outline-primary" title="AI Settings">
+      <i class="bi bi-gear me-1"></i><span class="agents-btn-label">AI Settings</span>
     </a>
-    <a href="{{ url_for('view_settings') }}" class="btn btn-sm btn-outline-secondary">
-      <i class="bi bi-arrow-left me-1"></i>Back to Settings
+    <a href="{{ url_for('view_settings') }}" class="btn btn-sm btn-outline-secondary" title="Back to Settings">
+      <i class="bi bi-arrow-left me-1"></i><span class="agents-btn-label">Back to Settings</span>
     </a>
   </div>
 </div>
@@ -139,7 +163,7 @@
   </div>
   {% if rules %}
   <div class="table-responsive">
-    <table class="table table-dark table-sm align-middle mb-0">
+    <table class="table table-dark table-sm align-middle mb-0 agents-rules-table">
       <thead>
         <tr>
           <th>Name</th>
@@ -153,20 +177,20 @@
       <tbody>
         {% for r in rules %}
         <tr>
-          <td>
+          <td data-label="Name">
             <span class="fw-semibold small">{{ r.name }}</span>
             {% if r.description %}
             <br><span class="text-secondary" style="font-size:.78rem;">{{ r.description }}</span>
             {% endif %}
           </td>
-          <td class="small font-monospace">
+          <td class="small font-monospace" data-label="Trigger">
             {{ r.trigger_type | replace('_', ' ') | title }}
             {% if r.trigger_ref_id %}
             <br><span class="text-secondary" style="font-size:.78rem;">{{ r.trigger_ref_id[:12] }}…</span>
             {% endif %}
           </td>
-          <td><span class="badge bg-secondary">{{ r.trigger_state }}</span></td>
-          <td class="small">
+          <td data-label="State"><span class="badge bg-secondary">{{ r.trigger_state }}</span></td>
+          <td class="small" data-label="Actions">
             {% for a in r.actions %}
             <span class="badge
               {% if a == 'analyze' %}text-bg-info
@@ -176,8 +200,8 @@
               me-1">{{ a | replace('_', ' ') }}</span>
             {% endfor %}
           </td>
-          <td class="small text-secondary">{{ r.rate_limit_minutes }}m</td>
-          <td class="text-end">
+          <td class="small text-secondary" data-label="Rate Limit">{{ r.rate_limit_minutes }}m</td>
+          <td class="text-end" data-label="">
             <button type="button"
                     class="btn btn-sm btn-outline-primary me-1 sobs-run-btn"
                     data-rule-id="{{ r.id | e }}"
@@ -227,7 +251,7 @@
   </div>
   {% if runs %}
   <div class="table-responsive">
-    <table class="table table-dark table-sm align-middle mb-0">
+    <table class="table table-dark table-sm align-middle mb-0 agents-runs-table">
       <thead>
         <tr>
           <th>Time</th>
@@ -244,9 +268,9 @@
         {% for run in runs %}
         {% if not run.is_dismissed %}
         <tr>
-          <td class="small font-monospace text-secondary" style="white-space:nowrap;">{{ run.created_at[:19] }}</td>
-          <td class="small">{{ run.rule_name }}</td>
-          <td>
+          <td class="small font-monospace text-secondary" style="white-space:nowrap;" data-label="Time">{{ run.created_at[:19] }}</td>
+          <td class="small" data-label="Rule">{{ run.rule_name }}</td>
+          <td data-label="Status">
             <span class="badge
               {% if run.status == 'completed' %}text-bg-success
               {% elif run.status == 'failed' %}text-bg-danger
@@ -256,9 +280,9 @@
               {{ run.status | replace('_', ' ') }}
             </span>
           </td>
-          <td class="small text-secondary">{{ run.guard_decision or '—' }}</td>
-          <td class="small text-secondary">{{ run.dlp_result or '—' }}</td>
-          <td class="small" style="max-width:300px;">
+          <td class="small text-secondary" data-label="Guard">{{ run.guard_decision or '—' }}</td>
+          <td class="small text-secondary" data-label="DLP">{{ run.dlp_result or '—' }}</td>
+          <td class="small" style="max-width:300px;" data-label="Analysis">
             {% if run.analysis %}
             <details>
               <summary class="text-info" style="cursor:pointer;">View analysis</summary>
@@ -274,7 +298,7 @@
             <span class="text-secondary">—</span>
             {% endif %}
           </td>
-          <td class="small">
+          <td class="small" data-label="GitHub Issue">
             {% if run.github_issue_url %}
             <a href="{{ run.github_issue_url }}" target="_blank" rel="noopener" class="text-info">
               <i class="bi bi-github me-1"></i>View
@@ -283,7 +307,7 @@
             <span class="text-secondary">—</span>
             {% endif %}
           </td>
-          <td>
+          <td data-label="">
             <button type="button" class="btn btn-sm btn-outline-secondary sobs-dismiss-btn"
                     data-run-id="{{ run.id | e }}" title="Dismiss">
               <i class="bi bi-x"></i>

@@ -1,5 +1,27 @@
 {% extends "base.html" %}
 {% block title %}Output Masking{% endblock %}
+{% block styles %}{{ super() }}<style>
+@media (max-width: 575.98px) {
+  .masking-keys-table thead,
+  .masking-patterns-table thead { display: none; }
+  .masking-keys-table,
+  .masking-keys-table tbody,
+  .masking-keys-table tr,
+  .masking-keys-table td,
+  .masking-patterns-table,
+  .masking-patterns-table tbody,
+  .masking-patterns-table tr,
+  .masking-patterns-table td { display: block; width: 100%; }
+  .masking-keys-table tr,
+  .masking-patterns-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+  .masking-keys-table td,
+  .masking-patterns-table td { border: 0; padding: 0.2rem 0; }
+  .masking-keys-table td::before,
+  .masking-patterns-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+  .masking-btn-label { display: none; }
+  .btn:has(> .masking-btn-label) i { margin-right: 0 !important; }
+}
+</style>{% endblock %}
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
   <h4 class="fw-semibold mb-0"><i class="bi bi-shield-lock me-2 text-danger"></i>Output Masking</h4>
@@ -108,8 +130,8 @@
       <div class="col-lg-6">
         <div class="d-flex align-items-center justify-content-between mb-2">
           <label for="maskPreviewOutput" class="form-label small text-secondary mb-0">Masked output</label>
-          <button type="button" class="btn btn-sm btn-outline-primary" id="maskPreviewRunBtn">
-            <i class="bi bi-play-fill me-1"></i>Preview Masking
+          <button type="button" class="btn btn-sm btn-outline-primary" id="maskPreviewRunBtn" title="Preview Masking">
+            <i class="bi bi-play-fill me-1"></i><span class="masking-btn-label">Preview Masking</span>
           </button>
         </div>
         <pre id="maskPreviewOutput" class="theme-panel rounded p-3 small font-monospace mb-0" style="min-height:11rem;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;">Masked output will appear here.</pre>
@@ -147,7 +169,7 @@
       </div>
       {% if custom_keys %}
       <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
+        <table class="table table-sm align-middle mb-0 masking-keys-table">
           <thead class="table-secondary">
             <tr>
               <th>Key</th>
@@ -157,8 +179,8 @@
           <tbody>
             {% for key in custom_keys %}
             <tr>
-              <td class="font-monospace">{{ key }}</td>
-              <td>
+              <td class="font-monospace" data-label="Key">{{ key }}</td>
+              <td data-label="Actions">
                 <form method="post" action="{{ url_for('delete_masking_key') }}">
                   <input type="hidden" name="key" value="{{ key }}">
                   <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete key">
@@ -220,7 +242,7 @@
       </div>
       {% if custom_patterns %}
       <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
+        <table class="table table-sm align-middle mb-0 masking-patterns-table">
           <thead class="table-secondary">
             <tr>
               <th>Pattern</th>
@@ -230,8 +252,8 @@
           <tbody>
             {% for pattern in custom_patterns %}
             <tr>
-              <td class="font-monospace small text-break">{{ pattern }}</td>
-              <td>
+              <td class="font-monospace small text-break" data-label="Pattern">{{ pattern }}</td>
+              <td data-label="Actions">
                 <form method="post" action="{{ url_for('delete_masking_pattern') }}">
                   <input type="hidden" name="pattern" value="{{ pattern }}">
                   <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-2" title="Delete pattern">
