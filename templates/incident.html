@@ -1,6 +1,27 @@
 {% extends "base.html" %}
 {% from "_error_panels.html" import render_error_accordion, render_error_panel_styles %}
 {% block title %}Incident View{% endblock %}
+{% block styles %}{{ super() }}<style>
+@media (max-width: 575.98px) {
+  .incident-events-table thead { display: none; }
+  .incident-events-table,
+  .incident-events-table tbody,
+  .incident-events-table tr,
+  .incident-events-table td { display: block; width: 100%; }
+  .incident-events-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+  .incident-events-table td { border: 0; padding: 0.2rem 0; }
+  .incident-events-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+
+  .incident-signals-table thead { display: none; }
+  .incident-signals-table,
+  .incident-signals-table tbody,
+  .incident-signals-table tr,
+  .incident-signals-table td { display: block; width: 100%; }
+  .incident-signals-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+  .incident-signals-table td { border: 0; padding: 0.2rem 0; }
+  .incident-signals-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+}
+</style>{% endblock %}
 {% block content %}
 {% set _ref = trace_id or error_id or rum_session %}
 <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
@@ -240,7 +261,7 @@
 
       {% if related_rum_events %}
       <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
+        <table class="table table-sm align-middle mb-0 incident-events-table">
           <thead>
             <tr>
               <th>Timestamp</th>
@@ -252,12 +273,12 @@
           <tbody>
             {% for ev in related_rum_events %}
             <tr>
-              <td class="small font-monospace sobs-tz-ts" data-utc-ts="{{ ev.ts }}">{{ ev.ts[:19] }}</td>
-              <td>
+              <td class="small font-monospace sobs-tz-ts" data-utc-ts="{{ ev.ts }}" data-label="Timestamp">{{ ev.ts[:19] }}</td>
+              <td data-label="Event">
                 <span class="badge {% if ev.event_type in ('error', 'unhandledrejection') %}bg-danger{% elif ev.event_type == 'pageview' %}bg-primary{% elif ev.event_type == 'web-vital' %}bg-success{% else %}bg-secondary{% endif %}">{{ ev.event_type }}</span>
               </td>
-              <td class="small text-truncate" style="max-width:360px;" title="{{ ev.url|mask }}">{{ (ev.url or '—')|mask }}</td>
-              <td>
+              <td class="small text-truncate" style="max-width:360px;" title="{{ ev.url|mask }}" data-label="URL">{{ (ev.url or '—')|mask }}</td>
+              <td data-label="Actions">
                 <div class="d-flex gap-2 flex-wrap">
                   {% if ev.trace_id %}
                   <a href="{{ url_for('view_traces', trace_id=ev.trace_id, from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-info">Trace</a>
@@ -322,7 +343,7 @@
       </div>
       {% if raw_windows %}
       <div class="table-responsive">
-        <table class="table table-sm align-middle mb-0">
+        <table class="table table-sm align-middle mb-0 incident-signals-table">
           <thead>
             <tr>
               <th>Signal</th>
@@ -333,17 +354,17 @@
           <tbody>
             {% for w in raw_windows %}
             <tr>
-              <td>
+              <td data-label="Signal">
                 <div class="small fw-semibold">{{ w.signal_type }}</div>
                 {% if w.signal_ref %}
                 <div class="small text-secondary font-monospace">{{ w.signal_ref }}</div>
                 {% endif %}
               </td>
-              <td class="small font-monospace">
+              <td class="small font-monospace" data-label="Window">
                 <span class="sobs-tz-ts" data-utc-ts="{{ w.window_start }}">{{ w.window_start[:19] }}</span><br>
                 <span class="sobs-tz-ts" data-utc-ts="{{ w.window_end }}">{{ w.window_end[:19] }}</span>
               </td>
-              <td>
+              <td data-label="Copy Status">
                 {% if w.copy_complete %}
                 <span class="badge bg-success">{{ w.copied_count }}/{{ w.expected_count }} copied</span>
                 {% elif w.copied_count > 0 %}
