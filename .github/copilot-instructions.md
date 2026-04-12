@@ -1,5 +1,16 @@
 # SOBS Copilot Instructions
 
+## Branch & PR Workflow (Mandatory)
+
+- Never commit directly to `main`.
+- Never push directly to `main`.
+- Every change must follow: Issue -> new branch -> pull request -> review -> merge.
+- Branch naming convention: `issue-<number>-<short-description>` (for example: `issue-321-fix-mcp-key-contrast`).
+- PRs must reference the issue number and include a short validation summary.
+- If work is started on `main` by mistake, stop and move changes to a new branch before continuing.
+
+These rules apply to humans and automated agents.
+
 ## Stack
 Flask/Jinja2, Bootstrap 5, chDB. Templates extend `base.html` via `{% block styles %}`, `{% block content %}`, `{% block scripts %}`.
 
