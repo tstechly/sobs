@@ -73,13 +73,27 @@ def _clear_mcp_keys(db):
 
 
 @pytest.fixture(autouse=True)
-def _clean_mcp_state():
-    """Clear MCP keys and reset MCP enabled state before each test."""
+def _clean_mcp_state(request):
+    """Clear MCP keys and reset MCP enabled state after each test.
+
+    Uses a finalizer instead of yielding at the start to avoid interfering
+    with class-based setup_method/teardown_method patterns.
+    """
+
+    def cleanup():
+        db = _get_db()
+        _clear_mcp_keys(db)
+        # Ensure MCP is enabled by default for tests (some tests disable it)
+        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
+
+    request.addfinalizer(cleanup)
+
+    # Also run cleanup before the first test in each session
     db = _get_db()
-    _clear_mcp_keys(db)
-    # Ensure MCP is enabled by default for tests (some tests disable it)
-    sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
-    yield
+    if not hasattr(_clean_mcp_state, "_init_done"):
+        _clear_mcp_keys(db)
+        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
+        _clean_mcp_state._init_done = True
 
 
 # ---------------------------------------------------------------------------

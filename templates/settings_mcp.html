@@ -12,6 +12,7 @@
     .mcp-keys-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
     .mcp-keys-table td { border: 0; padding: 0.2rem 0; }
     .mcp-keys-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+    
     /* Mobile card mode for tools reference table */
     .mcp-tools-table thead { display: none; }
     .mcp-tools-table,
@@ -21,15 +22,59 @@
     .mcp-tools-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
     .mcp-tools-table td { border: 0; padding: 0.2rem 0; }
     .mcp-tools-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+    
     /* Hide button labels at mobile, show icon only */
     .mcp-btn-label { display: none; }
     .btn:has(> .mcp-btn-label) i { margin-right: 0 !important; }
+    
+    /* Mobile code block handling */
+    .mcp-code-block { overflow-x: auto; }
+    .mcp-code-wrapper { position: relative; }
+    .mcp-copy-btn { margin-bottom: 0.5rem; }
+  }
+  
+  /* Responsive code wrapper */
+  .mcp-code-wrapper {
+    position: relative;
+    display: inline-block;
+    width: 100%;
+  }
+  
+  .mcp-copy-btn {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  
+  /* Expiry date styling */
+  .mcp-key-expired {
+    opacity: 0.6;
+    text-decoration: line-through;
+  }
+  
+  .mcp-expiry-badge {
+    font-size: 0.75rem;
+  }
+
+  .mcp-new-key-display {
+    position: relative;
+    background-color: var(--bs-code-color, #d63384);
+    opacity: 0.1;
+    padding: 1rem;
+    border-radius: 0.375rem;
+    margin: 1rem 0;
+  }
+
+  @media (max-width: {{ mobile_breakpoint_max }}) {
+    .mcp-new-key-display {
+      padding: 0.75rem;
+    }
   }
 </style>{% endblock %}
 {% block content %}
 {% set mcp_header_actions %}
   <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_settings') }}" title="Back to Settings">
-    <i class="bi bi-arrow-left me-1"></i><span class="mcp-btn-label settings-btn-label">Back to Settings</span>
+    <i class="bi bi-arrow-left me-1"></i><span class="mcp-btn-label">Back to Settings</span>
   </a>
 {% endset %}
 {{ render_page_header('MCP (Model Context Protocol)', icon_class='bi bi-plugin', icon_text_class='text-primary', actions_html=mcp_header_actions, subtext='The SOBS MCP server exposes observability data (logs, traces, and metrics) to AI-powered tools such as GitHub Copilot Agent and VS Code Copilot via the <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">Model Context Protocol</a>. Generate API keys below to authenticate MCP clients, then point your Copilot configuration at <code>POST /mcp</code>.') }}
@@ -65,29 +110,53 @@
     </button>
   </div>
   <div class="card-body p-0">
+    <!-- New key display -->
     <div id="newKeyAlert" class="alert alert-success alert-dismissible m-3 d-none" role="alert">
-      <strong>New key generated.</strong> Copy it now – it will not be shown again.<br>
-      <code id="newKeyValue" class="user-select-all"></code>
-      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"
-              onclick="document.getElementById('newKeyValue').textContent=''"></button>
+      <div class="d-flex align-items-start justify-content-between mb-2">
+        <div>
+          <strong>New API Key Generated</strong><br>
+          <small class="text-secondary">Copy it now — it will not be shown again.</small>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>
+      <div class="mcp-new-key-display">
+        <div class="font-monospace small text-break user-select-all" id="newKeyValue"></div>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button type="button" class="btn btn-sm btn-outline-success" id="copyNewKeyBtn" title="Copy to clipboard">
+          <i class="bi bi-clipboard me-1"></i><span class="mcp-btn-label">Copy Key</span>
+        </button>
+      </div>
     </div>
+    
+    <!-- Keys table or empty state -->
     {% if mcp_keys %}
     <table class="table table-sm align-middle mb-0 mcp-keys-table">
       <thead class="table-secondary">
         <tr>
           <th>Label</th>
           <th>Created</th>
+          <th>Expires</th>
           <th style="width:80px"></th>
         </tr>
       </thead>
       <tbody id="keyTableBody">
         {% for k in mcp_keys %}
-        <tr id="key-row-{{ k.id }}">
+        <tr id="key-row-{{ k.id }}" class="{% if k.expires_at and k.expires_at < now_iso %}mcp-key-expired{% endif %}">
           <td class="font-monospace small" data-label="Label">{{ k.label }}</td>
-          <td class="small text-secondary" data-label="Created">{{ k.created_at }}</td>
+          <td class="small text-secondary" data-label="Created">{{ k.created_at[:10] if k.created_at else 'Unknown' }}</td>
+          <td class="small" data-label="Expires">
+            {% if k.expires_at %}
+              <span class="mcp-expiry-badge">{{ k.expires_at[:10] }}</span>
+              {% if k.expires_at < now_iso %}<span class="badge bg-danger ms-1">Expired</span>{% endif %}
+            {% else %}
+              <span class="text-secondary">Never</span>
+            {% endif %}
+          </td>
           <td data-label="Actions">
             <button class="btn btn-sm btn-outline-danger delete-key-btn"
-                    data-key-id="{{ k.id }}">
+                    data-key-id="{{ k.id }}"
+                    title="Delete key">
               <i class="bi bi-trash"></i>
             </button>
           </td>
@@ -109,17 +178,24 @@
       Add the following to your VS Code <code>.vscode/mcp.json</code> or GitHub Copilot agent
       configuration to connect to this SOBS instance:
     </p>
-    <pre class="bg-dark border rounded p-3 small"><code>{
+    <div class="mcp-code-wrapper">
+      <div class="mcp-copy-btn">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="copyConfigBtn" title="Copy configuration">
+          <i class="bi bi-clipboard me-1"></i><span class="mcp-btn-label">Copy Config</span>
+        </button>
+      </div>
+      <pre class="bg-dark border rounded p-3 small mcp-code-block" id="configCodeBlock"><code>{
   "servers": {
     "sobs": {
       "type": "http",
-      "url": "https://&lt;your-sobs-host&gt;/mcp",
+      "url": "https://<span id="configHost">your-sobs-host</span>/mcp",
       "headers": {
         "X-MCP-API-Key": "&lt;your-api-key&gt;"
       }
     }
   }
 }</code></pre>
+    </div>
     <div class="alert alert-warning small mt-2 mb-0 py-2 px-3" role="alert">
       <i class="bi bi-shield-exclamation me-1"></i>
       <strong>Use HTTPS in production</strong> to protect your API key in transit.
@@ -173,8 +249,120 @@
   </div>
 </div>
 
+<!-- Label input modal -->
+<div class="modal fade" id="labelInputModal" tabindex="-1" aria-labelledby="labelInputModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="labelInputModalLabel">
+          <i class="bi bi-plus-circle me-2"></i>Generate New API Key
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label for="keyLabelInput" class="form-label">Key Label <span class="text-danger">*</span></label>
+          <input type="text" class="form-control" id="keyLabelInput" placeholder="e.g., copilot-vscode" maxlength="128">
+          <div class="form-text">A descriptive name to help you remember what this key is for.</div>
+        </div>
+        <div class="mb-3">
+          <label for="keyExpiryInput" class="form-label">Expiry Date (Optional)</label>
+          <input type="date" class="form-control" id="keyExpiryInput">
+          <div class="form-text">Leave blank for a key that never expires.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirmLabelBtn">
+          <i class="bi bi-check-circle me-1"></i>Generate Key
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-labelledby="deleteConfirmModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="deleteConfirmModalLabel">
+          <i class="bi bi-exclamation-triangle me-2 text-danger"></i>Confirm Delete
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to revoke this API key?</p>
+        <p class="text-danger mb-0"><i class="bi bi-info-circle me-1"></i><strong>This action cannot be undone.</strong></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirmDeleteBtn">
+          <i class="bi bi-trash me-1"></i>Delete Key
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Notification toast (for copy feedback) -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11" id="toastContainer" aria-live="polite" aria-atomic="true">
+  <div class="toast" id="copyToast" role="alert" aria-live="assertive" aria-atomic="true">
+    <div class="toast-body">
+      <i class="bi bi-check-circle text-success me-2"></i><span id="toastMessage"></span>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
+  // Utility: copy to clipboard
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    // Fallback
+    const el = document.createElement('textarea');
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+    return Promise.resolve();
+  }
+
+  function showCopyToast(msg = 'Copied to clipboard!') {
+    const toast = new bootstrap.Toast(document.getElementById('copyToast'));
+    document.getElementById('toastMessage').textContent = msg;
+    toast.show();
+  }
+
+  // Set current host in code example
+  function updateConfigHost() {
+    const host = window.location.hostname + (window.location.port ? ':' + window.location.port : '');
+    const protocol = window.location.protocol.startsWith('https') ? 'https' : 'http';
+    document.getElementById('configHost').textContent = protocol + '://' + host;
+  }
+  updateConfigHost();
+
+  // Copy config button
+  document.getElementById('copyConfigBtn').addEventListener('click', function () {
+    const codeBlock = document.getElementById('configCodeBlock');
+    const text = codeBlock.innerText;
+    copyToClipboard(text).then(() => showCopyToast('Configuration copied!'));
+  });
+
+  // Copy new key button
+  const copyNewKeyBtn = document.getElementById('copyNewKeyBtn');
+  if (copyNewKeyBtn) {
+    copyNewKeyBtn.addEventListener('click', function () {
+      const keyValue = document.getElementById('newKeyValue').textContent;
+      if (keyValue) {
+        copyToClipboard(keyValue).then(() => showCopyToast('API key copied!'));
+      }
+    });
+  }
+
   // Toggle enabled / disabled
   document.getElementById('saveMcpEnabled').addEventListener('click', async function () {
     const enabled = document.getElementById('mcpEnabledSwitch').checked;
@@ -195,62 +383,129 @@
     setTimeout(() => { fb.textContent = ''; }, 3000);
   });
 
-  // Generate a new key
-  document.getElementById('generateKeyBtn').addEventListener('click', async function () {
-    const label = prompt('Label for this key (e.g. "copilot-vscode"):');
-    if (label === null) return;
+  // Modals
+  const labelModal = new bootstrap.Modal(document.getElementById('labelInputModal'));
+  const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+  let pendingDeleteKeyId = null;
+
+  // Generate key button – show label input modal
+  document.getElementById('generateKeyBtn').addEventListener('click', function () {
+    document.getElementById('keyLabelInput').value = '';
+    document.getElementById('keyExpiryInput').value = '';
+    labelModal.show();
+  });
+
+  // Confirm label – generate the key
+  document.getElementById('confirmLabelBtn').addEventListener('click', async function () {
+    const label = document.getElementById('keyLabelInput').value.trim() || 'API Key';
+    const expiryDate = document.getElementById('keyExpiryInput').value;
+    const expiresAt = expiryDate ? new Date(expiryDate).toISOString() : null;
+
     try {
       const r = await fetch('{{ url_for("mcp.mcp_api_create_key") }}', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: label.trim() || 'API Key' }),
+        body: JSON.stringify({ label, expires_at: expiresAt }),
       });
       const d = await r.json();
-      if (!d.ok) { alert(d.error || 'Failed to generate key.'); return; }
+      if (!d.ok) {
+        alert(d.error || 'Failed to generate key.');
+        return;
+      }
+
+      labelModal.hide();
+
       // Show the raw key once.
       document.getElementById('newKeyValue').textContent = d.key;
       document.getElementById('newKeyAlert').classList.remove('d-none');
-      // Add row to the table.
-      const tbody = document.getElementById('keyTableBody');
+
+      // Add row to the table or create it if it doesn't exist.
+      const theadParent = document.querySelector('.mcp-keys-table');
+      let tbody = document.getElementById('keyTableBody');
       const noMsg = document.getElementById('noKeysMsg');
-      if (noMsg) noMsg.remove();
-      let tableEl = tbody ? tbody.closest('table') : null;
-      if (!tableEl) {
-        // Table did not exist yet – reload to show it properly.
-        window.location.reload();
-        return;
+
+      if (noMsg) {
+        // Replace empty state with table
+        noMsg.remove();
+        const table = document.createElement('table');
+        table.className = 'table table-sm align-middle mb-0 mcp-keys-table';
+        table.innerHTML = `
+          <thead class="table-secondary">
+            <tr>
+              <th>Label</th>
+              <th>Created</th>
+              <th>Expires</th>
+              <th style="width:80px"></th>
+            </tr>
+          </thead>
+          <tbody id="keyTableBody"></tbody>
+        `;
+        document.querySelector('.card-body').appendChild(table);
+        tbody = document.getElementById('keyTableBody');
       }
+
+      // Create row
       const tr = document.createElement('tr');
       tr.id = 'key-row-' + d.id;
-      tr.innerHTML = '<td class="font-monospace small" data-label="Label">' + (d.label || 'API Key') + '</td>' +
-        '<td class="small text-secondary" data-label="Created">just now</td>' +
-        '<td data-label="Actions"><button class="btn btn-sm btn-outline-danger delete-key-btn" data-key-id="' + d.id + '">' +
-        '<i class="bi bi-trash"></i></button></td>';
+      const now = new Date().toISOString().slice(0, 10);
+      const expiryHtml = expiryDate
+        ? `<span class="mcp-expiry-badge">${expiryDate}</span>`
+        : '<span class="text-secondary">Never</span>';
+      tr.innerHTML = `
+        <td class="font-monospace small" data-label="Label">${d.label || 'API Key'}</td>
+        <td class="small text-secondary" data-label="Created">${now}</td>
+        <td class="small" data-label="Expires">${expiryHtml}</td>
+        <td data-label="Actions">
+          <button class="btn btn-sm btn-outline-danger delete-key-btn" data-key-id="${d.id}" title="Delete key">
+            <i class="bi bi-trash"></i>
+          </button>
+        </td>
+      `;
       tbody.appendChild(tr);
-      tr.querySelector('.delete-key-btn').addEventListener('click', handleDelete);
+      tr.querySelector('.delete-key-btn').addEventListener('click', handleDeleteClick);
     } catch (e) {
       alert('Request failed.');
     }
   });
 
-  // Delete a key
-  const _deleteKeyUrlBase = '{{ url_for("mcp.mcp_api_list_keys") }}/';
-  function handleDelete(evt) {
+  // Delete key button – show confirmation modal
+  function handleDeleteClick(evt) {
+    evt.preventDefault();
     const btn = evt.currentTarget;
     const keyId = btn.dataset.keyId;
-    if (!confirm('Revoke this API key? This cannot be undone.')) return;
-    fetch(_deleteKeyUrlBase + keyId, { method: 'DELETE' })
-      .then(r => r.json())
-      .then(d => {
-        if (!d.ok) { alert(d.error || 'Failed to delete key.'); return; }
-        const row = document.getElementById('key-row-' + keyId);
-        if (row) row.remove();
-      })
-      .catch(() => alert('Request failed.'));
+    const row = document.getElementById('key-row-' + keyId);
+    const label = row.querySelector('[data-label="Label"]')?.textContent || 'this key';
+    document.getElementById('deleteConfirmModal').querySelector('.modal-body p:first-child').textContent =
+      `Are you sure you want to revoke "${label}"?`;
+    pendingDeleteKeyId = keyId;
+    deleteModal.show();
   }
 
+  // Confirm delete – actually delete the key
+  document.getElementById('confirmDeleteBtn').addEventListener('click', async function () {
+    if (!pendingDeleteKeyId) return;
+    const keyId = pendingDeleteKeyId;
+    pendingDeleteKeyId = null;
+    deleteModal.hide();
+
+    try {
+      const r = await fetch('{{ url_for("mcp.mcp_api_list_keys") }}/' + keyId, { method: 'DELETE' });
+      const d = await r.json();
+      if (!d.ok) {
+        alert(d.error || 'Failed to delete key.');
+        return;
+      }
+      const row = document.getElementById('key-row-' + keyId);
+      if (row) row.remove();
+      showCopyToast('API key deleted.');
+    } catch (e) {
+      alert('Request failed.');
+    }
+  });
+
+  // Attach click handlers to existing delete buttons on page load
   document.querySelectorAll('.delete-key-btn').forEach(btn => {
-    btn.addEventListener('click', handleDelete);
+    btn.addEventListener('click', handleDeleteClick);
   });
 }());
 </script>

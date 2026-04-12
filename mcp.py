@@ -1059,7 +1059,13 @@ async def mcp_api_list_keys():
         keys = _load_mcp_api_keys(db)
         # Return metadata only – never expose raw keys or hashes.
         safe = [
-            {"id": k.get("id", ""), "label": k.get("label", ""), "created_at": k.get("created_at", "")} for k in keys
+            {
+                "id": k.get("id", ""),
+                "label": k.get("label", ""),
+                "created_at": k.get("created_at", ""),
+                "expires_at": k.get("expires_at"),
+            }
+            for k in keys
         ]
         return jsonify({"ok": True, "keys": safe})
 
@@ -1080,6 +1086,7 @@ async def mcp_api_create_key():
 
         body = await request.get_json(silent=True) or {}
         label = str(body.get("label", "")).strip()[:128] or "API Key"
+        expires_at = body.get("expires_at")  # Optional ISO 8601 expiry date
 
         raw_key = "smcp_" + secrets.token_urlsafe(32)
         key_id = secrets.token_hex(8)
@@ -1089,10 +1096,11 @@ async def mcp_api_create_key():
                 "label": label,
                 "key_hash": _hash_key(raw_key),
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": expires_at,
             }
         )
         _save_mcp_api_keys(db, keys)
-        return jsonify({"ok": True, "id": key_id, "key": raw_key, "label": label})
+        return jsonify({"ok": True, "id": key_id, "key": raw_key, "label": label, "expires_at": expires_at})
 
     return await _inner()
 
@@ -1149,8 +1157,15 @@ async def mcp_settings_page():
         keys = _load_mcp_api_keys(db)
         enabled = _mcp_enabled(db)
         safe_keys = [
-            {"id": k.get("id", ""), "label": k.get("label", ""), "created_at": k.get("created_at", "")} for k in keys
+            {
+                "id": k.get("id", ""),
+                "label": k.get("label", ""),
+                "created_at": k.get("created_at", ""),
+                "expires_at": k.get("expires_at"),
+            }
+            for k in keys
         ]
-        return await render_template("settings_mcp.html", mcp_keys=safe_keys, mcp_enabled=enabled)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        return await render_template("settings_mcp.html", mcp_keys=safe_keys, mcp_enabled=enabled, now_iso=now_iso)
 
     return await _inner()
