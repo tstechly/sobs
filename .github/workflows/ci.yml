@@ -280,3 +280,78 @@ jobs:
           delete-only-untagged-versions: false
           ignore-versions: '^(latest|v\d+\..*)$'
           min-versions-to-keep: 0
+
+  sobs-release:
+    name: Register Sobs Release Metadata
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      SOBS_URL: ${{ secrets.SOBS_URL }}
+      SOBS_API_KEY: ${{ secrets.SOBS_API_KEY }}
+      SOBS_BASIC_AUTH: ${{ secrets.SOBS_BASIC_AUTH }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Resolve release version
+        id: release_version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=dev-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Register release, Python dependencies, and JS source maps
+        if: env.SOBS_URL != '' && env.SOBS_API_KEY != ''
+        run: |
+          python scripts/register_release_artifacts.py \
+            --base-url "$SOBS_URL" \
+            --app-name sobs \
+            --repo-url "https://github.com/${{ github.repository }}" \
+            --release-version "${{ steps.release_version.outputs.value }}" \
+            --commit-sha "${{ github.sha }}" \
+            --build-id "${{ github.run_id }}" \
+            --environment production \
+            --requirements-file requirements.txt \
+            --artifacts-json '[{"artifactType":"js_sourcemap","name":"rum.min.js.map","contentType":"application/json","storageRef":"static/rum.min.js.map","size":0,"checksumSha256":"","platform":"","architecture":""},{"artifactType":"js_sourcemap","name":"rum.js.map","contentType":"application/json","storageRef":"static/rum.js.map","size":0,"checksumSha256":"","platform":"","architecture":""}]'
+
+      - name: Register npm dependencies
+        if: env.SOBS_URL != '' && env.SOBS_API_KEY != ''
+        run: |
+          DEPS=$(python3 -c "
+          import json
+          lock = json.load(open('package-lock.json'))
+          deps = [
+              {'package': k.replace('node_modules/', '', 1), 'version': v['version'], 'ecosystem': 'npm'}
+              for k, v in (lock.get('packages') or {}).items()
+              if k and k != '' and isinstance(v, dict) and v.get('version')
+          ]
+          print(json.dumps(deps))
+          ")
+          python scripts/register_release_artifacts.py \
+            --base-url "$SOBS_URL" \
+            --app-name sobs \
+            --release-version "${{ steps.release_version.outputs.value }}" \
+            --commit-sha "${{ github.sha }}" \
+            --build-id "${{ github.run_id }}" \
+            --environment production \
+            --dependencies-json "$DEPS" \
+            --dependencies-name "package-lock.json"
+
+      - name: Trigger CVE scan
+        if: env.SOBS_URL != '' && env.SOBS_BASIC_AUTH != ''
+        run: |
+          curl -sf -X POST "${SOBS_URL}/api/enrichment/cve/scan" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Basic ${SOBS_BASIC_AUTH}" \
+            -d '{}' \
+            || echo "CVE scan trigger failed (non-fatal)"
