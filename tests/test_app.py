@@ -20022,8 +20022,10 @@ class TestSelfTelemetry:
         """_shutdown_self_telemetry must not raise when providers are None."""
         monkeypatch.setattr(sobs_app, "_self_tracer_provider", None)
         monkeypatch.setattr(sobs_app, "_self_logger_provider", None)
-        # Should not raise
-        sobs_app._shutdown_self_telemetry()
+        try:
+            sobs_app._shutdown_self_telemetry()
+        except Exception as exc:  # pragma: no cover
+            raise AssertionError(f"_shutdown_self_telemetry raised unexpectedly: {exc}") from exc
 
     # ── RUM self-monitoring ───────────────────────────────────────────────────
 
