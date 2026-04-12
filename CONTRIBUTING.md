@@ -1,5 +1,13 @@
 # Contributing
 
+## Branching Policy (Required)
+
+- Do not commit directly to `main`.
+- Do not push directly to `main`.
+- All work must use this flow: Issue -> new branch -> pull request -> review -> merge.
+- Use branch names like `issue-<number>-<short-description>`.
+- Every PR should reference its issue and include test/validation notes.
+
 ## Local Setup
 
 Use a virtual environment and install development dependencies:
