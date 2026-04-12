@@ -332,7 +332,16 @@
   }
 
   function showCopyToast(msg = 'Copied to clipboard!') {
-    const toast = new bootstrap.Toast(document.getElementById('copyToast'));
+    if (!window.bootstrap) {
+      console.warn('Bootstrap not available for toast notification');
+      return;
+    }
+    const toastEl = document.getElementById('copyToast');
+    let toast = toastEl._toast_instance;
+    if (!toast) {
+      toast = new bootstrap.Toast(toastEl);
+      toastEl._toast_instance = toast;
+    }
     document.getElementById('toastMessage').textContent = msg;
     toast.show();
   }
@@ -383,13 +392,27 @@
     setTimeout(() => { fb.textContent = ''; }, 3000);
   });
 
-  // Modals
-  const labelModal = new bootstrap.Modal(document.getElementById('labelInputModal'));
-  const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+  // Modals (lazy initialization to avoid "bootstrap is not defined" error)
+  let labelModal = null;
+  let deleteModal = null;
   let pendingDeleteKeyId = null;
+
+  function initializeModals() {
+    if (!window.bootstrap) {
+      console.warn('Bootstrap not available yet for modals');
+      return;
+    }
+    if (!labelModal) {
+      labelModal = new bootstrap.Modal(document.getElementById('labelInputModal'));
+    }
+    if (!deleteModal) {
+      deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+    }
+  }
 
   // Generate key button – show label input modal
   document.getElementById('generateKeyBtn').addEventListener('click', function () {
+    initializeModals();
     document.getElementById('keyLabelInput').value = '';
     document.getElementById('keyExpiryInput').value = '';
     labelModal.show();
@@ -413,6 +436,7 @@
         return;
       }
 
+      initializeModals();
       labelModal.hide();
 
       // Show the raw key once.
@@ -478,6 +502,7 @@
     document.getElementById('deleteConfirmModal').querySelector('.modal-body p:first-child').textContent =
       `Are you sure you want to revoke "${label}"?`;
     pendingDeleteKeyId = keyId;
+    initializeModals();
     deleteModal.show();
   }
 
@@ -486,6 +511,7 @@
     if (!pendingDeleteKeyId) return;
     const keyId = pendingDeleteKeyId;
     pendingDeleteKeyId = null;
+    initializeModals();
     deleteModal.hide();
 
     try {

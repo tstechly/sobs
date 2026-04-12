@@ -73,27 +73,13 @@ def _clear_mcp_keys(db):
 
 
 @pytest.fixture(autouse=True)
-def _clean_mcp_state(request):
-    """Clear MCP keys and reset MCP enabled state after each test.
-
-    Uses a finalizer instead of yielding at the start to avoid interfering
-    with class-based setup_method/teardown_method patterns.
-    """
-
-    def cleanup():
-        db = _get_db()
-        _clear_mcp_keys(db)
-        # Ensure MCP is enabled by default for tests (some tests disable it)
-        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
-
-    request.addfinalizer(cleanup)
-
-    # Also run cleanup before the first test in each session
+def _clean_mcp_state():
+    """Clear MCP keys and reset MCP enabled state before each test."""
     db = _get_db()
-    if not hasattr(_clean_mcp_state, "_init_done"):
-        _clear_mcp_keys(db)
-        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
-        _clean_mcp_state._init_done = True
+    _clear_mcp_keys(db)
+    # Ensure MCP is enabled by default for tests (some tests disable it)
+    sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +643,94 @@ class TestMcpKeyManagementApi:
         data = json.loads(await r.get_data())
         for key_entry in data["keys"]:
             assert "key_hash" not in key_entry
+        _clear_mcp_keys(db)
+
+    async def test_create_key_with_expiry_date(self, client):
+        db = _get_db()
+        _clear_mcp_keys(db)
+        expiry_date = "2025-12-31T23:59:59Z"
+        r = await client.post(
+            "/api/mcp/keys",
+            json={"label": "expiring-key", "expires_at": expiry_date},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        assert "key" in data
+        assert data["expires_at"] == expiry_date
+        assert data["label"] == "expiring-key"
+        _clear_mcp_keys(db)
+
+    async def test_list_keys_includes_expiry_date(self, client):
+        db = _get_db()
+        _clear_mcp_keys(db)
+        expiry_date = "2025-12-31T23:59:59Z"
+        # Create key via API
+        r = await client.post(
+            "/api/mcp/keys",
+            json={"label": "test-expiry", "expires_at": expiry_date},
+        )
+        data = json.loads(await r.get_data())
+        key_id = data["id"]
+        # List keys and verify expiry is included
+        r2 = await client.get("/api/mcp/keys")
+        data2 = json.loads(await r2.get_data())
+        found = False
+        for key_entry in data2["keys"]:
+            if key_entry["id"] == key_id:
+                assert key_entry["expires_at"] == expiry_date
+                found = True
+                break
+        assert found, "Created key not found in list"
+        _clear_mcp_keys(db)
+
+    async def test_create_key_without_expiry_date_is_optional(self, client):
+        db = _get_db()
+        _clear_mcp_keys(db)
+        # Create key without expires_at
+        r = await client.post(
+            "/api/mcp/keys",
+            json={"label": "no-expiry-key"},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        # expires_at should be None or null
+        assert data.get("expires_at") is None
+        # Verify in list response too
+        r2 = await client.get("/api/mcp/keys")
+        data2 = json.loads(await r2.get_data())
+        found = False
+        for key_entry in data2["keys"]:
+            if key_entry["id"] == data["id"]:
+                assert key_entry.get("expires_at") is None
+                found = True
+                break
+        assert found, "Created key not found in list"
+        _clear_mcp_keys(db)
+
+    async def test_settings_page_displays_expiry_dates(self, client):
+        db = _get_db()
+        _clear_mcp_keys(db)
+        # Create a key with expiry
+        _create_mcp_key(db, "test-key")
+        sobs_mcp._save_mcp_api_keys(
+            db,
+            [
+                {
+                    "id": "test-id",
+                    "label": "key-with-expiry",
+                    "key_hash": "dummy",
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "expires_at": "2025-12-31T23:59:59Z",
+                }
+            ],
+        )
+        r = await client.get("/settings/mcp")
+        assert r.status_code == 200
+        html = (await r.get_data()).decode()
+        assert "key-with-expiry" in html
+        assert "2025-12-31" in html
         _clear_mcp_keys(db)
 
 
