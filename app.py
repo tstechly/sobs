@@ -13422,6 +13422,49 @@ def _load_work_item_links_for_ref_ids(db: ChDbConnection, ref_ids: list[str]) ->
 @require_basic_auth
 async def view_errors():
     db = get_db()
+    grouped_trace_chunk_size = 200
+    hydrate_key_chunk_size = 200
+
+    def _build_error_stub_from_narrow(row: dict, resolved_flag: bool) -> dict:
+        ts = str(row.get("Timestamp", ""))
+        service_name = str(row.get("ServiceName", ""))
+        trace_id = str(row.get("TraceId", ""))
+        span_id = str(row.get("SpanId", ""))
+        err_type = str(row.get("ErrorType", "") or "Error")
+        message = str(row.get("ErrorMessage", ""))
+        raw_body = str(row.get("Body", ""))
+        message_summary, summary_from_json = _extract_structured_error_summary(message, raw_body)
+        item_id = str(row.get("ErrorId", "")) or _error_id(ts, service_name, err_type, message, trace_id, span_id)
+        return {
+            "id": item_id,
+            "ts": ts,
+            "service": service_name,
+            "err_type": err_type,
+            "message": message,
+            "message_summary": message_summary,
+            "summary_from_json": summary_from_json,
+            "message_is_json": False,
+            "message_pretty_json": "",
+            "raw_body": raw_body,
+            "raw_body_is_json": False,
+            "raw_body_pretty_json": "",
+            "stack": "",
+            "stack_is_json": False,
+            "stack_pretty_json": "",
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "url": "",
+            "error_source": "",
+            "page_title": "",
+            "viewport": "",
+            "artifact_type": "",
+            "artifact_id": "",
+            "artifact_url": "",
+            "replay_id": "",
+            "replay_url": "",
+            "resolved": resolved_flag,
+        }
+
     selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
     service = selected_services[0] if selected_services else ""
     group_by = request.args.get("group_by", "").strip().lower()
@@ -13463,7 +13506,9 @@ async def view_errors():
             re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
             if re2_error:
                 error_msg = re2_error
-    resolved_ids = _get_resolved_error_ids(db)
+    resolved_ids: set[str] = set()
+    if resolved not in ("0", "1"):
+        resolved_ids = _get_resolved_error_ids(db)
     where_parts = []
     where_params = []
     if selected_services:
@@ -13489,8 +13534,8 @@ async def view_errors():
         error_id_sql = (
             "lower(hex(MD5(concat("
             "toString(Timestamp), '|', ServiceName, '|', "
-            "if(LogAttributes['exception.type'] != '', LogAttributes['exception.type'], 'Error'), '|', "
-            "if(LogAttributes['exception.message'] != '', LogAttributes['exception.message'], Body), '|', "
+            "if(mapContains(LogAttributes, 'exception.type'), LogAttributes['exception.type'], 'Error'), '|', "
+            "if(mapContains(LogAttributes, 'exception.message'), LogAttributes['exception.message'], Body), '|', "
             "TraceId, '|', SpanId"
             "))))"
         )
@@ -13546,12 +13591,20 @@ async def view_errors():
             f"SELECT COUNT(*) FROM ({grouped_aggregate_sql})",
             where_params + [probe_limit],
         ).fetchone()[0]
+        sort_direction = "ASC" if sort_dir == "asc" else "DESC"
+        page_sql = f"{grouped_aggregate_sql} ORDER BY {sort_col} {sort_direction} LIMIT ? OFFSET ?"
         group_rows = db.execute(
-            f"{grouped_aggregate_sql} ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'} LIMIT ? OFFSET ?",
+            page_sql,
             where_params + [probe_limit, limit, offset],
         ).fetchall()
         errors = []
+        visible_group_tuples: list[tuple[str, str, str]] = []
         for row in group_rows:
+            group_tuple = (
+                str(row["GroupService"] or ""),
+                str(row["GroupType"] or ""),
+                str(row["GroupMessage"] or ""),
+            )
             item = _build_error_item(
                 {
                     "Timestamp": row["RepTimestamp"],
@@ -13571,23 +13624,48 @@ async def view_errors():
             item["count"] = int(row["Count"] or 0)
             item["first_seen"] = str(row["FirstSeen"] or item["ts"])
             item["last_seen"] = str(row["LastSeen"] or item["ts"])
+            item["group_tuple"] = group_tuple
+            visible_group_tuples.append(group_tuple)
             errors.append(item)
 
         if errors:
-            trace_ids_by_group: dict[tuple[str, str, str], list[str]] = {}
-            for row in db.execute(grouped_probe_sql, where_params + [probe_limit]).fetchall():
-                probe_item = _build_error_item(dict(row))
-                group_key = _error_group_key(probe_item)
-                trace_value = str(probe_item.get("trace_id") or "").strip()
-                if not trace_value:
+            unique_group_tuples: list[tuple[str, str, str]] = []
+            seen_group_tuples: set[tuple[str, str, str]] = set()
+            for group_tuple in visible_group_tuples:
+                if group_tuple in seen_group_tuples:
                     continue
-                trace_bucket = trace_ids_by_group.setdefault(group_key, [])
-                if trace_value not in trace_bucket:
-                    trace_bucket.append(trace_value)
+                seen_group_tuples.add(group_tuple)
+                unique_group_tuples.append(group_tuple)
+
+            trace_group_params: list[Any] = [*where_params, probe_limit]
+            trace_ids_by_group: dict[tuple[str, str, str], list[str]] = {}
+            for chunk_start in range(0, len(unique_group_tuples), grouped_trace_chunk_size):
+                group_chunk = unique_group_tuples[chunk_start : chunk_start + grouped_trace_chunk_size]
+                chunk_params = list(trace_group_params)
+                trace_group_placeholders = ", ".join(["(?, ?, ?)"] * len(group_chunk))
+                for group_service, group_type, group_message in group_chunk:
+                    chunk_params.extend([group_service, group_type, group_message])
+
+                grouped_trace_sql = (
+                    "SELECT GroupService, GroupType, GroupMessage, "
+                    "arrayStringConcat(groupUniqArray(64)(TraceId), ',') AS TraceIdsCsv "
+                    f"FROM ({grouped_probe_sql}) "
+                    f"WHERE (GroupService, GroupType, GroupMessage) IN ({trace_group_placeholders}) "
+                    "GROUP BY GroupService, GroupType, GroupMessage"
+                )
+                for row in db.execute(grouped_trace_sql, chunk_params).fetchall():
+                    group_tuple = (
+                        str(row["GroupService"] or ""),
+                        str(row["GroupType"] or ""),
+                        str(row["GroupMessage"] or ""),
+                    )
+                    trace_ids_by_group[group_tuple] = [
+                        _hex(value).strip() for value in str(row["TraceIdsCsv"] or "").split(",") if _hex(value).strip()
+                    ]
 
             for item in errors:
-                group_key = _error_group_key(item)
-                trace_values = list(trace_ids_by_group.get(group_key, []))
+                group_tuple = item.pop("group_tuple", ("", "", ""))
+                trace_values = list(trace_ids_by_group.get(group_tuple, []))
                 primary_trace = str(item.get("trace_id") or "").strip()
                 if primary_trace and primary_trace not in trace_values:
                     trace_values.insert(0, primary_trace)
@@ -13601,8 +13679,90 @@ async def view_errors():
             f"FROM ({ERROR_SOURCES_SQL}) {where_sql} "
             f"{order_clause} LIMIT ? OFFSET ?"
         )
+        use_resolved_sql_path = resolved in ("0", "1")
+        if use_resolved_sql_path:
+            error_id_expr = (
+                "lower(hex(MD5(concat("
+                "toString(Timestamp), '|', ServiceName, '|', "
+                "if(mapContains(LogAttributes, 'exception.type'), LogAttributes['exception.type'], 'Error'), '|', "
+                "if(mapContains(LogAttributes, 'exception.message'), LogAttributes['exception.message'], Body), '|', "
+                "TraceId, '|', SpanId"
+                "))))"
+            )
+            poc_where_sql = where_sql
+            poc_where_params: list[Any] = list(where_params)
+            if resolved == "1":
+                resolved_condition = f"{error_id_expr} IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+                poc_where_sql = (
+                    f"{poc_where_sql} AND {resolved_condition}" if poc_where_sql else f"WHERE {resolved_condition}"
+                )
+            elif resolved == "0":
+                resolved_condition = (
+                    f"{error_id_expr} NOT IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+                )
+                poc_where_sql = (
+                    f"{poc_where_sql} AND {resolved_condition}" if poc_where_sql else f"WHERE {resolved_condition}"
+                )
+            narrow_source_sql = (
+                "SELECT "
+                "Timestamp, ServiceName, TraceId, SpanId, "
+                f"{error_id_expr} AS ErrorId "
+                f"FROM ({ERROR_SOURCES_SQL}) {poc_where_sql} "
+                f"{order_clause} LIMIT ? OFFSET ?"
+            )
 
-        if resolved not in ("0", "1"):
+            page_rows: list[dict] = []
+            count_sql = f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {poc_where_sql}"
+            total = db.execute(
+                count_sql,
+                poc_where_params,
+            ).fetchone()[0]
+            page_rows = [dict(r) for r in db.execute(narrow_source_sql, poc_where_params + [limit, offset]).fetchall()]
+            details_by_id: dict[str, dict] = {}
+            if page_rows:
+                detail_key_tuples: list[tuple[Any, Any, Any, Any]] = []
+                seen_detail_keys: set[tuple[Any, Any, Any, Any]] = set()
+                for row in page_rows:
+                    detail_key = (
+                        row.get("Timestamp"),
+                        row.get("ServiceName"),
+                        row.get("TraceId"),
+                        row.get("SpanId"),
+                    )
+                    if detail_key in seen_detail_keys:
+                        continue
+                    seen_detail_keys.add(detail_key)
+                    detail_key_tuples.append(detail_key)
+                for chunk_start in range(0, len(detail_key_tuples), hydrate_key_chunk_size):
+                    detail_chunk = detail_key_tuples[chunk_start : chunk_start + hydrate_key_chunk_size]
+                    detail_params: list[Any] = []
+                    tuple_placeholders = ", ".join(["(?, ?, ?, ?)"] * len(detail_chunk))
+                    for ts_val, service_val, trace_val, span_val in detail_chunk:
+                        detail_params.extend([ts_val, service_val, trace_val, span_val])
+                    detail_sql = (
+                        "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
+                        f"FROM ({ERROR_SOURCES_SQL}) "
+                        f"WHERE (Timestamp, ServiceName, TraceId, SpanId) IN ({tuple_placeholders})"
+                    )
+                    for drow in db.execute(detail_sql, detail_params).fetchall():
+                        detail_item = _build_error_item(dict(drow))
+                        details_by_id[detail_item["id"]] = detail_item
+            errors = []
+            for row in page_rows:
+                row_id = str(row.get("ErrorId", ""))
+                if resolved == "1":
+                    resolved_flag = True
+                elif resolved == "0":
+                    resolved_flag = False
+                else:
+                    resolved_flag = row_id in resolved_ids
+                item = _build_error_stub_from_narrow(row, resolved_flag)
+                detail_item = details_by_id.get(item["id"])
+                if detail_item:
+                    detail_item["resolved"] = resolved_flag
+                    item = detail_item
+                errors.append(item)
+        else:
             total = db.execute(
                 f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {where_sql}",
                 where_params,
@@ -13613,26 +13773,6 @@ async def view_errors():
                 item = _build_error_item(dict(row))
                 item["resolved"] = item["id"] in resolved_ids
                 errors.append(item)
-        else:
-            # Keep behavior identical while avoiding full in-memory materialization.
-            target_resolved = resolved == "1"
-            scan_batch = max(200, limit)
-            scan_offset = 0
-            total = 0
-            errors = []
-            while True:
-                batch = db.execute(source_sql, where_params + [scan_batch, scan_offset]).fetchall()
-                if not batch:
-                    break
-                for row in batch:
-                    item = _build_error_item(dict(row))
-                    item["resolved"] = item["id"] in resolved_ids
-                    if item["resolved"] != target_resolved:
-                        continue
-                    if total >= offset and len(errors) < limit:
-                        errors.append(item)
-                    total += 1
-                scan_offset += scan_batch
 
     now = time.time()
     services: list[str] = []
