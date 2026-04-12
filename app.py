@@ -57,6 +57,7 @@ from quart import (
 )
 
 import masking as _masking
+import mcp as _mcp
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -544,6 +545,7 @@ class BasePathMiddleware:
 
 
 app.asgi_app = BasePathMiddleware(app.asgi_app, BASE_PATH)  # type: ignore[method-assign]
+app.register_blueprint(_mcp.mcp_bp)
 
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 DB_PATH = os.path.join(DATA_DIR, "sobs.chdb")
@@ -1201,6 +1203,7 @@ CREATE TABLE IF NOT EXISTS sobs_tag_rules (
     MatchAttrKey String CODEC(ZSTD(1)),
     TagKey String CODEC(ZSTD(1)),
     TagValue String CODEC(ZSTD(1)),
+    ConditionsJson String DEFAULT '' CODEC(ZSTD(1)),
     IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
     Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
 ) ENGINE = ReplacingMergeTree(Version)
@@ -1915,6 +1918,8 @@ _errors_cache_lock = threading.Lock()
 _errors_services_cache: dict[str, Any] = {"expires_at": 0.0, "services": []}
 _summary_stats_cache_lock = threading.Lock()
 _summary_stats_cache: dict[str, Any] = {"expires_at": 0.0, "data": {}}
+_ai_filter_metadata_cache_lock = threading.Lock()
+_ai_filter_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
 
 WRITE_QUEUE_MAX = int(os.environ.get("SOBS_WRITE_QUEUE_MAX", 5000))
 WRITE_BATCH_MAX = int(os.environ.get("SOBS_WRITE_BATCH_MAX", 200))
@@ -1924,6 +1929,9 @@ WORK_ITEMS_PAGE_CACHE_TTL_SEC = int(os.environ.get("SOBS_WORK_ITEMS_PAGE_CACHE_T
 WORK_ITEMS_FILTER_CACHE_TTL_SEC = int(os.environ.get("SOBS_WORK_ITEMS_FILTER_CACHE_TTL_SEC", "30"))
 ERRORS_SERVICES_CACHE_TTL_SEC = int(os.environ.get("SOBS_ERRORS_SERVICES_CACHE_TTL_SEC", "30"))
 SUMMARY_STATS_CACHE_TTL_SEC = int(os.environ.get("SOBS_SUMMARY_STATS_CACHE_TTL_SEC", "60"))
+RUM_SESSION_DETAIL_EVENT_CAP = int(os.environ.get("SOBS_RUM_SESSION_DETAIL_EVENT_CAP", "200"))
+AI_FILTER_METADATA_CACHE_TTL_SEC = int(os.environ.get("SOBS_AI_FILTER_METADATA_CACHE_TTL_SEC", "20"))
+AI_FILTER_METADATA_SAMPLE_ROWS = int(os.environ.get("SOBS_AI_FILTER_METADATA_SAMPLE_ROWS", "10000"))
 
 
 @dataclass
@@ -1992,6 +2000,7 @@ def _ensure_post_schema_state(db: ChDbConnection) -> None:
     _ensure_notification_schema(db)
     _ensure_ai_memory_schema(db)
     _ensure_github_work_item_schema(db)
+    _ensure_tag_rule_schema(db)
     _ensure_raw_metrics_retention(db)
     _prime_log_attr_key_cache(db)
     _seed_app_release_registry_from_env(db)
@@ -2143,6 +2152,14 @@ def _ensure_github_work_item_schema(db: ChDbConnection) -> None:
             "CopilotAssignmentStatus LowCardinality(String) DEFAULT 'not_requested'"
         ),
         "ALTER TABLE sobs_github_work_items ADD COLUMN IF NOT EXISTS CopilotAssignmentReason String DEFAULT ''",
+    ]
+    for statement in migration_statements:
+        db.execute(statement)
+
+
+def _ensure_tag_rule_schema(db: ChDbConnection) -> None:
+    migration_statements = [
+        "ALTER TABLE sobs_tag_rules ADD COLUMN IF NOT EXISTS ConditionsJson String DEFAULT ''",
     ]
     for statement in migration_statements:
         db.execute(statement)
@@ -2520,8 +2537,187 @@ _AI_SETTING_KEYS = (
     "ai.github_copilot_base_branch",
     "ai.github_copilot_custom_instructions",
     "ai.system_prompt",
+    "ai.model_pricing",
+    "ai.model_pricing_confirmed",
 )
 _AI_SENSITIVE_SETTING_KEYS = frozenset(("ai.api_key", "ai.github_token"))
+
+# Default per-model pricing in USD per 1M tokens. Keys are lowercase model names.
+# Users can override or extend this table via Settings → AI Configuration.
+_DEFAULT_AI_PRICING: dict[str, dict[str, float]] = {
+    # OpenAI
+    "gpt-4o": {"in": 2.50, "out": 10.00},
+    "gpt-4o-mini": {"in": 0.15, "out": 0.60},
+    "gpt-4-turbo": {"in": 10.00, "out": 30.00},
+    "gpt-4": {"in": 30.00, "out": 60.00},
+    "gpt-3.5-turbo": {"in": 0.50, "out": 1.50},
+    "o1": {"in": 15.00, "out": 60.00},
+    "o1-mini": {"in": 3.00, "out": 12.00},
+    "o3-mini": {"in": 1.10, "out": 4.40},
+    # Anthropic
+    "claude-3-5-sonnet-20241022": {"in": 3.00, "out": 15.00},
+    "claude-3-5-sonnet": {"in": 3.00, "out": 15.00},
+    "claude-3-5-haiku": {"in": 0.80, "out": 4.00},
+    "claude-3-opus": {"in": 15.00, "out": 75.00},
+    "claude-3-sonnet": {"in": 3.00, "out": 15.00},
+    "claude-3-haiku": {"in": 0.25, "out": 1.25},
+    # Google
+    "gemini-1.5-pro": {"in": 1.25, "out": 5.00},
+    "gemini-1.5-flash": {"in": 0.075, "out": 0.30},
+    "gemini-2.0-flash": {"in": 0.10, "out": 0.40},
+    # Meta / open source (inference cost estimate)
+    "llama-3.1-70b": {"in": 0.90, "out": 0.90},
+    "llama-3.1-8b": {"in": 0.20, "out": 0.20},
+    # Mistral
+    "mistral-large": {"in": 3.00, "out": 9.00},
+    "mistral-small": {"in": 0.20, "out": 0.60},
+}
+
+_AI_PRICING_GENERIC_DEFAULT_KEY = "gpt-4o"
+_AI_PRICING_INFERENCE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("4o-mini",), "gpt-4o-mini"),
+    (("4o",), "gpt-4o"),
+    (("3.5",), "gpt-3.5-turbo"),
+    (("turbo",), "gpt-4-turbo"),
+    (("o3-mini",), "o3-mini"),
+    (("o1-mini",), "o1-mini"),
+    (("o1",), "o1"),
+    (("haiku",), "claude-3-5-haiku"),
+    (("sonnet",), "claude-3-5-sonnet"),
+    (("opus",), "claude-3-opus"),
+    (("claude",), "claude-3-5-sonnet"),
+    (("2.0-flash", "2-flash"), "gemini-2.0-flash"),
+    (("1.5-flash", "flash-lite", "flash"), "gemini-1.5-flash"),
+    (("1.5-pro", "pro"), "gemini-1.5-pro"),
+    (("gemini",), "gemini-1.5-flash"),
+    (("70b",), "llama-3.1-70b"),
+    (("8b",), "llama-3.1-8b"),
+    (("llama",), "llama-3.1-8b"),
+    (("large",), "mistral-large"),
+    (("small",), "mistral-small"),
+    (("mistral",), "mistral-small"),
+)
+
+
+def _normalize_ai_model_name(model: Any) -> str:
+    return str(model or "").strip().lower()
+
+
+def _copy_ai_pricing_entry(prices: dict[str, float]) -> dict[str, float]:
+    return {"in": float(prices["in"]), "out": float(prices["out"])}
+
+
+def _coerce_ai_pricing_entry(prices: Any) -> dict[str, float] | None:
+    if not isinstance(prices, dict) or "in" not in prices or "out" not in prices:
+        return None
+    try:
+        return {"in": float(prices["in"]), "out": float(prices["out"])}
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_saved_ai_pricing(db: "ChDbConnection") -> dict[str, dict[str, float]]:
+    saved: dict[str, dict[str, float]] = {}
+    raw = _load_ai_setting(db, "ai.model_pricing", "").strip()
+    if not raw:
+        return saved
+    try:
+        user_pricing = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return saved
+    if not isinstance(user_pricing, dict):
+        return saved
+    for model_key, prices in user_pricing.items():
+        normalized_key = _normalize_ai_model_name(model_key)
+        entry = _coerce_ai_pricing_entry(prices)
+        if normalized_key and entry:
+            saved[normalized_key] = entry
+    return saved
+
+
+def _load_confirmed_ai_pricing_models(db: "ChDbConnection") -> set[str]:
+    raw = _load_ai_setting(db, "ai.model_pricing_confirmed", "").strip()
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return set()
+    if not isinstance(parsed, list):
+        return set()
+    confirmed: set[str] = set()
+    for model in parsed:
+        model_key = _normalize_ai_model_name(model)
+        if model_key:
+            confirmed.add(model_key)
+    return confirmed
+
+
+def _infer_ai_pricing_for_model(model: str) -> dict[str, float]:
+    normalized = _normalize_ai_model_name(model)
+    if not normalized:
+        return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[_AI_PRICING_GENERIC_DEFAULT_KEY])
+    if normalized in _DEFAULT_AI_PRICING:
+        return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[normalized])
+    for known_key, prices in _DEFAULT_AI_PRICING.items():
+        if normalized in known_key or known_key in normalized:
+            return _copy_ai_pricing_entry(prices)
+    for needles, base_key in _AI_PRICING_INFERENCE_RULES:
+        if any(needle in normalized for needle in needles):
+            return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[base_key])
+    return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[_AI_PRICING_GENERIC_DEFAULT_KEY])
+
+
+def _load_observed_ai_models(db: "ChDbConnection", limit: int = 200) -> list[str]:
+    safe_limit = max(1, min(int(limit), 500))
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT SpanAttributes['gen_ai.request.model'] AS model "
+            "FROM otel_traces "
+            f"WHERE {_AI_SPAN_CONDITION} AND SpanAttributes['gen_ai.request.model'] != '' "
+            f"ORDER BY model LIMIT {safe_limit}"
+        ).fetchall()
+    except Exception:
+        return []
+    normalized_models = []
+    seen: set[str] = set()
+    for row in rows:
+        model_key = _normalize_ai_model_name(row[0] if row else "")
+        if model_key and model_key not in seen:
+            seen.add(model_key)
+            normalized_models.append(model_key)
+    return normalized_models
+
+
+def _load_ai_pricing_with_sources(db: "ChDbConnection") -> tuple[dict[str, dict[str, float]], dict[str, str]]:
+    merged: dict[str, dict[str, float]] = {
+        model_key: _copy_ai_pricing_entry(prices) for model_key, prices in _DEFAULT_AI_PRICING.items()
+    }
+    sources: dict[str, str] = {model_key: "default" for model_key in _DEFAULT_AI_PRICING}
+
+    for model_key in _load_observed_ai_models(db):
+        if model_key not in merged:
+            merged[model_key] = _infer_ai_pricing_for_model(model_key)
+            sources[model_key] = "inferred"
+
+    confirmed_models = _load_confirmed_ai_pricing_models(db)
+    for model_key, prices in _load_saved_ai_pricing(db).items():
+        merged[model_key] = prices
+        if sources.get(model_key) == "inferred":
+            if model_key in confirmed_models:
+                sources[model_key] = "confirmed"
+        elif model_key not in sources:
+            sources[model_key] = "custom"
+
+    return merged, sources
+
+
+def _load_ai_pricing(db: "ChDbConnection") -> dict[str, dict[str, float]]:
+    """Return merged model pricing including defaults, observed models, and user overrides."""
+    merged, _sources = _load_ai_pricing_with_sources(db)
+    return merged
+
+
 _AI_ENV_OVERRIDES: dict[str, tuple[str, str]] = {
     "ai.endpoint_url": ("SOBS_AI_ENDPOINT_URL", "SOBS_AI_ENDPOINT_URL_FILE"),
     "ai.model": ("SOBS_AI_MODEL", "SOBS_AI_MODEL_FILE"),
@@ -2879,6 +3075,9 @@ def _kubernetes_enabled() -> bool:
         return False
 
 
+MOBILE_BREAKPOINT_MAX = "575.98px"
+
+
 @app.context_processor
 def inject_feature_flags() -> dict:
     try:
@@ -2888,6 +3087,7 @@ def inject_feature_flags() -> dict:
             "query_enabled": _query_page_enabled(),
             "kubernetes_enabled": _kubernetes_enabled(),
             "raise_issue_mask_toggle_effective": raise_issue_mask_toggle_effective,
+            "mobile_breakpoint_max": MOBILE_BREAKPOINT_MAX,
             "sobs_version": BUILD_VERSION or "dev",
         }
     except Exception:
@@ -2895,6 +3095,7 @@ def inject_feature_flags() -> dict:
             "query_enabled": False,
             "kubernetes_enabled": False,
             "raise_issue_mask_toggle_effective": False,
+            "mobile_breakpoint_max": MOBILE_BREAKPOINT_MAX,
             "sobs_version": BUILD_VERSION or "dev",
         }
 
@@ -7986,6 +8187,18 @@ def _error_id(ts: str, service: str, err_type: str, message: str, trace_id: str,
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _error_id_sql_expr() -> str:
+    """Return the shared SQL expression for stable ErrorId derivation."""
+    return (
+        "lower(hex(MD5(concat("
+        "toString(Timestamp), '|', ServiceName, '|', "
+        "if(mapContains(LogAttributes, 'exception.type'), LogAttributes['exception.type'], 'Error'), '|', "
+        "if(mapContains(LogAttributes, 'exception.message'), LogAttributes['exception.message'], Body), '|', "
+        "TraceId, '|', SpanId"
+        "))))"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal write-table allowlist
 # ---------------------------------------------------------------------------
@@ -9744,14 +9957,26 @@ async def create_release_artifact_meta(release_id: str):
 
 
 ERROR_SOURCES_SQL = """
-SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes
+SELECT
+    Timestamp,
+    ServiceName,
+    TraceId,
+    SpanId,
+    toValidUTF8(Body) AS Body,
+    mapApply((k, v) -> (toValidUTF8(k), toValidUTF8(v)), LogAttributes) AS LogAttributes
 FROM otel_logs
 WHERE EventName = 'exception'
    OR SeverityNumber >= 17
    OR SeverityText IN ('ERROR', 'CRITICAL', 'FATAL')
    OR LogAttributes['exception.type'] != ''
 UNION ALL
-SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes
+SELECT
+    Timestamp,
+    ServiceName,
+    TraceId,
+    SpanId,
+    toValidUTF8(Body) AS Body,
+    mapApply((k, v) -> (toValidUTF8(k), toValidUTF8(v)), LogAttributes) AS LogAttributes
 FROM hyperdx_sessions
 WHERE EventName IN ('error', 'unhandledrejection', 'exception')
    OR SeverityNumber >= 17
@@ -10054,17 +10279,28 @@ def _fmt_bytes(n: int | None) -> str:
 @require_basic_auth
 async def summary():
     db = get_db()
-    resolved_ids = _get_resolved_error_ids(db)
-    error_items = []
+    error_id_sql = _error_id_sql_expr()
+    unresolved_condition = f"{error_id_sql} NOT IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+
+    recent_errors = []
     for row in db.execute(
-        f"SELECT * FROM ({ERROR_SOURCES_SQL})"
-        " WHERE Timestamp >= now() - INTERVAL 48 HOUR"
-        " ORDER BY Timestamp DESC"
-        " LIMIT 500"
+        "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
+        f"FROM ({ERROR_SOURCES_SQL}) "
+        "WHERE Timestamp >= now() - INTERVAL 48 HOUR "
+        f"AND {unresolved_condition} "
+        "ORDER BY Timestamp DESC "
+        "LIMIT 5"
     ).fetchall():
         item = _build_error_item(dict(row))
-        item["resolved"] = item["id"] in resolved_ids
-        error_items.append(item)
+        recent_errors.append(
+            {
+                "id": item["id"],
+                "ts": item["ts"],
+                "service": item["service"],
+                "err_type": item["err_type"],
+                "message": item["message"],
+            }
+        )
 
     _now = time.monotonic()
     with _summary_stats_cache_lock:
@@ -10072,20 +10308,18 @@ async def summary():
             _summary_stats_cache["data"] if _summary_stats_cache["expires_at"] > _now else {}
         )
     if not _cached_stats:
-        all_error_rows = db.execute(f"SELECT * FROM ({ERROR_SOURCES_SQL})").fetchall()
-        unresolved_total = 0
-        for row in all_error_rows:
-            error_id = _build_error_item(dict(row))["id"]
-            if error_id not in resolved_ids:
-                unresolved_total += 1
+        errors_total = db.execute(f"SELECT count() AS cnt FROM ({ERROR_SOURCES_SQL})").fetchone()
+        unresolved_total_row = db.execute(
+            f"SELECT count() AS cnt FROM ({ERROR_SOURCES_SQL}) WHERE {unresolved_condition}"
+        ).fetchone()
 
         _cached_stats = {
             "logs": _active_part_rows(db, "otel_logs"),
             "spans": _active_part_rows(db, "otel_traces"),
             "rum": _active_part_rows(db, "hyperdx_sessions"),
             "ai": db.execute("SELECT COUNT(*) FROM otel_traces " f"WHERE {_AI_SPAN_CONDITION}").fetchone()[0],
-            "errors_total": len(all_error_rows),
-            "errors": unresolved_total,
+            "errors_total": int(errors_total["cnt"]) if errors_total else 0,
+            "errors": int(unresolved_total_row["cnt"]) if unresolved_total_row else 0,
             "services": [
                 r[0]
                 for r in db.execute(
@@ -10101,18 +10335,7 @@ async def summary():
     stats = {
         **_cached_stats,
     }
-    # Recent errors (last 5)
-    recent_errors = [
-        {
-            "id": item["id"],
-            "ts": item["ts"],
-            "service": item["service"],
-            "err_type": item["err_type"],
-            "message": item["message"],
-        }
-        for item in error_items
-        if not item["resolved"]
-    ][:5]
+
     # Recent logs (last 10)
     recent_logs = []
     for r in db.execute(
@@ -10326,6 +10549,129 @@ def _compute_advanced_log_analysis(rows: list[dict], level_stats: dict, service_
 # ---------------------------------------------------------------------------
 # Web UI – Logs
 # ---------------------------------------------------------------------------
+def _validate_re2_pattern(db: "ChDbConnection", pattern: str) -> str | None:
+    value = str(pattern or "").strip()
+    if not value:
+        return None
+    try:
+        # chDB uses RE2 for match(), which is stricter than Python's re.
+        db.execute("SELECT match('', ?)", [value]).fetchone()
+    except Exception as exc:
+        msg = str(exc).strip()
+        if ": while executing function" in msg:
+            msg = msg.split(": while executing function", 1)[0].strip()
+        return f"Regex error: {msg}"
+    return None
+
+
+def _split_regex_filter_expression_terms(expression: str) -> list[str]:
+    """Split expression by unescaped && while preserving escaped literal \\&& tokens."""
+    parts: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(expression)
+    while i < n:
+        if i + 1 < n and expression[i] == "&" and expression[i + 1] == "&":
+            backslashes = 0
+            j = i - 1
+            while j >= 0 and expression[j] == "\\":
+                backslashes += 1
+                j -= 1
+            if backslashes % 2 == 0:
+                parts.append("".join(buf).strip())
+                buf = []
+                i += 2
+                continue
+        buf.append(expression[i])
+        i += 1
+    parts.append("".join(buf).strip())
+    return parts
+
+
+def _unescape_regex_filter_term(term: str) -> str:
+    """Interpret \\&& as literal && within a regex term."""
+    return term.replace(r"\&&", "&&")
+
+
+def _parse_regex_filter_expression(raw: str) -> tuple[list[str], list[str], str | None]:
+    """Parse `include && !exclude` style regex expressions from filter inputs."""
+    expression = str(raw or "").strip()
+    if not expression:
+        return [], [], None
+
+    parts = _split_regex_filter_expression_terms(expression)
+    if not parts or any(not part for part in parts):
+        return [], [], "Regex error: invalid expression around '&&'"
+
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
+    for part in parts:
+        negate = part.startswith("!")
+        token = part[1:].strip() if negate else part
+        token = _unescape_regex_filter_term(token)
+        if not token:
+            return [], [], "Regex error: expected a pattern after '!'"
+        try:
+            re.compile(token, re.IGNORECASE)
+        except re.error as exc:
+            return [], [], f"Regex error: {exc}"
+        if negate:
+            exclude_patterns.append(token)
+        else:
+            include_patterns.append(token)
+
+    return include_patterns, exclude_patterns, None
+
+
+def _validate_re2_patterns(db: "ChDbConnection", patterns: list[str]) -> str | None:
+    for pattern in patterns:
+        re2_error = _validate_re2_pattern(db, pattern)
+        if re2_error:
+            return re2_error
+    return None
+
+
+def _prepare_re2_filter_patterns(db: "ChDbConnection", raw: str) -> tuple[list[str], list[str], str | None]:
+    """Parse and RE2-validate regex filters intended for SQL match() clauses.
+
+    This helper is for the RE2 DB path only. It does not affect Python-only regex
+    behavior or client-side JavaScript regex handling.
+    """
+    include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(raw)
+    if parse_error:
+        return [], [], parse_error
+    re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
+    if re2_error:
+        return [], [], re2_error
+    return include_patterns, exclude_patterns, None
+
+
+def _append_time_window_filter(conditions: list[str], params: list[Any], column: str, from_ts: str, to_ts: str) -> None:
+    time_conditions, time_params = _time_window_conditions(column, from_ts, to_ts)
+    conditions.extend(time_conditions)
+    params.extend(time_params)
+
+
+def _where_clause(conditions: list[str]) -> str:
+    return ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+
+def _append_regex_expression_clauses(
+    *,
+    conditions: list[str],
+    params: list[Any],
+    column: str,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+) -> None:
+    for pattern in include_patterns:
+        conditions.append(f"match({column}, ?)")
+        params.append(pattern)
+    for pattern in exclude_patterns:
+        conditions.append(f"NOT match({column}, ?)")
+        params.append(pattern)
+
+
 @app.route("/logs")
 @require_basic_auth
 async def view_logs():
@@ -10362,15 +10708,16 @@ async def view_logs():
     stats_generated_age_s = 0
     where = ""
     params: list = []
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
 
     if time_error:
         error_msg = time_error
 
     if q:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            error_msg = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            error_msg = regex_error
 
     if error_msg:
         pass
@@ -10433,18 +10780,25 @@ async def view_logs():
         elif trace_id:
             conditions.append("lower(TraceId)=?")
             params.append(trace_id.lower())
-        time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-        conditions.extend(time_conditions)
-        params.extend(time_params)
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
+        where = _where_clause(conditions)
 
     if not error_msg:
         try:
             query_where = where
             query_params = list(params)
             if q:
-                query_where = f"{query_where} AND match(Body, ?)" if query_where else "WHERE match(Body, ?)"
-                query_params.append(q)
+                regex_conditions: list[str] = []
+                _append_regex_expression_clauses(
+                    conditions=regex_conditions,
+                    params=query_params,
+                    column="Body",
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                )
+                if regex_conditions:
+                    regex_sql = " AND ".join(regex_conditions)
+                    query_where = f"{query_where} AND {regex_sql}" if query_where else f"WHERE {regex_sql}"
 
             select_base = (
                 "SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId " f"FROM otel_logs {query_where} "
@@ -11522,27 +11876,69 @@ def _record_id_for_span(trace_id: str, span_id: str) -> str:
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def _parse_tag_rule_conditions_json(raw: Any) -> list[dict[str, str]]:
+    """Best-effort decode for ConditionsJson with safe fallback semantics."""
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "match_field": str(item.get("match_field", "") or ""),
+                "match_operator": str(item.get("match_operator", "") or ""),
+                "match_value": str(item.get("match_value", "") or ""),
+                "match_attr_key": str(item.get("match_attr_key", "") or ""),
+            }
+        )
+    return normalized
+
+
 def _load_tag_rules(db: ChDbConnection) -> list[dict]:
     """Load all active tag rules."""
     rows = db.execute(
         "SELECT Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, "
-        "MatchAttrKey, TagKey, TagValue "
+        "MatchAttrKey, TagKey, TagValue, ConditionsJson "
         "FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name"
     ).fetchall()
-    return [
-        {
-            "id": str(row["Id"]),
-            "name": str(row["Name"]),
-            "record_types": [t.strip() for t in str(row["RecordTypes"]).split(",") if t.strip()],
-            "match_field": str(row["MatchField"]),
-            "match_operator": str(row["MatchOperator"]),
-            "match_value": str(row["MatchValue"]),
-            "match_attr_key": str(row["MatchAttrKey"]),
-            "tag_key": str(row["TagKey"]),
-            "tag_value": str(row["TagValue"]),
-        }
-        for row in rows
-    ]
+    loaded: list[dict] = []
+    for row in rows:
+        conditions = _parse_tag_rule_conditions_json(row["ConditionsJson"])
+        # Backward compatibility for pre-ConditionsJson rules.
+        if not conditions and str(row["MatchField"] or "").strip():
+            conditions = [
+                {
+                    "match_field": str(row["MatchField"] or ""),
+                    "match_operator": str(row["MatchOperator"] or "eq"),
+                    "match_value": str(row["MatchValue"] or ""),
+                    "match_attr_key": str(row["MatchAttrKey"] or ""),
+                }
+            ]
+
+        loaded.append(
+            {
+                "id": str(row["Id"]),
+                "name": str(row["Name"]),
+                "record_types": [t.strip() for t in str(row["RecordTypes"]).split(",") if t.strip()],
+                "match_field": str(row["MatchField"]),
+                "match_operator": str(row["MatchOperator"]),
+                "match_value": str(row["MatchValue"]),
+                "match_attr_key": str(row["MatchAttrKey"]),
+                "tag_key": str(row["TagKey"]),
+                "tag_value": str(row["TagValue"]),
+                "conditions": conditions,
+            }
+        )
+    return loaded
 
 
 def _match_tag_rule(
@@ -11555,12 +11951,52 @@ def _match_tag_rule(
     span_name: str = "",
     event_type: str = "",
 ) -> bool:
-    """Return True if the tag rule matches the given record fields."""
+    """Return True if the tag rule matches the given record fields.
+
+    For composite rules (non-empty ``conditions`` list), *all* conditions must
+    match.  For simple rules the single ``match_field``/``match_operator``/
+    ``match_value`` triple is evaluated as before.
+    """
     rule_types = rule["record_types"]
     if rule_types and "all" not in rule_types and record_type not in rule_types:
         return False
 
-    field = rule["match_field"]
+    conditions: list[dict] = rule.get("conditions") or []
+    if conditions:
+        # Composite rule – every condition in the list must match.
+        return all(
+            _match_single_condition(cond, service, severity, body, attrs, span_name, event_type) for cond in conditions
+        )
+
+    # Simple (legacy) rule – evaluate the single condition stored directly on
+    # the rule dict.
+    return _match_single_condition(
+        {
+            "match_field": rule["match_field"],
+            "match_operator": rule["match_operator"],
+            "match_value": rule["match_value"],
+            "match_attr_key": rule["match_attr_key"],
+        },
+        service,
+        severity,
+        body,
+        attrs,
+        span_name,
+        event_type,
+    )
+
+
+def _match_single_condition(
+    cond: dict,
+    service: str,
+    severity: str,
+    body: str,
+    attrs: dict,
+    span_name: str = "",
+    event_type: str = "",
+) -> bool:
+    """Evaluate a single condition dict against the record fields."""
+    field = cond.get("match_field", "")
     if field == "service_name":
         value = service
     elif field == "severity":
@@ -11572,12 +12008,12 @@ def _match_tag_rule(
     elif field == "event_type":
         value = event_type
     elif field == "attribute":
-        value = str(attrs.get(rule["match_attr_key"], "")) if isinstance(attrs, dict) else ""
+        value = str(attrs.get(cond.get("match_attr_key", ""), "")) if isinstance(attrs, dict) else ""
     else:
         value = ""
 
-    operator = rule["match_operator"]
-    match_value = rule["match_value"]
+    operator = cond.get("match_operator", "")
+    match_value = cond.get("match_value", "")
     if operator == "eq":
         return value == match_value
     if operator == "contains":
@@ -11588,6 +12024,192 @@ def _match_tag_rule(
         except re.error:
             return False
     return False
+
+
+def _tag_rule_attribute_key_suggestions(db: ChDbConnection, query_text: str, limit: int) -> list[str]:
+    keys: set[str] = set()
+    for record_type in _ATTR_KEY_RECORD_TYPES:
+        keys.update(_get_cached_attr_keys(db, record_type))
+
+    q = query_text.strip().lower()
+    ranked = sorted(
+        (k for k in keys if k),
+        key=lambda k: (
+            0 if q and k.lower().startswith(q) else 1,
+            0 if q and q in k.lower() else 1,
+            k.lower(),
+        ),
+    )
+    if q:
+        ranked = [k for k in ranked if q in k.lower()]
+    return ranked[:limit]
+
+
+def _tag_rule_value_suggestions(
+    db: ChDbConnection,
+    field: str,
+    operator: str,
+    query_text: str,
+    attr_key: str,
+    limit: int,
+) -> list[str]:
+    del operator  # Reserved for future operator-specific ranking.
+
+    field_name = (field or "").strip().lower()
+    q = (query_text or "").strip().lower()
+
+    def _run(sql: str, params: list[Any]) -> list[str]:
+        rows = db.execute(sql, params).fetchall()
+        out: list[str] = []
+        for row in rows:
+            v = str(row[0] or "").strip()
+            if not v:
+                continue
+            out.append(v)
+        return out
+
+    if field_name == "service_name":
+        return _run(
+            "SELECT value FROM ("
+            "SELECT ServiceName AS value FROM otel_logs WHERE ServiceName != '' "
+            "UNION ALL "
+            "SELECT ServiceName AS value FROM otel_traces WHERE ServiceName != ''"
+            ") "
+            "WHERE (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "severity":
+        return _run(
+            "SELECT SeverityText FROM otel_logs "
+            "WHERE SeverityText != '' AND (? = '' OR positionCaseInsensitive(SeverityText, ?) > 0) "
+            "GROUP BY SeverityText ORDER BY count() DESC, SeverityText LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "span_name":
+        return _run(
+            "SELECT SpanName FROM otel_traces "
+            "WHERE SpanName != '' AND (? = '' OR positionCaseInsensitive(SpanName, ?) > 0) "
+            "GROUP BY SpanName ORDER BY count() DESC, SpanName LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "event_type":
+        return _run(
+            "SELECT value FROM ("
+            "SELECT EventName AS value FROM otel_logs WHERE EventName != '' "
+            "UNION ALL "
+            "SELECT EventName AS value FROM hyperdx_sessions WHERE EventName != ''"
+            ") "
+            "WHERE (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "body":
+        return _run(
+            "SELECT value FROM ("
+            "SELECT Body AS value FROM otel_logs WHERE Body != '' ORDER BY Timestamp DESC LIMIT 4000"
+            ") "
+            "WHERE (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [q, q, limit],
+        )
+
+    if field_name == "attribute":
+        key = (attr_key or "").strip()
+        if not key:
+            return []
+        return _run(
+            "SELECT value FROM ("
+            "SELECT LogAttributes[?] AS value FROM otel_logs WHERE LogAttributes[?] != '' "
+            "ORDER BY Timestamp DESC LIMIT 2500 "
+            "UNION ALL "
+            "SELECT SpanAttributes[?] AS value FROM otel_traces WHERE SpanAttributes[?] != '' "
+            "ORDER BY Timestamp DESC LIMIT 2500"
+            ") "
+            "WHERE value != '' AND (? = '' OR positionCaseInsensitive(value, ?) > 0) "
+            "GROUP BY value ORDER BY count() DESC, value LIMIT ?",
+            [key, key, key, key, q, q, limit],
+        )
+
+    return []
+
+
+def _record_tag_key_suggestions(
+    db: ChDbConnection,
+    query_text: str,
+    limit: int,
+    record_type: str = "all",
+) -> list[str]:
+    q = (query_text or "").strip().lower()
+    rt = (record_type or "all").strip().lower()
+    where = ["IsDeleted = 0"]
+    params: list[Any] = []
+    if rt and rt != "all":
+        where.append("RecordType = ?")
+        params.append(rt)
+    params.extend([q, q, limit])
+    rows = db.execute(
+        "SELECT TagKey FROM sobs_record_tags FINAL "
+        f"WHERE {' AND '.join(where)} "
+        "AND (? = '' OR positionCaseInsensitive(TagKey, ?) > 0) "
+        "GROUP BY TagKey ORDER BY count() DESC, TagKey LIMIT ?",
+        params,
+    ).fetchall()
+    return [str(row[0] or "") for row in rows if str(row[0] or "").strip()]
+
+
+def _record_tag_value_suggestions(
+    db: ChDbConnection,
+    tag_key: str,
+    query_text: str,
+    limit: int,
+    record_type: str = "all",
+) -> list[str]:
+    key = (tag_key or "").strip()
+    if not key:
+        return []
+    q = (query_text or "").strip().lower()
+    rt = (record_type or "all").strip().lower()
+    where = ["IsDeleted = 0", "TagKey = ?"]
+    params: list[Any] = [key]
+    if rt and rt != "all":
+        where.append("RecordType = ?")
+        params.append(rt)
+    params.extend([q, q, limit])
+    rows = db.execute(
+        "SELECT TagValue FROM sobs_record_tags FINAL "
+        f"WHERE {' AND '.join(where)} "
+        "AND (? = '' OR positionCaseInsensitive(TagValue, ?) > 0) "
+        "GROUP BY TagValue ORDER BY count() DESC, TagValue LIMIT ?",
+        params,
+    ).fetchall()
+    return [str(row[0] or "") for row in rows if str(row[0] or "").strip()]
+
+
+def _notification_condition_service_suggestions(
+    db: ChDbConnection,
+    query_text: str,
+    limit: int,
+    source: str = "",
+    signal: str = "",
+) -> list[str]:
+    q = (query_text or "").strip().lower()
+    src = (source or "").strip().lower()
+    sig = (signal or "").strip()
+    rows = db.execute(
+        "SELECT ServiceName FROM v_derived_signals_1m "
+        "WHERE ServiceName != '' "
+        "AND (? = '' OR SignalSource = ?) "
+        "AND (? = '' OR SignalName = ?) "
+        "AND (? = '' OR positionCaseInsensitive(ServiceName, ?) > 0) "
+        "GROUP BY ServiceName ORDER BY count() DESC, ServiceName LIMIT ?",
+        [src, src, sig, sig, q, q, limit],
+    ).fetchall()
+    return [str(row[0] or "") for row in rows if str(row[0] or "").strip()]
 
 
 def _apply_tag_rules(
@@ -12291,9 +12913,7 @@ async def view_metrics():
         params.append(attr_fp)
 
     if not time_error:
-        time_conditions, time_params = _time_window_conditions("time", from_ts, to_ts)
-        where_parts.extend(time_conditions)
-        params.extend(time_params)
+        _append_time_window_filter(where_parts, params, "time", from_ts, to_ts)
 
     hour_clause = ""
     if not from_ts and not to_ts:
@@ -12302,20 +12922,25 @@ async def view_metrics():
     rows: list[dict] = []
     total = 0
     error_msg = time_error
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     if q and not error_msg:
-        try:
-            re.compile(q, re.IGNORECASE)
-            where_parts.append("match(SignalName, ?)")
-            params.append(q)
-        except re.error as exc:
-            error_msg = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            error_msg = regex_error
+        else:
+            _append_regex_expression_clauses(
+                conditions=where_parts,
+                params=params,
+                column="SignalName",
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            )
 
     if hour_clause:
         params.append(hours)
 
-    where_clause = ""
-    if where_parts:
-        where_clause = " WHERE " + " AND ".join(where_parts)
+    where_clause = f" {_where_clause(where_parts)}" if where_parts else ""
     if hour_clause:
         where_clause = f"{where_clause} AND {hour_clause}" if where_clause else f" WHERE {hour_clause}"
 
@@ -12772,46 +13397,42 @@ async def auto_metrics_rules_dashboard():
 @require_basic_auth
 async def delete_metrics_rule(rule_id: str):
     db = get_db()
-    row = db.execute(
-        "SELECT Id, Name, RuleType, SignalSource, SignalName, ServiceName, AttrFingerprint, Comparator, "
-        "WarningThreshold, CriticalThreshold, SecondarySignalSource, SecondarySignalName, "
-        "SecondaryComparator, SecondaryWarningThreshold, SecondaryCriticalThreshold, MinSampleCount "
-        "FROM sobs_anomaly_rules FINAL WHERE IsDeleted = 0 AND Id = ?",
-        [rule_id],
-    ).fetchone()
-    if not row:
-        await flash("Rule not found", "warning")
-        return redirect(url_for("view_metrics_rules"))
 
-    version = int(time.time() * 1000)
-    _insert_rows_json_each_row(
+    def _deleted_row(row: RowCompat) -> dict[str, Any]:
+        return {
+            "Id": str(row["Id"]),
+            "Name": str(row["Name"]),
+            "RuleType": str(row["RuleType"] or "threshold"),
+            "SignalSource": str(row["SignalSource"]),
+            "SignalName": str(row["SignalName"]),
+            "ServiceName": str(row["ServiceName"]),
+            "AttrFingerprint": str(row["AttrFingerprint"]),
+            "Comparator": str(row["Comparator"]),
+            "WarningThreshold": float(row["WarningThreshold"]),
+            "CriticalThreshold": float(row["CriticalThreshold"]),
+            "SecondarySignalSource": str(row["SecondarySignalSource"]),
+            "SecondarySignalName": str(row["SecondarySignalName"]),
+            "SecondaryComparator": str(row["SecondaryComparator"] or "gt"),
+            "SecondaryWarningThreshold": float(row["SecondaryWarningThreshold"]),
+            "SecondaryCriticalThreshold": float(row["SecondaryCriticalThreshold"]),
+            "MinSampleCount": int(row["MinSampleCount"]),
+        }
+
+    return await _soft_delete_latest_row(
         db,
-        "sobs_anomaly_rules",
-        [
-            {
-                "Id": str(row["Id"]),
-                "Name": str(row["Name"]),
-                "RuleType": str(row["RuleType"] or "threshold"),
-                "SignalSource": str(row["SignalSource"]),
-                "SignalName": str(row["SignalName"]),
-                "ServiceName": str(row["ServiceName"]),
-                "AttrFingerprint": str(row["AttrFingerprint"]),
-                "Comparator": str(row["Comparator"]),
-                "WarningThreshold": float(row["WarningThreshold"]),
-                "CriticalThreshold": float(row["CriticalThreshold"]),
-                "SecondarySignalSource": str(row["SecondarySignalSource"]),
-                "SecondarySignalName": str(row["SecondarySignalName"]),
-                "SecondaryComparator": str(row["SecondaryComparator"] or "gt"),
-                "SecondaryWarningThreshold": float(row["SecondaryWarningThreshold"]),
-                "SecondaryCriticalThreshold": float(row["SecondaryCriticalThreshold"]),
-                "MinSampleCount": int(row["MinSampleCount"]),
-                "IsDeleted": 1,
-                "Version": version,
-            }
-        ],
+        select_sql=(
+            "SELECT Id, Name, RuleType, SignalSource, SignalName, ServiceName, AttrFingerprint, Comparator, "
+            "WarningThreshold, CriticalThreshold, SecondarySignalSource, SecondarySignalName, "
+            "SecondaryComparator, SecondaryWarningThreshold, SecondaryCriticalThreshold, MinSampleCount "
+            "FROM sobs_anomaly_rules FINAL WHERE IsDeleted = 0 AND Id = ?"
+        ),
+        select_params=[rule_id],
+        table_name="sobs_anomaly_rules",
+        build_deleted_row=_deleted_row,
+        not_found_message="Rule not found",
+        success_message="Rule '{name}' deleted",
+        redirect_endpoint="view_metrics_rules",
     )
-    await flash(f"Rule '{str(row['Name'])}' deleted", "success")
-    return redirect(url_for("view_metrics_rules"))
 
 
 # ---------------------------------------------------------------------------
@@ -13020,6 +13641,50 @@ def _load_work_item_links_for_ref_ids(db: ChDbConnection, ref_ids: list[str]) ->
 @require_basic_auth
 async def view_errors():
     db = get_db()
+    error_id_sql = _error_id_sql_expr()
+    grouped_trace_chunk_size = 200
+    hydrate_key_chunk_size = 200
+
+    def _build_error_stub_from_narrow(row: dict, resolved_flag: bool) -> dict:
+        ts = str(row.get("Timestamp", ""))
+        service_name = str(row.get("ServiceName", ""))
+        trace_id = str(row.get("TraceId", ""))
+        span_id = str(row.get("SpanId", ""))
+        err_type = str(row.get("ErrorType", "") or "Error")
+        message = str(row.get("ErrorMessage", ""))
+        raw_body = str(row.get("Body", ""))
+        message_summary, summary_from_json = _extract_structured_error_summary(message, raw_body)
+        item_id = str(row.get("ErrorId", "")) or _error_id(ts, service_name, err_type, message, trace_id, span_id)
+        return {
+            "id": item_id,
+            "ts": ts,
+            "service": service_name,
+            "err_type": err_type,
+            "message": message,
+            "message_summary": message_summary,
+            "summary_from_json": summary_from_json,
+            "message_is_json": False,
+            "message_pretty_json": "",
+            "raw_body": raw_body,
+            "raw_body_is_json": False,
+            "raw_body_pretty_json": "",
+            "stack": "",
+            "stack_is_json": False,
+            "stack_pretty_json": "",
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "url": "",
+            "error_source": "",
+            "page_title": "",
+            "viewport": "",
+            "artifact_type": "",
+            "artifact_id": "",
+            "artifact_url": "",
+            "replay_id": "",
+            "replay_url": "",
+            "resolved": resolved_flag,
+        }
+
     selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
     service = selected_services[0] if selected_services else ""
     group_by = request.args.get("group_by", "").strip().lower()
@@ -13050,38 +13715,36 @@ async def view_errors():
             "Timestamp",
         )
     q = request.args.get("q", "").strip()
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     error_msg = time_error or ""
     if q and not error_msg:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            error_msg = f"Regex error: {exc}"
-    resolved_ids = _get_resolved_error_ids(db)
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            error_msg = regex_error
+    resolved_ids: set[str] = set()
+    if resolved not in ("0", "1"):
+        resolved_ids = _get_resolved_error_ids(db)
     where_parts = []
     where_params = []
     if selected_services:
         placeholders = ",".join(["?"] * len(selected_services))
         where_parts.append(f"ServiceName IN ({placeholders})")
         where_params.extend(selected_services)
-    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    where_parts.extend(time_conditions)
-    where_params.extend(time_params)
+    _append_time_window_filter(where_parts, where_params, "Timestamp", from_ts, to_ts)
     if q and not error_msg:
-        where_parts.append("match(Body, ?)")
-        where_params.append(q)
-    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        _append_regex_expression_clauses(
+            conditions=where_parts,
+            params=where_params,
+            column="Body",
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+    where_sql = _where_clause(where_parts)
 
     if grouped_mode:
         # Best-effort deduplication: probe recent raw events, then aggregate in SQL.
         probe_limit = max(2000, min(10000, limit * 100))
-        error_id_sql = (
-            "lower(hex(MD5(concat("
-            "toString(Timestamp), '|', ServiceName, '|', "
-            "if(LogAttributes['exception.type'] != '', LogAttributes['exception.type'], 'Error'), '|', "
-            "if(LogAttributes['exception.message'] != '', LogAttributes['exception.message'], Body), '|', "
-            "TraceId, '|', SpanId"
-            "))))"
-        )
         grouped_where_sql = where_sql
         if resolved == "1":
             resolved_condition = f"{error_id_sql} IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
@@ -13134,12 +13797,20 @@ async def view_errors():
             f"SELECT COUNT(*) FROM ({grouped_aggregate_sql})",
             where_params + [probe_limit],
         ).fetchone()[0]
+        sort_direction = "ASC" if sort_dir == "asc" else "DESC"
+        page_sql = f"{grouped_aggregate_sql} ORDER BY {sort_col} {sort_direction} LIMIT ? OFFSET ?"
         group_rows = db.execute(
-            f"{grouped_aggregate_sql} ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'} LIMIT ? OFFSET ?",
+            page_sql,
             where_params + [probe_limit, limit, offset],
         ).fetchall()
         errors = []
+        visible_group_tuples: list[tuple[str, str, str]] = []
         for row in group_rows:
+            group_tuple = (
+                str(row["GroupService"] or ""),
+                str(row["GroupType"] or ""),
+                str(row["GroupMessage"] or ""),
+            )
             item = _build_error_item(
                 {
                     "Timestamp": row["RepTimestamp"],
@@ -13159,23 +13830,48 @@ async def view_errors():
             item["count"] = int(row["Count"] or 0)
             item["first_seen"] = str(row["FirstSeen"] or item["ts"])
             item["last_seen"] = str(row["LastSeen"] or item["ts"])
+            item["group_tuple"] = group_tuple
+            visible_group_tuples.append(group_tuple)
             errors.append(item)
 
         if errors:
-            trace_ids_by_group: dict[tuple[str, str, str], list[str]] = {}
-            for row in db.execute(grouped_probe_sql, where_params + [probe_limit]).fetchall():
-                probe_item = _build_error_item(dict(row))
-                group_key = _error_group_key(probe_item)
-                trace_value = str(probe_item.get("trace_id") or "").strip()
-                if not trace_value:
+            unique_group_tuples: list[tuple[str, str, str]] = []
+            seen_group_tuples: set[tuple[str, str, str]] = set()
+            for group_tuple in visible_group_tuples:
+                if group_tuple in seen_group_tuples:
                     continue
-                trace_bucket = trace_ids_by_group.setdefault(group_key, [])
-                if trace_value not in trace_bucket:
-                    trace_bucket.append(trace_value)
+                seen_group_tuples.add(group_tuple)
+                unique_group_tuples.append(group_tuple)
+
+            trace_group_params: list[Any] = [*where_params, probe_limit]
+            trace_ids_by_group: dict[tuple[str, str, str], list[str]] = {}
+            for chunk_start in range(0, len(unique_group_tuples), grouped_trace_chunk_size):
+                group_chunk = unique_group_tuples[chunk_start : chunk_start + grouped_trace_chunk_size]
+                chunk_params = list(trace_group_params)
+                trace_group_placeholders = ", ".join(["(?, ?, ?)"] * len(group_chunk))
+                for group_service, group_type, group_message in group_chunk:
+                    chunk_params.extend([group_service, group_type, group_message])
+
+                grouped_trace_sql = (
+                    "SELECT GroupService, GroupType, GroupMessage, "
+                    "arrayStringConcat(groupUniqArray(64)(TraceId), ',') AS TraceIdsCsv "
+                    f"FROM ({grouped_probe_sql}) "
+                    f"WHERE (GroupService, GroupType, GroupMessage) IN ({trace_group_placeholders}) "
+                    "GROUP BY GroupService, GroupType, GroupMessage"
+                )
+                for row in db.execute(grouped_trace_sql, chunk_params).fetchall():
+                    group_tuple = (
+                        str(row["GroupService"] or ""),
+                        str(row["GroupType"] or ""),
+                        str(row["GroupMessage"] or ""),
+                    )
+                    trace_ids_by_group[group_tuple] = [
+                        _hex(value).strip() for value in str(row["TraceIdsCsv"] or "").split(",") if _hex(value).strip()
+                    ]
 
             for item in errors:
-                group_key = _error_group_key(item)
-                trace_values = list(trace_ids_by_group.get(group_key, []))
+                group_tuple = item.pop("group_tuple", ("", "", ""))
+                trace_values = list(trace_ids_by_group.get(group_tuple, []))
                 primary_trace = str(item.get("trace_id") or "").strip()
                 if primary_trace and primary_trace not in trace_values:
                     trace_values.insert(0, primary_trace)
@@ -13189,8 +13885,83 @@ async def view_errors():
             f"FROM ({ERROR_SOURCES_SQL}) {where_sql} "
             f"{order_clause} LIMIT ? OFFSET ?"
         )
+        use_resolved_sql_path = resolved in ("0", "1")
+        if use_resolved_sql_path:
+            error_id_expr = error_id_sql
+            poc_where_sql = where_sql
+            poc_where_params: list[Any] = list(where_params)
+            if resolved == "1":
+                resolved_condition = f"{error_id_expr} IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+                poc_where_sql = (
+                    f"{poc_where_sql} AND {resolved_condition}" if poc_where_sql else f"WHERE {resolved_condition}"
+                )
+            elif resolved == "0":
+                resolved_condition = (
+                    f"{error_id_expr} NOT IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+                )
+                poc_where_sql = (
+                    f"{poc_where_sql} AND {resolved_condition}" if poc_where_sql else f"WHERE {resolved_condition}"
+                )
+            narrow_source_sql = (
+                "SELECT "
+                "Timestamp, ServiceName, TraceId, SpanId, "
+                f"{error_id_expr} AS ErrorId "
+                f"FROM ({ERROR_SOURCES_SQL}) {poc_where_sql} "
+                f"{order_clause} LIMIT ? OFFSET ?"
+            )
 
-        if resolved not in ("0", "1"):
+            page_rows: list[dict] = []
+            count_sql = f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {poc_where_sql}"
+            total = db.execute(
+                count_sql,
+                poc_where_params,
+            ).fetchone()[0]
+            page_rows = [dict(r) for r in db.execute(narrow_source_sql, poc_where_params + [limit, offset]).fetchall()]
+            details_by_id: dict[str, dict] = {}
+            if page_rows:
+                detail_key_tuples: list[tuple[Any, Any, Any, Any]] = []
+                seen_detail_keys: set[tuple[Any, Any, Any, Any]] = set()
+                for row in page_rows:
+                    detail_key = (
+                        row.get("Timestamp"),
+                        row.get("ServiceName"),
+                        row.get("TraceId"),
+                        row.get("SpanId"),
+                    )
+                    if detail_key in seen_detail_keys:
+                        continue
+                    seen_detail_keys.add(detail_key)
+                    detail_key_tuples.append(detail_key)
+                for chunk_start in range(0, len(detail_key_tuples), hydrate_key_chunk_size):
+                    detail_chunk = detail_key_tuples[chunk_start : chunk_start + hydrate_key_chunk_size]
+                    detail_params: list[Any] = []
+                    tuple_placeholders = ", ".join(["(?, ?, ?, ?)"] * len(detail_chunk))
+                    for ts_val, service_val, trace_val, span_val in detail_chunk:
+                        detail_params.extend([ts_val, service_val, trace_val, span_val])
+                    detail_sql = (
+                        "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
+                        f"FROM ({ERROR_SOURCES_SQL}) "
+                        f"WHERE (Timestamp, ServiceName, TraceId, SpanId) IN ({tuple_placeholders})"
+                    )
+                    for drow in db.execute(detail_sql, detail_params).fetchall():
+                        detail_item = _build_error_item(dict(drow))
+                        details_by_id[detail_item["id"]] = detail_item
+            errors = []
+            for row in page_rows:
+                row_id = str(row.get("ErrorId", ""))
+                if resolved == "1":
+                    resolved_flag = True
+                elif resolved == "0":
+                    resolved_flag = False
+                else:
+                    resolved_flag = row_id in resolved_ids
+                item = _build_error_stub_from_narrow(row, resolved_flag)
+                detail_item = details_by_id.get(item["id"])
+                if detail_item:
+                    detail_item["resolved"] = resolved_flag
+                    item = detail_item
+                errors.append(item)
+        else:
             total = db.execute(
                 f"SELECT COUNT(*) FROM ({ERROR_SOURCES_SQL}) {where_sql}",
                 where_params,
@@ -13201,26 +13972,6 @@ async def view_errors():
                 item = _build_error_item(dict(row))
                 item["resolved"] = item["id"] in resolved_ids
                 errors.append(item)
-        else:
-            # Keep behavior identical while avoiding full in-memory materialization.
-            target_resolved = resolved == "1"
-            scan_batch = max(200, limit)
-            scan_offset = 0
-            total = 0
-            errors = []
-            while True:
-                batch = db.execute(source_sql, where_params + [scan_batch, scan_offset]).fetchall()
-                if not batch:
-                    break
-                for row in batch:
-                    item = _build_error_item(dict(row))
-                    item["resolved"] = item["id"] in resolved_ids
-                    if item["resolved"] != target_resolved:
-                        continue
-                    if total >= offset and len(errors) < limit:
-                        errors.append(item)
-                    total += 1
-                scan_offset += scan_batch
 
     now = time.time()
     services: list[str] = []
@@ -13326,6 +14077,43 @@ def _build_span_tree(spans: list[dict]) -> list[dict]:
     return result
 
 
+def _slice_span_tree_with_ancestors(
+    full_span_tree: list[dict],
+    offset: int,
+    limit: int,
+) -> tuple[list[dict], int, int]:
+    """Return a paged span-tree slice plus required ancestors for context.
+
+    The returned tuple is ``(rows, page_end, context_rows)`` where:
+    - ``rows`` are in the original DFS order.
+    - ``page_end`` reflects the end index of the raw page window (without
+      ancestor expansion).
+    - ``context_rows`` is how many extra ancestor rows were prepended.
+    """
+    if not full_span_tree:
+        return [], 0, 0
+
+    total = len(full_span_tree)
+    page_start = max(0, min(offset, total))
+    page_end = min(page_start + max(1, limit), total)
+    page_rows = full_span_tree[page_start:page_end]
+    if not page_rows:
+        return [], page_end, 0
+
+    by_id = {str(row.get("span_id") or ""): row for row in full_span_tree}
+    included_ids = {str(row.get("span_id") or "") for row in page_rows}
+
+    for row in page_rows:
+        parent_id = str(row.get("parent_span_id") or "")
+        while parent_id and parent_id in by_id and parent_id not in included_ids:
+            included_ids.add(parent_id)
+            parent_id = str(by_id[parent_id].get("parent_span_id") or "")
+
+    rows = [row for row in full_span_tree if str(row.get("span_id") or "") in included_ids]
+    context_rows = max(0, len(rows) - len(page_rows))
+    return rows, page_end, context_rows
+
+
 def _compute_active_timeline_ms(spans: list[dict]) -> float:
     """Return merged active time across span intervals in milliseconds."""
     merged = _merge_span_intervals(spans)
@@ -13420,6 +14208,12 @@ def _build_trace_timeline_segments(
             )
 
     return segments
+
+
+_TRACE_DETAIL_HARD_CAP = 5000
+_TRACE_DETAIL_DEFAULT_LIMIT = 200
+_TRACE_DETAIL_MAX_LIMIT = 1000
+_TRACE_DETAIL_COLLAPSE_THRESHOLD = 300
 
 
 def _build_trace_window_overlay_segments(
@@ -13948,12 +14742,20 @@ def _fetch_trace_metric_context(
 @require_basic_auth
 async def view_traces():
     db = get_db()
+    error_id_sql = _error_id_sql_expr()
     selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
     service = selected_services[0] if selected_services else ""
     trace_id = request.args.get("trace_id", "").strip()
     from_ts, to_ts, time_error = _parse_time_window_args()
     limit = _parse_limit(100)
     offset = _parse_offset()
+    trace_span_limit = _coerce_positive_int(
+        request.args.get("trace_span_limit"),
+        _TRACE_DETAIL_DEFAULT_LIMIT,
+        1,
+        _TRACE_DETAIL_MAX_LIMIT,
+    )
+    trace_span_offset = _coerce_positive_int(request.args.get("trace_span_offset"), 0, 0, _TRACE_DETAIL_HARD_CAP)
     sort_by, sort_col, sort_dir = _parse_sort(
         {
             "Timestamp": "Timestamp",
@@ -13969,11 +14771,12 @@ async def view_traces():
     params = []
     q = request.args.get("q", "").strip()
     q_error = ""
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     if q:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            q_error = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            q_error = regex_error
     if selected_services:
         placeholders = ",".join(["?"] * len(selected_services))
         conditions.append(f"ServiceName IN ({placeholders})")
@@ -13981,22 +14784,32 @@ async def view_traces():
     if trace_id:
         conditions.append("TraceId=?")
         params.append(trace_id)
-    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    conditions.extend(time_conditions)
-    params.extend(time_params)
+    _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
     if q and not q_error:
-        conditions.append("match(SpanName, ?)")
-        params.append(q)
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    if not where:
-        total = _active_part_rows(db, "otel_traces")
+        _append_regex_expression_clauses(
+            conditions=conditions,
+            params=params,
+            column="SpanName",
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+    where = _where_clause(conditions)
+    if trace_id and not time_error:
+        total = 0
+        rows = []
     else:
-        total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
-    rows = db.execute(
-        f"SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode, SpanAttributes "
-        f"FROM otel_traces {where} {order_clause} LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+        if not where:
+            total = _active_part_rows(db, "otel_traces")
+        else:
+            total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
+        rows = db.execute(
+            (
+                "SELECT Timestamp, TraceId, SpanId, ParentSpanId, "
+                "SpanName, ServiceName, Duration, StatusCode, SpanAttributes "
+                f"FROM otel_traces {where} {order_clause} LIMIT ? OFFSET ?"
+            ),
+            params + [limit, offset],
+        ).fetchall()
 
     spans = []
     for r in rows:
@@ -14027,11 +14840,15 @@ async def view_traces():
     # When a specific trace is selected build an enriched detail view.
     trace_detail: dict | None = None
     if trace_id and not time_error:
+        trace_total_spans = int(
+            db.execute("SELECT COUNT(*) FROM otel_traces WHERE TraceId=?", [trace_id]).fetchone()[0] or 0
+        )
+        detail_fetch_limit = min(trace_total_spans, _TRACE_DETAIL_HARD_CAP)
         detail_rows = db.execute(
             "SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, "
             "Duration, StatusCode, SpanAttributes "
-            "FROM otel_traces WHERE TraceId=? ORDER BY Timestamp ASC",
-            [trace_id],
+            "FROM otel_traces WHERE TraceId=? ORDER BY Timestamp ASC, SpanId ASC LIMIT ?",
+            [trace_id, detail_fetch_limit],
         ).fetchall()
         if detail_rows:
             all_trace_spans = []
@@ -14080,17 +14897,22 @@ async def view_traces():
             trace_activity_ts_ms: list[float] = []
             try:
                 err_rows = db.execute(
-                    "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
-                    f"FROM ({ERROR_SOURCES_SQL}) WHERE TraceId=? LIMIT ?",
+                    "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes, ErrorId, "
+                    "(ErrorId IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)) AS IsResolved "
+                    "FROM ("
+                    "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes, "
+                    f"{error_id_sql} AS ErrorId "
+                    f"FROM ({ERROR_SOURCES_SQL}) WHERE TraceId=? LIMIT ?"
+                    ")",
                     [trace_id, _TRACE_ERROR_LIMIT + 1],
                 ).fetchall()
-                resolved_ids = _get_resolved_error_ids(db)
                 if len(err_rows) > _TRACE_ERROR_LIMIT:
                     errors_truncated = True
                     err_rows = err_rows[:_TRACE_ERROR_LIMIT]
                 for row in err_rows:
                     item = _build_error_item(dict(row))
-                    item["resolved"] = item["id"] in resolved_ids
+                    item["id"] = str(row["ErrorId"] or item["id"])
+                    item["resolved"] = bool(row["IsResolved"])
                     trace_errors.append(item)
                     ts_raw = str(item.get("ts") or "")
                     if ts_raw:
@@ -14202,8 +15024,24 @@ async def view_traces():
 
             trace_window_segments = _build_trace_window_overlay_segments(all_trace_spans, trace_windows)
 
+            full_span_tree = _build_span_tree(all_trace_spans)
+            capped_total_spans = len(full_span_tree)
+            if trace_span_offset >= capped_total_spans and capped_total_spans > 0:
+                trace_span_offset = max(0, ((capped_total_spans - 1) // trace_span_limit) * trace_span_limit)
+            trace_page_spans, trace_page_end, trace_context_rows = _slice_span_tree_with_ancestors(
+                full_span_tree,
+                trace_span_offset,
+                trace_span_limit,
+            )
+            detail_prev_offset = max(0, trace_span_offset - trace_span_limit)
+            detail_next_offset = trace_span_offset + trace_span_limit
+            detail_hard_capped = trace_total_spans > _TRACE_DETAIL_HARD_CAP
+            default_collapsed = capped_total_spans > _TRACE_DETAIL_COLLAPSE_THRESHOLD
+
+            total = trace_total_spans
+
             trace_detail = {
-                "span_tree": _build_span_tree(all_trace_spans),
+                "span_tree": trace_page_spans,
                 "trace_start_ts": str(all_trace_spans[0]["ts"]),
                 "trace_end_ts": str(all_trace_spans[-1]["ts"]),
                 "trace_start_ms": round(trace_start_ms),
@@ -14222,6 +15060,19 @@ async def view_traces():
                 "raw_windows": trace_windows,
                 "raw_window_segments": trace_window_segments,
                 "metrics_context": trace_metrics_context,
+                "total_spans": trace_total_spans,
+                "capped_total_spans": capped_total_spans,
+                "hard_cap": _TRACE_DETAIL_HARD_CAP,
+                "hard_capped": detail_hard_capped,
+                "default_collapsed": default_collapsed,
+                "page_limit": trace_span_limit,
+                "page_offset": trace_span_offset,
+                "page_end": trace_page_end,
+                "context_rows": trace_context_rows,
+                "prev_offset": detail_prev_offset,
+                "next_offset": detail_next_offset,
+                "has_prev_page": trace_span_offset > 0,
+                "has_next_page": detail_next_offset < capped_total_spans,
             }
 
     # Build work-item pre-check map for trace-detail errors so "Raise issue" shows as
@@ -15654,11 +16505,12 @@ async def view_rum():
 
     q = request.args.get("q", "").strip()
     q_error = ""
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
     if q:
-        try:
-            re.compile(q, re.IGNORECASE)
-        except re.error as exc:
-            q_error = f"Regex error: {exc}"
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            q_error = regex_error
 
     conditions = []
     params = []
@@ -15668,13 +16520,16 @@ async def view_rum():
     if error_source:
         conditions.append("LogAttributes['errorSource']=?")
         params.append(error_source)
-    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    conditions.extend(time_conditions)
-    params.extend(time_params)
+    _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
     if q and not q_error:
-        conditions.append("match(Body, ?)")
-        params.append(q)
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        _append_regex_expression_clauses(
+            conditions=conditions,
+            params=params,
+            column="Body",
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+    where = _where_clause(conditions)
     total = 0
     events: list[dict[str, Any]] = []
     session_groups: list[dict[str, Any]] = []
@@ -15721,9 +16576,15 @@ async def view_rum():
             detail_where = "WHERE " + " AND ".join(detail_conditions)
             detail_rows = db.execute(
                 "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId "
-                f"FROM hyperdx_sessions {detail_where} "
-                f"ORDER BY {_RUM_SESSION_KEY_SQL} ASC, Timestamp DESC",
-                params + session_keys,
+                "FROM ("
+                "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, "
+                f"{_RUM_SESSION_KEY_SQL} AS session_key, "
+                f"row_number() OVER (PARTITION BY {_RUM_SESSION_KEY_SQL} ORDER BY Timestamp DESC) AS row_rank "
+                f"FROM hyperdx_sessions {detail_where}"
+                ") "
+                "WHERE row_rank <= ? "
+                "ORDER BY session_key ASC, Timestamp DESC",
+                params + session_keys + [RUM_SESSION_DETAIL_EVENT_CAP],
             ).fetchall()
             events_by_session: dict[str, list[dict[str, Any]]] = {}
             for row in detail_rows:
@@ -16847,6 +17708,88 @@ async def api_get_work_items():
 # ---------------------------------------------------------------------------
 # Web UI – AI Transparency
 # ---------------------------------------------------------------------------
+def _get_ai_filter_metadata(db: ChDbConnection, from_ts: str, to_ts: str) -> dict[str, Any]:
+    cache_key = (from_ts, to_ts)
+    now = time.monotonic()
+    with _ai_filter_metadata_cache_lock:
+        cached = _ai_filter_metadata_cache.get(cache_key)
+        if cached and now < float(cached.get("expires_at", 0.0)):
+            return {
+                "services": list(cached.get("services", [])),
+                "models": list(cached.get("models", [])),
+                "operations": list(cached.get("operations", [])),
+                "span_names": list(cached.get("span_names", [])),
+                "errors": list(cached.get("errors", [])),
+            }
+
+    metadata_errors: list[str] = []
+    services: list[str] = []
+    models: list[str] = []
+    operations: list[str] = []
+    span_names: list[str] = []
+
+    metadata_time_conditions, metadata_time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
+    metadata_base_conditions = [_AI_SPAN_CONDITION]
+    if metadata_time_conditions:
+        metadata_base_conditions.extend(metadata_time_conditions)
+    metadata_base_where = " AND ".join(metadata_base_conditions)
+    metadata_source_sql = (
+        "SELECT Timestamp, ServiceName, SpanName, "
+        "SpanAttributes['gen_ai.request.model'] AS RequestModel, "
+        "SpanAttributes['gen_ai.operation.name'] AS OperationName "
+        "FROM otel_traces "
+        f"WHERE {metadata_base_where} "
+        "ORDER BY Timestamp DESC LIMIT ?"
+    )
+    metadata_source_params = list(metadata_time_params) + [AI_FILTER_METADATA_SAMPLE_ROWS]
+
+    def _fetch_distinct_ai_metadata_values(select_expr: str, extra_where: str = "") -> list[str]:
+        where_suffix = f"WHERE {extra_where}" if extra_where else ""
+        rows = db.execute(
+            f"SELECT DISTINCT {select_expr} AS v " f"FROM ({metadata_source_sql}) recent_ai {where_suffix}",
+            metadata_source_params,
+        ).fetchall()
+        values = [str(row[0]) for row in rows if str(row[0]).strip()]
+        return sorted(set(values))
+
+    try:
+        services = _fetch_distinct_ai_metadata_values("ServiceName", "ServiceName != ''")
+    except Exception as exc:
+        metadata_errors.append(f"services={_public_dashboard_query_error(exc)}")
+
+    try:
+        models = _fetch_distinct_ai_metadata_values("RequestModel", "RequestModel != ''")
+    except Exception as exc:
+        metadata_errors.append(f"models={_public_dashboard_query_error(exc)}")
+
+    try:
+        operations = _fetch_distinct_ai_metadata_values("OperationName", "OperationName != ''")
+    except Exception as exc:
+        metadata_errors.append(f"operations={_public_dashboard_query_error(exc)}")
+
+    try:
+        span_names = _fetch_distinct_ai_metadata_values("SpanName", "SpanName != ''")
+    except Exception as exc:
+        metadata_errors.append(f"span_names={_public_dashboard_query_error(exc)}")
+
+    result = {
+        "services": services,
+        "models": models,
+        "operations": operations,
+        "span_names": span_names,
+        "errors": metadata_errors,
+    }
+    with _ai_filter_metadata_cache_lock:
+        # Keep cache bounded to avoid unbounded growth for many time-window combinations.
+        if len(_ai_filter_metadata_cache) > 16:
+            _ai_filter_metadata_cache.clear()
+        _ai_filter_metadata_cache[cache_key] = {
+            **result,
+            "expires_at": now + max(1, AI_FILTER_METADATA_CACHE_TTL_SEC),
+        }
+    return result
+
+
 @app.route("/ai")
 @require_basic_auth
 async def view_ai():
@@ -16927,7 +17870,7 @@ async def view_ai():
         conditions.append(base_ai_condition)
         conditions.extend(time_conditions)
         params.extend(time_params)
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where = _where_clause(conditions)
 
     trace_ids: list[str] = []
     total = 0
@@ -17028,8 +17971,6 @@ async def view_ai():
             input_messages,
             system_instructions_raw,
         )
-        # Build raw attributes dict for JSON inspector
-        raw_attrs = dict(attrs)
         row_id = _error_id(ts, r["ServiceName"], provider, req_model + err_type + msg, r["TraceId"], "")
         ai_items.append(
             {
@@ -17084,7 +18025,6 @@ async def view_ai():
                 "finish_reason": finish_reason,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                "raw_attrs": json.dumps(raw_attrs, ensure_ascii=False, indent=2),
             }
         )
 
@@ -17144,63 +18084,21 @@ async def view_ai():
             grp["turn_cards"] = _build_ai_trace_turn_cards(cast(list[dict[str, Any]], grp["spans"]))
             trace_groups.append(grp)
 
-    metadata_errors: list[str] = []
     services: list[str] = []
     models: list[str] = []
     operations: list[str] = []
     span_names: list[str] = []
     totals: dict[str, int] = {"ti": 0, "to_": 0, "cnt": 0, "errors": 0}
-    metadata_sample_rows = 25000
-
-    metadata_time_conditions, metadata_time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    metadata_base_conditions = [_AI_SPAN_CONDITION]
-    if metadata_time_conditions:
-        metadata_base_conditions.extend(metadata_time_conditions)
-    metadata_base_where = " AND ".join(metadata_base_conditions)
-    metadata_source_sql = (
-        "SELECT Timestamp, ServiceName, SpanName, SpanAttributes "
-        "FROM otel_traces "
-        f"WHERE {metadata_base_where} "
-        "ORDER BY Timestamp DESC LIMIT ?"
-    )
-    metadata_source_params = list(metadata_time_params) + [metadata_sample_rows]
-
-    def _fetch_distinct_ai_metadata_values(select_expr: str, extra_where: str = "") -> list[str]:
-        where_suffix = f"WHERE {extra_where}" if extra_where else ""
-        rows = db.execute(
-            f"SELECT DISTINCT {select_expr} AS v " f"FROM ({metadata_source_sql}) recent_ai {where_suffix}",
-            metadata_source_params,
-        ).fetchall()
-        values = [str(row[0]) for row in rows if str(row[0]).strip()]
-        return sorted(set(values))
+    metadata = _get_ai_filter_metadata(db, from_ts, to_ts)
+    services = cast(list[str], metadata.get("services", []))
+    models = cast(list[str], metadata.get("models", []))
+    operations = cast(list[str], metadata.get("operations", []))
+    span_names = cast(list[str], metadata.get("span_names", []))
+    metadata_errors = cast(list[str], metadata.get("errors", []))
 
     try:
-        services = _fetch_distinct_ai_metadata_values("ServiceName", "ServiceName != ''")
-    except Exception as exc:
-        metadata_errors.append(f"services={_public_dashboard_query_error(exc)}")
-
-    try:
-        models = _fetch_distinct_ai_metadata_values(
-            "SpanAttributes['gen_ai.request.model']",
-            "SpanAttributes['gen_ai.request.model'] != ''",
-        )
-    except Exception as exc:
-        metadata_errors.append(f"models={_public_dashboard_query_error(exc)}")
-
-    try:
-        operations = _fetch_distinct_ai_metadata_values(
-            "SpanAttributes['gen_ai.operation.name']",
-            "SpanAttributes['gen_ai.operation.name'] != ''",
-        )
-    except Exception as exc:
-        metadata_errors.append(f"operations={_public_dashboard_query_error(exc)}")
-
-    try:
-        span_names = _fetch_distinct_ai_metadata_values("SpanName", "SpanName != ''")
-    except Exception as exc:
-        metadata_errors.append(f"span_names={_public_dashboard_query_error(exc)}")
-
-    try:
+        totals_where = where if where else f"WHERE {_AI_SPAN_CONDITION}"
+        totals_params = list(params) if where else []
         totals_row = db.execute(
             "SELECT "
             "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) ti, "
@@ -17208,7 +18106,8 @@ async def view_ai():
             "COUNT(*) cnt, "
             "countIf(SpanAttributes['error.type'] != '') errors "
             "FROM otel_traces "
-            f"WHERE {_AI_SPAN_CONDITION}"
+            f"{totals_where}",
+            totals_params,
         ).fetchone()
         if totals_row:
             totals = {
@@ -17223,6 +18122,8 @@ async def view_ai():
     if metadata_errors:
         metadata_error_text = "Some AI metadata failed to load: " + "; ".join(metadata_errors[:3])
         error_msg = f"{error_msg}; {metadata_error_text}" if error_msg else metadata_error_text
+
+    ai_pricing, ai_pricing_sources = _load_ai_pricing_with_sources(db)
 
     return await render_template(
         "ai.html",
@@ -17256,7 +18157,126 @@ async def view_ai():
         sort_dir=sort_dir,
         from_ts=from_ts,
         to_ts=to_ts,
+        ai_pricing_json=ai_pricing,
+        ai_pricing_sources_json=ai_pricing_sources,
     )
+
+
+@app.route("/api/ai/span-attributes")
+@require_basic_auth
+async def get_ai_span_attributes():
+    db = get_db()
+    ts = request.args.get("ts", "").strip()
+    service = request.args.get("service", "").strip()
+    trace_id = request.args.get("trace_id", "").strip()
+    span_name = request.args.get("span_name", "").strip()
+
+    if not ts or not service:
+        return jsonify({"ok": False, "error": "Missing required params: ts and service"}), 400
+
+    conditions = [
+        _AI_SPAN_CONDITION,
+        "Timestamp=?",
+        "ServiceName=?",
+    ]
+    params: list[Any] = [ts, service]
+    if trace_id:
+        conditions.append("TraceId=?")
+        params.append(trace_id)
+    if span_name:
+        conditions.append("SpanName=?")
+        params.append(span_name)
+
+    try:
+        row = db.execute(
+            "SELECT SpanAttributes FROM otel_traces "
+            f"WHERE {' AND '.join(conditions)} "
+            "ORDER BY Timestamp DESC LIMIT 1",
+            params,
+        ).fetchone()
+        if row is None:
+            return jsonify({"ok": False, "error": "Span not found"}), 404
+        attrs = _map_to_dict(row["SpanAttributes"])
+        raw_attrs = json.dumps(attrs, ensure_ascii=False, indent=2)
+        return _jsonify_with_optional_sql_output_mask({"ok": True, "raw_attrs": raw_attrs})
+    except Exception as exc:
+        app.logger.warning("Error fetching AI span attributes: %s", exc)
+        return jsonify({"ok": False, "error": "Failed to load span attributes"}), 500
+
+
+# ---------------------------------------------------------------------------
+# AI conversation tab  GET /api/ai/conversation
+# ---------------------------------------------------------------------------
+@app.route("/api/ai/conversation")
+@require_basic_auth
+async def get_ai_conversation():
+    """Return rendered conversation tab HTML for a single AI span."""
+    db = get_db()
+    ts = request.args.get("ts", "").strip()
+    service = request.args.get("service", "").strip()
+    trace_id = request.args.get("trace_id", "").strip()
+    span_name = request.args.get("span_name", "").strip()
+    from_ts = request.args.get("from_ts", "").strip()
+    to_ts = request.args.get("to_ts", "").strip()
+
+    if not ts or not service:
+        return "<p class='text-danger small'>Missing required params: ts and service.</p>", 400
+
+    conditions = [_AI_SPAN_CONDITION, "Timestamp=?", "ServiceName=?"]
+    params: list[Any] = [ts, service]
+    if trace_id:
+        conditions.append("TraceId=?")
+        params.append(trace_id)
+    if span_name:
+        conditions.append("SpanName=?")
+        params.append(span_name)
+
+    try:
+        row = db.execute(
+            "SELECT SpanAttributes FROM otel_traces "
+            f"WHERE {' AND '.join(conditions)} "
+            "ORDER BY Timestamp DESC LIMIT 1",
+            params,
+        ).fetchone()
+        if row is None:
+            return "<p class='text-danger small'>Span not found.</p>", 404
+        attrs = _map_to_dict(row["SpanAttributes"])
+        input_messages_raw = str(attrs.get("gen_ai.input.messages", ""))
+        output_messages_raw = str(attrs.get("gen_ai.output.messages", ""))
+        system_instructions_raw = str(attrs.get("gen_ai.system_instructions", ""))
+        prompt = _extract_messages_text(input_messages_raw) or str(attrs.get("sobs.gen_ai.prompt", ""))
+        response_text = _extract_messages_text(output_messages_raw) or str(attrs.get("sobs.gen_ai.response", ""))
+        err_type = str(attrs.get("error.type", ""))
+        err_msg = str(attrs.get("exception.message", ""))
+        finish_reason = str(attrs.get("gen_ai.response.finish_reason", ""))
+        operation = str(attrs.get("gen_ai.operation.name", "chat"))
+        input_messages = _normalize_genai_messages_for_display(_parse_genai_messages_json(input_messages_raw))
+        output_messages = _normalize_genai_messages_for_display(_parse_genai_messages_json(output_messages_raw))
+        input_messages, deduped_count = _dedupe_system_input_messages(input_messages, system_instructions_raw)
+        item: dict[str, Any] = {
+            "service": service,
+            "trace_id": trace_id,
+            "error_type": err_type,
+            "error_message": err_msg,
+            "system_instructions": system_instructions_raw,
+            "system_message_deduped_count": deduped_count,
+            "input_messages": input_messages,
+            "output_messages": output_messages,
+            "prompt": prompt,
+            "response": response_text,
+            "operation": operation,
+            "finish_reason": finish_reason,
+        }
+        html = await render_template(
+            "_ai_conversation_partial.html",
+            item=item,
+            from_ts=from_ts,
+            to_ts=to_ts,
+        )
+        return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+    except Exception as exc:
+        app.logger.warning("Error fetching AI conversation: %s", exc)
+        return "<p class='text-danger small'>Error loading conversation.</p>", 500
 
 
 # ---------------------------------------------------------------------------
@@ -19616,136 +20636,76 @@ async def view_custom_dashboard(dashboard_id: str):
     )
 
 
-@app.route("/dashboards/help/chart-editor")
-@require_basic_auth
-async def chart_editor_help():
-    return await render_template("chart_editor_help.html")
+def _register_help_route(path: str, endpoint: str, template_name: str) -> None:
+    @require_basic_auth
+    async def _help_handler(template: str = template_name):
+        return await render_template(template)
+
+    app.add_url_rule(path, endpoint=endpoint, view_func=_help_handler)
 
 
-@app.route("/metrics/help/rules")
-@require_basic_auth
-async def metrics_rules_help():
-    return await render_template("metrics_rules_help.html")
+_HELP_ROUTE_REGISTRY: list[tuple[str, str, str]] = [
+    ("/dashboards/help/chart-editor", "chart_editor_help", "chart_editor_help.html"),
+    ("/metrics/help/rules", "metrics_rules_help", "metrics_rules_help.html"),
+    ("/metrics/help/rules/auto", "auto_metrics_rules_help", "auto_metrics_rules_help.html"),
+    ("/kubernetes/help", "kubernetes_help", "kubernetes_help.html"),
+    ("/settings/help/data-management", "data_management_help", "data_management_help.html"),
+    ("/settings/help", "settings_help", "settings_help.html"),
+    ("/settings/help/masking", "masking_help", "masking_help.html"),
+    ("/settings/help/ai", "settings_ai_help", "settings_ai_help.html"),
+    ("/settings/help/agents", "settings_agents_help", "settings_agents_help.html"),
+    ("/settings/help/notifications", "settings_notifications_help", "settings_notifications_help.html"),
+    ("/settings/help/tags", "settings_tags_help", "settings_tags_help.html"),
+    ("/settings/help/enrichment", "settings_enrichment_help", "settings_enrichment_help.html"),
+    ("/settings/help/repositories", "settings_repositories_help", "settings_repositories_help.html"),
+    ("/settings/help/kubernetes", "settings_kubernetes_help", "kubernetes_help.html"),
+    ("/web-traffic/help", "web_traffic_help", "web_traffic_help.html"),
+    ("/errors/help", "errors_help", "errors_help.html"),
+    ("/table-explorer/help", "table_explorer_help", "table_explorer_help.html"),
+    ("/setup/help/playbooks", "setup_playbooks_help", "setup_playbooks_help.html"),
+    ("/logs/help", "logs_help", "logs_help.html"),
+    ("/traces/help", "traces_help", "traces_help.html"),
+    ("/rum/help", "rum_help", "rum_help.html"),
+    ("/ai/help", "ai_help", "ai_help.html"),
+    ("/cve/help", "cve_help", "cve_help.html"),
+    ("/metrics/help", "metrics_help", "metrics_help.html"),
+    ("/metrics/help/anomaly", "metrics_anomaly_help", "metrics_anomaly_help.html"),
+    ("/query/help", "query_help", "query_help.html"),
+    ("/reports/help", "reports_help", "reports_help.html"),
+    ("/summary/help", "summary_help", "summary_help.html"),
+    ("/work-items/help", "work_items_help", "work_items_help.html"),
+    ("/incident/help", "incident_help", "incident_help.html"),
+]
+
+for _help_path, _help_endpoint, _help_template in _HELP_ROUTE_REGISTRY:
+    _register_help_route(_help_path, _help_endpoint, _help_template)
 
 
-@app.route("/metrics/help/rules/auto")
-@require_basic_auth
-async def auto_metrics_rules_help():
-    return await render_template("auto_metrics_rules_help.html")
+async def _soft_delete_latest_row(
+    db: ChDbConnection,
+    *,
+    select_sql: str,
+    select_params: list[Any],
+    table_name: str,
+    build_deleted_row: Callable[[RowCompat], dict[str, Any]],
+    not_found_message: str,
+    success_message: str,
+    redirect_endpoint: str,
+    not_found_category: str = "warning",
+    success_category: str = "success",
+):
+    row = db.execute(select_sql, select_params).fetchone()
+    if not row:
+        await flash(not_found_message, not_found_category)
+        return redirect(url_for(redirect_endpoint))
 
+    payload = build_deleted_row(row)
+    payload["IsDeleted"] = 1
+    payload["Version"] = int(time.time() * 1000)
+    _insert_rows_json_each_row(db, table_name, [payload])
 
-@app.route("/kubernetes/help")
-@require_basic_auth
-async def kubernetes_help():
-    return await render_template("kubernetes_help.html")
-
-
-@app.route("/settings/help/data-management")
-@require_basic_auth
-async def data_management_help():
-    return await render_template("data_management_help.html")
-
-
-@app.route("/settings/help/masking")
-@require_basic_auth
-async def masking_help():
-    return await render_template("masking_help.html")
-
-
-@app.route("/web-traffic/help")
-@require_basic_auth
-async def web_traffic_help():
-    return await render_template("web_traffic_help.html")
-
-
-@app.route("/errors/help")
-@require_basic_auth
-async def errors_help():
-    return await render_template("errors_help.html")
-
-
-@app.route("/table-explorer/help")
-@require_basic_auth
-async def table_explorer_help():
-    return await render_template("table_explorer_help.html")
-
-
-@app.route("/setup/help/playbooks")
-@require_basic_auth
-async def setup_playbooks_help():
-    return await render_template("setup_playbooks_help.html")
-
-
-@app.route("/logs/help")
-@require_basic_auth
-async def logs_help():
-    return await render_template("logs_help.html")
-
-
-@app.route("/traces/help")
-@require_basic_auth
-async def traces_help():
-    return await render_template("traces_help.html")
-
-
-@app.route("/rum/help")
-@require_basic_auth
-async def rum_help():
-    return await render_template("rum_help.html")
-
-
-@app.route("/ai/help")
-@require_basic_auth
-async def ai_help():
-    return await render_template("ai_help.html")
-
-
-@app.route("/cve/help")
-@require_basic_auth
-async def cve_help():
-    return await render_template("cve_help.html")
-
-
-@app.route("/metrics/help")
-@require_basic_auth
-async def metrics_help():
-    return await render_template("metrics_help.html")
-
-
-@app.route("/metrics/help/anomaly")
-@require_basic_auth
-async def metrics_anomaly_help():
-    return await render_template("metrics_anomaly_help.html")
-
-
-@app.route("/query/help")
-@require_basic_auth
-async def query_help():
-    return await render_template("query_help.html")
-
-
-@app.route("/reports/help")
-@require_basic_auth
-async def reports_help():
-    return await render_template("reports_help.html")
-
-
-@app.route("/summary/help")
-@require_basic_auth
-async def summary_help():
-    return await render_template("summary_help.html")
-
-
-@app.route("/work-items/help")
-@require_basic_auth
-async def work_items_help():
-    return await render_template("work_items_help.html")
-
-
-@app.route("/incident/help")
-@require_basic_auth
-async def incident_help():
-    return await render_template("incident_help.html")
+    await flash(success_message.format(name=str(row["Name"])), success_category)
+    return redirect(url_for(redirect_endpoint))
 
 
 @app.route("/dashboards/<dashboard_id>/delete", methods=["POST"])
@@ -21485,10 +22445,17 @@ async def view_tag_rules():
     if open_panel not in {"auto-tags"}:
         open_panel = ""
     rules = _load_tag_rules(db)
+    edit_rule_id = (request.args.get("edit_rule") or "").strip()
+    edit_rule = None
+    if edit_rule_id:
+        edit_rule = next((rule for rule in rules if rule.get("id") == edit_rule_id), None)
+        if not edit_rule:
+            await flash("Tag rule not found for editing", "warning")
     services = _list_tag_candidate_services(db)
     return await render_template(
         "settings_tags.html",
         rules=rules,
+        edit_rule=edit_rule,
         record_types=_TAG_RULE_RECORD_TYPES,
         match_fields=_TAG_RULE_FIELDS,
         match_operators=_TAG_RULE_OPERATORS,
@@ -21496,6 +22463,52 @@ async def view_tag_rules():
         auto_preview=[],
         auto_summary=None,
         auto_open_panel=open_panel,
+    )
+
+
+@app.route("/api/settings/tags/condition-suggestions", methods=["GET"])
+@require_basic_auth
+async def api_tag_rule_condition_suggestions():
+    db = get_db()
+    scope = (request.args.get("scope") or "tag_rule").strip().lower()
+    field = (request.args.get("field") or "").strip().lower()
+    operator = (request.args.get("operator") or "eq").strip().lower()
+    query_text = (request.args.get("q") or "").strip()
+    attr_key = (request.args.get("attr_key") or "").strip()
+    source = (request.args.get("source") or "").strip().lower()
+    signal = (request.args.get("signal") or "").strip()
+    record_type = (request.args.get("record_type") or "all").strip().lower()
+    tag_key = (request.args.get("tag_key") or "").strip()
+    target = (request.args.get("target") or "value").strip().lower()
+    try:
+        limit = max(3, min(20, int(request.args.get("limit") or 8)))
+    except (TypeError, ValueError):
+        limit = 8
+
+    if scope == "tag_rule":
+        if target == "attr_key":
+            suggestions = _tag_rule_attribute_key_suggestions(db, query_text, limit)
+        else:
+            suggestions = _tag_rule_value_suggestions(db, field, operator, query_text, attr_key, limit)
+    else:
+        if target == "service":
+            suggestions = _notification_condition_service_suggestions(db, query_text, limit, source, signal)
+        elif target == "tag_key":
+            suggestions = _record_tag_key_suggestions(db, query_text, limit, record_type)
+        elif target == "tag_value":
+            suggestions = _record_tag_value_suggestions(db, tag_key, query_text, limit, record_type)
+        else:
+            suggestions = []
+
+    return masked_jsonify(
+        {
+            "ok": True,
+            "scope": scope,
+            "field": field,
+            "operator": operator,
+            "target": target,
+            "suggestions": suggestions,
+        }
     )
 
 
@@ -21561,6 +22574,17 @@ async def auto_tag_rules():
                     "MatchAttrKey": str(candidate["match_attr_key"]),
                     "TagKey": str(candidate["tag_key"]),
                     "TagValue": str(candidate["tag_value"]),
+                    "ConditionsJson": json.dumps(
+                        [
+                            {
+                                "match_field": str(candidate["match_field"]),
+                                "match_operator": str(candidate["match_operator"]),
+                                "match_value": str(candidate["match_value"]),
+                                "match_attr_key": str(candidate["match_attr_key"]),
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
                     "IsDeleted": 0,
                     "Version": version + idx,
                 }
@@ -21604,40 +22628,102 @@ async def auto_tag_rules():
 @require_basic_auth
 async def create_tag_rule():
     form = await request.form
+    edit_rule_id = (form.get("edit_rule_id") or "").strip()
+    redirect_endpoint = url_for("view_tag_rules", edit_rule=edit_rule_id) if edit_rule_id else url_for("view_tag_rules")
     name = (form.get("name") or "").strip()
     record_types_list = form.getlist("record_types")
-    match_field = (form.get("match_field") or "").strip().lower()
-    match_operator = (form.get("match_operator") or "eq").strip().lower()
-    match_value = (form.get("match_value") or "").strip()
-    match_attr_key = (form.get("match_attr_key") or "").strip()
     tag_key = (form.get("tag_key") or "").strip()
     tag_value = (form.get("tag_value") or "").strip()
 
-    if not name or not match_field or not tag_key or not tag_value:
-        await flash("Name, match field, tag key, and tag value are required", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_field not in _TAG_RULE_FIELDS:
-        await flash(f"Invalid match field: {match_field}", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_operator not in _TAG_RULE_OPERATORS:
-        await flash(f"Invalid match operator: {match_operator}", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_field == "attribute" and not match_attr_key:
-        await flash("Attribute key is required when match field is 'attribute'", "warning")
-        return redirect(url_for("view_tag_rules"))
-    if match_operator == "regex":
-        try:
-            re.compile(match_value)
-        except re.error as exc:
-            await flash(f"Invalid regex pattern: {exc}", "warning")
-            return redirect(url_for("view_tag_rules"))
+    # --- Composite conditions ---------------------------------------------------
+    # The form may submit multiple conditions via parallel lists:
+    #   condition_field[]  condition_operator[]  condition_value[]  condition_attr_key[]
+    # When at least two conditions are present the rule is "composite".
+    # When exactly one condition is provided it is stored both as ConditionsJson
+    # (for forward-compat reads) AND in the legacy MatchField/MatchOperator/MatchValue
+    # columns (for backward compat with existing query paths).
+    cond_fields = form.getlist("condition_field")
+    cond_operators = form.getlist("condition_operator")
+    cond_values = form.getlist("condition_value")
+    cond_attr_keys = form.getlist("condition_attr_key")
+
+    # Zip together, padding shorter lists with empty strings
+    n = max(len(cond_fields), len(cond_operators), len(cond_values), len(cond_attr_keys))
+
+    def _get(lst: list, i: int) -> str:
+        return lst[i].strip() if i < len(lst) else ""
+
+    conditions: list[dict] = []
+    for i in range(n):
+        f = _get(cond_fields, i).lower()
+        op = _get(cond_operators, i).lower() or "eq"
+        val = _get(cond_values, i)
+        attr = _get(cond_attr_keys, i)
+        if f:
+            conditions.append({"match_field": f, "match_operator": op, "match_value": val, "match_attr_key": attr})
+
+    # Fall back to single-condition fields if no composite conditions supplied
+    if not conditions:
+        match_field = (form.get("match_field") or "").strip().lower()
+        match_operator = (form.get("match_operator") or "eq").strip().lower()
+        match_value = (form.get("match_value") or "").strip()
+        match_attr_key = (form.get("match_attr_key") or "").strip()
+        if match_field:
+            conditions = [
+                {
+                    "match_field": match_field,
+                    "match_operator": match_operator,
+                    "match_value": match_value,
+                    "match_attr_key": match_attr_key,
+                }
+            ]
+
+    if not name or not conditions or not tag_key or not tag_value:
+        await flash("Name, at least one match condition, tag key, and tag value are required", "warning")
+        return redirect(redirect_endpoint)
+
+    valid_fields = set(_TAG_RULE_FIELDS)
+    valid_ops = set(_TAG_RULE_OPERATORS)
+    for cond in conditions:
+        if cond["match_field"] not in valid_fields:
+            await flash(f"Invalid match field: {cond['match_field']}", "warning")
+            return redirect(redirect_endpoint)
+        if cond["match_operator"] not in valid_ops:
+            await flash(f"Invalid match operator: {cond['match_operator']}", "warning")
+            return redirect(redirect_endpoint)
+        if cond["match_field"] == "attribute" and not cond["match_attr_key"]:
+            await flash("Attribute key is required when match field is 'attribute'", "warning")
+            return redirect(redirect_endpoint)
+        if cond["match_operator"] == "regex":
+            try:
+                re.compile(cond["match_value"])
+            except re.error as exc:
+                await flash(f"Invalid regex pattern: {exc}", "warning")
+                return redirect(redirect_endpoint)
 
     # Normalise record types
     valid_types = set(_TAG_RULE_RECORD_TYPES)
     chosen = [t.strip() for t in record_types_list if t.strip() in valid_types]
     record_types_str = ",".join(chosen) if chosen else "all"
 
+    # For the legacy single-condition columns use the first condition.
+    primary = conditions[0]
+
     rule_id = str(uuid.uuid4())
+    if edit_rule_id:
+        existing_row = (
+            get_db()
+            .execute(
+                "SELECT Id FROM sobs_tag_rules FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1",
+                [edit_rule_id],
+            )
+            .fetchone()
+        )
+        if not existing_row:
+            await flash("Tag rule not found for editing", "warning")
+            return redirect(url_for("view_tag_rules"))
+        rule_id = str(existing_row["Id"])
+
     _insert_rows_json_each_row(
         get_db(),
         "sobs_tag_rules",
@@ -21646,18 +22732,19 @@ async def create_tag_rule():
                 "Id": rule_id,
                 "Name": name,
                 "RecordTypes": record_types_str,
-                "MatchField": match_field,
-                "MatchOperator": match_operator,
-                "MatchValue": match_value,
-                "MatchAttrKey": match_attr_key,
+                "MatchField": primary["match_field"],
+                "MatchOperator": primary["match_operator"],
+                "MatchValue": primary["match_value"],
+                "MatchAttrKey": primary["match_attr_key"],
                 "TagKey": tag_key,
                 "TagValue": tag_value,
+                "ConditionsJson": json.dumps(conditions, ensure_ascii=False),
                 "IsDeleted": 0,
                 "Version": int(time.time() * 1000),
             }
         ],
     )
-    await flash(f"Tag rule '{name}' created", "success")
+    await flash(f"Tag rule '{name}' {'updated' if edit_rule_id else 'created'}", "success")
     return redirect(url_for("view_tag_rules"))
 
 
@@ -21665,34 +22752,31 @@ async def create_tag_rule():
 @require_basic_auth
 async def delete_tag_rule(rule_id: str):
     db = get_db()
-    row = db.execute(
-        "SELECT Id, Name FROM sobs_tag_rules FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1",
-        [rule_id],
-    ).fetchone()
-    if not row:
-        await flash("Tag rule not found", "warning")
-        return redirect(url_for("view_tag_rules"))
-    _insert_rows_json_each_row(
+
+    def _deleted_row(row: RowCompat) -> dict[str, Any]:
+        return {
+            "Id": rule_id,
+            "Name": str(row["Name"]),
+            "RecordTypes": "",
+            "MatchField": "",
+            "MatchOperator": "eq",
+            "MatchValue": "",
+            "MatchAttrKey": "",
+            "TagKey": "",
+            "TagValue": "",
+            "ConditionsJson": "[]",
+        }
+
+    return await _soft_delete_latest_row(
         db,
-        "sobs_tag_rules",
-        [
-            {
-                "Id": rule_id,
-                "Name": str(row["Name"]),
-                "RecordTypes": "",
-                "MatchField": "",
-                "MatchOperator": "eq",
-                "MatchValue": "",
-                "MatchAttrKey": "",
-                "TagKey": "",
-                "TagValue": "",
-                "IsDeleted": 1,
-                "Version": int(time.time() * 1000),
-            }
-        ],
+        select_sql="SELECT Id, Name FROM sobs_tag_rules FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1",
+        select_params=[rule_id],
+        table_name="sobs_tag_rules",
+        build_deleted_row=_deleted_row,
+        not_found_message="Tag rule not found",
+        success_message="Tag rule '{name}' deleted",
+        redirect_endpoint="view_tag_rules",
     )
-    await flash(f"Tag rule '{row['Name']}' deleted", "success")
-    return redirect(url_for("view_tag_rules"))
 
 
 # ---------------------------------------------------------------------------
@@ -21983,26 +23067,44 @@ def _regex_scope_time_conditions(scope: dict[str, Any], column: str) -> tuple[li
     return conditions, params
 
 
+def _parse_and_validate_regex_expression_for_api(db: Any, expression: str) -> tuple[list[str], list[str], str | None]:
+    include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, expression)
+    if regex_error:
+        return [], [], regex_error.replace("Regex error: ", "", 1)
+    return include_patterns, exclude_patterns, None
+
+
 def _regex_best_effort_sample(
     db: Any,
     *,
     from_sql: str,
     sample_column: str,
     order_column: str,
-    pattern: str,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
     where_parts: list[str],
     where_params: list[Any],
 ) -> str | None:
     """Return a bounded sample match by probing only recent candidate rows."""
     where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    regex_conditions: list[str] = []
+    regex_params: list[Any] = []
+    _append_regex_expression_clauses(
+        conditions=regex_conditions,
+        params=regex_params,
+        column="sample_value",
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+    )
+    regex_where_sql = ("WHERE " + " AND ".join(regex_conditions)) if regex_conditions else ""
     sql = (
-        f"SELECT {sample_column} FROM ("
-        f"SELECT {sample_column} FROM {from_sql} "
+        "SELECT sample_value FROM ("
+        f"SELECT {sample_column} AS sample_value FROM {from_sql} "
         f"{where_sql} ORDER BY {order_column} DESC LIMIT ?"
         ") "
-        f"WHERE match({sample_column}, ?) LIMIT 1"
+        f"{regex_where_sql} LIMIT 1"
     )
-    params = [*where_params, _REGEX_VALIDATE_CANDIDATE_LIMIT, pattern]
+    params = [*where_params, _REGEX_VALIDATE_CANDIDATE_LIMIT, *regex_params]
     row = db.execute(sql, params).fetchone()
     return _truncate_sample(row[0] if row else None)
 
@@ -22023,14 +23125,13 @@ async def api_logs_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     # Attempt a cheap LIMIT 1 probe to surface a real sample match.
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22057,7 +23158,8 @@ async def api_logs_validate_regex():
             from_sql="otel_logs",
             sample_column="Body",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22082,13 +23184,12 @@ async def api_errors_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22106,7 +23207,8 @@ async def api_errors_validate_regex():
             from_sql=f"({ERROR_SOURCES_SQL})",
             sample_column="Body",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22131,13 +23233,12 @@ async def api_traces_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22159,7 +23260,8 @@ async def api_traces_validate_regex():
             from_sql="otel_traces",
             sample_column="SpanName",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22184,13 +23286,12 @@ async def api_metrics_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22220,7 +23321,8 @@ async def api_metrics_validate_regex():
             from_sql="v_derived_signals_anomaly",
             sample_column="SignalName",
             order_column="time",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22245,13 +23347,12 @@ async def api_rum_validate_regex():
     if not pattern:
         return jsonify({"ok": True, "sample": None})
 
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as exc:
-        return jsonify({"ok": False, "error": str(exc), "sample": None})
+    db = get_db()
+    include_patterns, _exclude_patterns, expression_error = _parse_and_validate_regex_expression_for_api(db, pattern)
+    if expression_error:
+        return jsonify({"ok": False, "error": expression_error, "sample": None})
 
     try:
-        db = get_db()
         where_parts: list[str] = []
         where_params: list[Any] = []
 
@@ -22273,7 +23374,8 @@ async def api_rum_validate_regex():
             from_sql="hyperdx_sessions",
             sample_column="Body",
             order_column="Timestamp",
-            pattern=pattern,
+            include_patterns=include_patterns,
+            exclude_patterns=_exclude_patterns,
             where_parts=where_parts,
             where_params=where_params,
         )
@@ -22574,6 +23676,9 @@ _NOTIFICATION_CHANNEL_TYPES = ("webhook", "slack", "email", "browser_push")
 _NOTIFICATION_COMPARATORS = ("gt", "lt", "gte", "lte", "eq")
 _NOTIFICATION_SEVERITIES = ("warning", "critical")
 _NOTIFICATION_LOGIC_OPERATORS = ("any", "all")  # any=OR, all=AND
+_NOTIFICATION_CONDITION_TYPES = ("signal", "tag")
+_NOTIFICATION_TAG_MATCH_OPERATORS = ("eq", "contains", "regex")
+_NOTIFICATION_TAG_RECORD_TYPES = ("all", "log", "trace", "error", "ai", "rum")
 
 # VAPID JWT expiry window (12 hours)
 _VAPID_JWT_EXPIRY_SECONDS = 43200
@@ -22675,6 +23780,81 @@ def _load_notification_channels(db: ChDbConnection) -> list[dict]:
     ]
 
 
+def _normalize_notification_condition(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    condition_type = str(raw.get("type") or "signal").strip().lower()
+    if condition_type == "tag":
+        record_type = str(raw.get("record_type") or "all").strip().lower()
+        if record_type not in _NOTIFICATION_TAG_RECORD_TYPES:
+            record_type = "all"
+        tag_match_operator = str(raw.get("tag_match_operator") or "eq").strip().lower()
+        if tag_match_operator not in _NOTIFICATION_TAG_MATCH_OPERATORS:
+            tag_match_operator = "eq"
+        comparator = str(raw.get("comparator") or "gt").strip().lower()
+        if comparator not in _NOTIFICATION_COMPARATORS:
+            comparator = "gt"
+        try:
+            threshold = float(raw.get("threshold") or 0)
+        except (TypeError, ValueError):
+            threshold = 0.0
+        try:
+            window_minutes = max(1, min(60, int(raw.get("window_minutes") or 5)))
+        except (TypeError, ValueError):
+            window_minutes = 5
+        return {
+            "type": "tag",
+            "record_type": record_type,
+            "tag_key": str(raw.get("tag_key") or "").strip(),
+            "tag_match_operator": tag_match_operator,
+            "tag_value": str(raw.get("tag_value") or "").strip(),
+            "comparator": comparator,
+            "threshold": threshold,
+            "window_minutes": window_minutes,
+        }
+
+    comparator = str(raw.get("comparator") or "gt").strip().lower()
+    if comparator not in _NOTIFICATION_COMPARATORS:
+        comparator = "gt"
+    try:
+        threshold = float(raw.get("threshold") or 0)
+    except (TypeError, ValueError):
+        threshold = 0.0
+    try:
+        window_minutes = max(1, min(60, int(raw.get("window_minutes") or 5)))
+    except (TypeError, ValueError):
+        window_minutes = 5
+    return {
+        "type": "signal",
+        "source": str(raw.get("source") or "").strip(),
+        "signal": str(raw.get("signal") or "").strip(),
+        "service": str(raw.get("service") or "").strip(),
+        "comparator": comparator,
+        "threshold": threshold,
+        "window_minutes": window_minutes,
+    }
+
+
+def _parse_notification_conditions_json(raw: Any) -> list[dict[str, Any]]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in parsed:
+        condition = _normalize_notification_condition(item)
+        if condition is not None:
+            normalized.append(condition)
+    return normalized
+
+
 def _load_notification_rules(db: ChDbConnection) -> list[dict]:
     """Return all active notification rules."""
     rows = db.execute(
@@ -22688,7 +23868,7 @@ def _load_notification_rules(db: ChDbConnection) -> list[dict]:
             "name": str(row["Name"]),
             "enabled": bool(int(row["Enabled"])),
             "logic_operator": str(row["LogicOperator"] or "any"),
-            "conditions": json.loads(str(row["ConditionsJson"]) or "[]"),
+            "conditions": _parse_notification_conditions_json(row["ConditionsJson"]),
             "channel_ids": [c.strip() for c in str(row["ChannelIds"]).split(",") if c.strip()],
             "severity": str(row["Severity"] or "warning"),
             "cooldown_seconds": int(row["CooldownSeconds"]),
@@ -22755,12 +23935,27 @@ def _build_notification_payload(
     for cond in fired_conditions:
         comparator_labels = {"gt": ">", "lt": "<", "gte": "≥", "lte": "≤", "eq": "="}
         comp = comparator_labels.get(str(cond.get("comparator", "gt")), ">")
-        svc = cond.get("service", "")
-        service_str = f" [{svc}]" if svc else ""
-        condition_summaries.append(
-            f"{cond.get('source', '')}/{cond.get('signal', '')}{service_str} {comp} "
-            f"{cond.get('threshold', 0)} (value={cond.get('_value', 'n/a')})"
-        )
+        if str(cond.get("type") or "signal") == "tag":
+            record_type = str(cond.get("record_type") or "all")
+            record_type_str = "" if not record_type or record_type == "all" else f"[{record_type}] "
+            tag_key = str(cond.get("tag_key") or "")
+            tag_match_operator = str(cond.get("tag_match_operator") or "eq")
+            tag_value = str(cond.get("tag_value") or "")
+            if tag_value:
+                tag_expr = f"{tag_key} {tag_match_operator} {tag_value}"
+            else:
+                tag_expr = tag_key
+            condition_summaries.append(
+                f"tag {record_type_str}{tag_expr} {comp} {cond.get('threshold', 0)} "
+                f"(value={cond.get('_value', 'n/a')})"
+            )
+        else:
+            svc = cond.get("service", "")
+            service_str = f" [{svc}]" if svc else ""
+            condition_summaries.append(
+                f"{cond.get('source', '')}/{cond.get('signal', '')}{service_str} {comp} "
+                f"{cond.get('threshold', 0)} (value={cond.get('_value', 'n/a')})"
+            )
     summary = f"[SOBS] Rule '{rule['name']}' triggered ({rule['severity'].upper()}): " + "; ".join(condition_summaries)
     if mask_output_enabled:
         summary = _mask_string_for_output(summary)
@@ -23094,6 +24289,64 @@ def _evaluate_signal_condition(db: ChDbConnection, cond: dict) -> tuple[bool, fl
     return matched, current_value
 
 
+def _evaluate_tag_condition(db: ChDbConnection, cond: dict) -> tuple[bool, float]:
+    """Evaluate a notification tag condition against recent tag assignments."""
+    record_type = str(cond.get("record_type", "all")).strip().lower()
+    tag_key = str(cond.get("tag_key", "")).strip()
+    tag_match_operator = str(cond.get("tag_match_operator", "eq")).strip().lower()
+    tag_value = str(cond.get("tag_value", "")).strip()
+    comparator = str(cond.get("comparator", "gt")).strip()
+    threshold = float(cond.get("threshold", 0))
+    window_minutes = max(1, min(60, int(cond.get("window_minutes", 5))))
+
+    if not tag_key:
+        return False, 0.0
+
+    min_version = int((time.time() - (window_minutes * 60)) * 1000)
+    where_parts = ["IsDeleted = 0", "Version >= ?", "TagKey = ?"]
+    params: list[object] = [min_version, tag_key]
+    if record_type and record_type != "all":
+        where_parts.append("RecordType = ?")
+        params.append(record_type)
+
+    if tag_value:
+        if tag_match_operator == "eq":
+            where_parts.append("TagValue = ?")
+            params.append(tag_value)
+        elif tag_match_operator == "contains":
+            where_parts.append("positionCaseInsensitive(TagValue, ?) > 0")
+            params.append(tag_value)
+        elif tag_match_operator == "regex":
+            where_parts.append("match(TagValue, ?)")
+            params.append(tag_value)
+
+    try:
+        row = db.execute(
+            "SELECT count() AS c FROM sobs_record_tags FINAL WHERE " + " AND ".join(where_parts),
+            params,
+        ).fetchone()
+    except Exception:
+        return False, 0.0
+
+    current_value = float((row["c"] if row is not None else 0) or 0)
+    comp_map = {
+        "gt": current_value > threshold,
+        "lt": current_value < threshold,
+        "gte": current_value >= threshold,
+        "lte": current_value <= threshold,
+        "eq": abs(current_value - threshold) < 1e-9,
+    }
+    matched = comp_map.get(comparator, False)
+    return matched, current_value
+
+
+def _evaluate_notification_condition(db: ChDbConnection, cond: dict) -> tuple[bool, float]:
+    condition_type = str(cond.get("type") or "signal").strip().lower()
+    if condition_type == "tag":
+        return _evaluate_tag_condition(db, cond)
+    return _evaluate_signal_condition(db, cond)
+
+
 async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_id: dict) -> dict:
     """Evaluate one notification rule. Dispatches if triggered. Returns status dict."""
     if not rule.get("enabled"):
@@ -23126,7 +24379,7 @@ async def _check_notification_rule(db: ChDbConnection, rule: dict, channels_by_i
     not_fired: list[dict] = []
 
     for cond in conditions:
-        matched, value = _evaluate_signal_condition(db, cond)
+        matched, value = _evaluate_notification_condition(db, cond)
         annotated = dict(cond)
         annotated["_value"] = round(value, 4)
         if matched:
@@ -23263,7 +24516,8 @@ def _agent_rule_trigger_state_matches(trigger_state: str, event_state: str) -> b
 def _collect_anomaly_agent_events(db: ChDbConnection) -> dict[str, dict[str, object]]:
     rows = db.execute(
         "SELECT ServiceName, SignalSource, SignalName, AttrFingerprint, "
-        "argMax(value, time) AS value, argMax(SampleCount, time) AS SampleCount, argMax(time, time) AS time "
+        "argMax(value, time) AS value, argMax(SampleCount, time) AS SampleCount, "
+        "argMax(time, time) AS latest_time "
         "FROM v_derived_signals_anomaly "
         "WHERE time >= now() - INTERVAL 24 HOUR "
         "GROUP BY ServiceName, SignalSource, SignalName, AttrFingerprint"
@@ -23281,7 +24535,7 @@ def _collect_anomaly_agent_events(db: ChDbConnection) -> dict[str, dict[str, obj
         attr_fp_key="AttrFingerprint",
         value_key="value",
         sample_count_key="SampleCount",
-        time_key="time",
+        time_key="latest_time",
     )
 
     events_by_rule: dict[str, dict[str, object]] = {}
@@ -23612,6 +24866,8 @@ async def view_notifications():
     db = get_db()
     channels = _load_notification_channels(db)
     rules = _load_notification_rules(db)
+    edit_rule_id = (request.args.get("edit_rule") or "").strip()
+    edit_rule = next((rule for rule in rules if str(rule.get("id", "")) == edit_rule_id), None)
     notification_log = _load_notification_log(db, limit=50)
     vapid_public_key, vapid_key_source = _get_vapid_public_key(db)
     metric_rules = _load_anomaly_rules(db)
@@ -23622,9 +24878,13 @@ async def view_notifications():
         notification_log=notification_log,
         channel_types=_NOTIFICATION_CHANNEL_TYPES,
         comparators=_NOTIFICATION_COMPARATORS,
+        condition_types=_NOTIFICATION_CONDITION_TYPES,
         severities=_NOTIFICATION_SEVERITIES,
         logic_operators=_NOTIFICATION_LOGIC_OPERATORS,
         signal_sources=_NOTIFICATION_SIGNAL_SOURCES,
+        tag_match_operators=_NOTIFICATION_TAG_MATCH_OPERATORS,
+        tag_record_types=_NOTIFICATION_TAG_RECORD_TYPES,
+        edit_rule=edit_rule,
         vapid_public_key=vapid_public_key,
         vapid_key_source=vapid_key_source,
         metric_rules=metric_rules,
@@ -23712,31 +24972,29 @@ async def create_notification_channel():
 async def delete_notification_channel(channel_id: str):
     """Soft-delete a notification channel."""
     db = get_db()
-    row = db.execute(
-        "SELECT Id, Name, ChannelType, ConfigJson, Enabled "
-        "FROM sobs_notification_channels FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1",
-        [channel_id],
-    ).fetchone()
-    if not row:
-        await flash("Notification channel not found", "warning")
-        return redirect(url_for("view_notifications"))
-    _insert_rows_json_each_row(
+
+    def _deleted_row(row: RowCompat) -> dict[str, Any]:
+        return {
+            "Id": channel_id,
+            "Name": str(row["Name"]),
+            "ChannelType": str(row["ChannelType"]),
+            "ConfigJson": str(row["ConfigJson"]),
+            "Enabled": int(row["Enabled"]),
+        }
+
+    return await _soft_delete_latest_row(
         db,
-        "sobs_notification_channels",
-        [
-            {
-                "Id": channel_id,
-                "Name": str(row["Name"]),
-                "ChannelType": str(row["ChannelType"]),
-                "ConfigJson": str(row["ConfigJson"]),
-                "Enabled": int(row["Enabled"]),
-                "IsDeleted": 1,
-                "Version": int(time.time() * 1000),
-            }
-        ],
+        select_sql=(
+            "SELECT Id, Name, ChannelType, ConfigJson, Enabled "
+            "FROM sobs_notification_channels FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1"
+        ),
+        select_params=[channel_id],
+        table_name="sobs_notification_channels",
+        build_deleted_row=_deleted_row,
+        not_found_message="Notification channel not found",
+        success_message="Notification channel '{name}' deleted",
+        redirect_endpoint="view_notifications",
     )
-    await flash(f"Notification channel '{row['Name']}' deleted", "success")
-    return redirect(url_for("view_notifications"))
 
 
 @app.route("/settings/notifications/channels/<channel_id>/toggle", methods=["POST"])
@@ -23812,8 +25070,9 @@ async def test_notification_channel(channel_id: str):
 @app.route("/settings/notifications/rules", methods=["POST"])
 @require_basic_auth
 async def create_notification_rule():
-    """Create a new notification rule."""
+    """Create or update a notification rule."""
     form = await request.form
+    edit_rule_id = (form.get("edit_rule_id") or "").strip()
     name = (form.get("name") or "").strip()
     logic_operator = (form.get("logic_operator") or "any").strip().lower()
     severity = (form.get("severity") or "warning").strip().lower()
@@ -23827,6 +25086,11 @@ async def create_notification_rule():
     sources = form.getlist("cond_source")
     signals = form.getlist("cond_signal")
     services = form.getlist("cond_service")
+    condition_types = form.getlist("cond_type")
+    record_types = form.getlist("cond_record_type")
+    tag_keys = form.getlist("cond_tag_key")
+    tag_match_operators = form.getlist("cond_tag_match_operator")
+    tag_values = form.getlist("cond_tag_value")
     comparators = form.getlist("cond_comparator")
     thresholds = form.getlist("cond_threshold")
     windows = form.getlist("cond_window_minutes")
@@ -23842,11 +25106,26 @@ async def create_notification_rule():
         return redirect(url_for("view_notifications"))
 
     conditions = []
-    for i, source in enumerate(sources):
-        source = (source or "").strip()
-        signal = (signals[i] if i < len(signals) else "").strip()
-        service = (services[i] if i < len(services) else "").strip()
-        comparator = (comparators[i] if i < len(comparators) else "gt").strip()
+    row_count = max(
+        len(condition_types),
+        len(sources),
+        len(signals),
+        len(services),
+        len(record_types),
+        len(tag_keys),
+        len(tag_match_operators),
+        len(tag_values),
+        len(comparators),
+        len(thresholds),
+        len(windows),
+    )
+    for i in range(row_count):
+        condition_type = (condition_types[i] if i < len(condition_types) else "signal").strip().lower()
+        if condition_type not in _NOTIFICATION_CONDITION_TYPES:
+            await flash(f"Invalid notification condition type: {condition_type}", "warning")
+            return redirect(url_for("view_notifications"))
+
+        comparator = (comparators[i] if i < len(comparators) else "gt").strip().lower()
         try:
             threshold = float(thresholds[i] if i < len(thresholds) else 0)
         except (TypeError, ValueError):
@@ -23856,12 +25135,51 @@ async def create_notification_rule():
         except (TypeError, ValueError):
             window_minutes = 5
 
-        if not source or not signal:
-            continue
         if comparator not in _NOTIFICATION_COMPARATORS:
             comparator = "gt"
+        if condition_type == "tag":
+            record_type = (record_types[i] if i < len(record_types) else "all").strip().lower()
+            tag_key = (tag_keys[i] if i < len(tag_keys) else "").strip()
+            tag_match_operator = (tag_match_operators[i] if i < len(tag_match_operators) else "eq").strip().lower()
+            tag_value = (tag_values[i] if i < len(tag_values) else "").strip()
+            if not tag_key:
+                continue
+            if record_type not in _NOTIFICATION_TAG_RECORD_TYPES:
+                record_type = "all"
+            if tag_match_operator not in _NOTIFICATION_TAG_MATCH_OPERATORS:
+                tag_match_operator = "eq"
+            if tag_match_operator == "regex":
+                try:
+                    re.compile(tag_value)
+                except re.error as exc:
+                    await flash(f"Invalid tag regex pattern: {exc}", "warning")
+                    return redirect(
+                        url_for("view_notifications", edit_rule=edit_rule_id)
+                        if edit_rule_id
+                        else url_for("view_notifications")
+                    )
+            conditions.append(
+                {
+                    "type": "tag",
+                    "record_type": record_type,
+                    "tag_key": tag_key,
+                    "tag_match_operator": tag_match_operator,
+                    "tag_value": tag_value,
+                    "comparator": comparator,
+                    "threshold": threshold,
+                    "window_minutes": window_minutes,
+                }
+            )
+            continue
+
+        source = (sources[i] if i < len(sources) else "").strip()
+        signal = (signals[i] if i < len(signals) else "").strip()
+        service = (services[i] if i < len(services) else "").strip()
+        if not source or not signal:
+            continue
         conditions.append(
             {
+                "type": "signal",
                 "source": source,
                 "signal": signal,
                 "service": service,
@@ -23883,7 +25201,22 @@ async def create_notification_rule():
     }
     channel_ids = [c.strip() for c in channel_ids_raw if c.strip() in valid_channel_ids]
 
+    enabled = 1
+    last_fired_at = "1970-01-01 00:00:00.000"
     rule_id = str(uuid.uuid4())
+    if edit_rule_id:
+        existing_row = db.execute(
+            "SELECT Id, Enabled, LastFiredAt FROM sobs_notification_rules FINAL "
+            "WHERE Id = ? AND IsDeleted = 0 LIMIT 1",
+            [edit_rule_id],
+        ).fetchone()
+        if not existing_row:
+            await flash("Notification rule not found for editing", "warning")
+            return redirect(url_for("view_notifications"))
+        rule_id = str(existing_row["Id"])
+        enabled = int(existing_row["Enabled"])
+        last_fired_at = str(existing_row["LastFiredAt"])
+
     _insert_rows_json_each_row(
         db,
         "sobs_notification_rules",
@@ -23891,19 +25224,22 @@ async def create_notification_rule():
             {
                 "Id": rule_id,
                 "Name": name,
-                "Enabled": 1,
+                "Enabled": enabled,
                 "LogicOperator": logic_operator,
                 "ConditionsJson": json.dumps(conditions, ensure_ascii=False),
                 "ChannelIds": ",".join(channel_ids),
                 "Severity": severity,
                 "CooldownSeconds": cooldown_seconds,
-                "LastFiredAt": "1970-01-01 00:00:00.000",
+                "LastFiredAt": last_fired_at,
                 "IsDeleted": 0,
                 "Version": int(time.time() * 1000),
             }
         ],
     )
-    await flash(f"Notification rule '{name}' created", "success")
+    await flash(
+        f"Notification rule '{name}' {'updated' if edit_rule_id else 'created'}",
+        "success",
+    )
     return redirect(url_for("view_notifications"))
 
 
@@ -23951,35 +25287,33 @@ async def toggle_notification_rule(rule_id: str):
 async def delete_notification_rule(rule_id: str):
     """Soft-delete a notification rule."""
     db = get_db()
-    row = db.execute(
-        "SELECT Id, Name, LogicOperator, ConditionsJson, ChannelIds, Severity, CooldownSeconds, Enabled "
-        "FROM sobs_notification_rules FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1",
-        [rule_id],
-    ).fetchone()
-    if not row:
-        await flash("Notification rule not found", "warning")
-        return redirect(url_for("view_notifications"))
-    _insert_rows_json_each_row(
+
+    def _deleted_row(row: RowCompat) -> dict[str, Any]:
+        return {
+            "Id": rule_id,
+            "Name": str(row["Name"]),
+            "Enabled": int(row["Enabled"]),
+            "LogicOperator": str(row["LogicOperator"]),
+            "ConditionsJson": str(row["ConditionsJson"]),
+            "ChannelIds": str(row["ChannelIds"]),
+            "Severity": str(row["Severity"]),
+            "CooldownSeconds": int(row["CooldownSeconds"]),
+            "LastFiredAt": "1970-01-01 00:00:00.000",
+        }
+
+    return await _soft_delete_latest_row(
         db,
-        "sobs_notification_rules",
-        [
-            {
-                "Id": rule_id,
-                "Name": str(row["Name"]),
-                "Enabled": int(row["Enabled"]),
-                "LogicOperator": str(row["LogicOperator"]),
-                "ConditionsJson": str(row["ConditionsJson"]),
-                "ChannelIds": str(row["ChannelIds"]),
-                "Severity": str(row["Severity"]),
-                "CooldownSeconds": int(row["CooldownSeconds"]),
-                "LastFiredAt": "1970-01-01 00:00:00.000",
-                "IsDeleted": 1,
-                "Version": int(time.time() * 1000),
-            }
-        ],
+        select_sql=(
+            "SELECT Id, Name, LogicOperator, ConditionsJson, ChannelIds, Severity, CooldownSeconds, Enabled "
+            "FROM sobs_notification_rules FINAL WHERE Id = ? AND IsDeleted = 0 LIMIT 1"
+        ),
+        select_params=[rule_id],
+        table_name="sobs_notification_rules",
+        build_deleted_row=_deleted_row,
+        not_found_message="Notification rule not found",
+        success_message="Notification rule '{name}' deleted",
+        redirect_endpoint="view_notifications",
     )
-    await flash(f"Notification rule '{row['Name']}' deleted", "success")
-    return redirect(url_for("view_notifications"))
 
 
 def _get_notification_auto_candidates(
@@ -24466,6 +25800,7 @@ async def health_db():
 async def view_ai_settings():
     db = get_db()
     settings = _load_all_ai_settings(db)
+    ai_pricing, ai_pricing_sources = _load_ai_pricing_with_sources(db)
     anomaly_rules = _load_anomaly_rules(db)
     tag_rules = _load_tag_rules(db)
     token_expiry_status = _github_token_expiry_status(str(settings.get("ai.github_token_expires_at", "")).strip())
@@ -24484,6 +25819,10 @@ async def view_ai_settings():
         ),
         github_token_expiry_status=token_expiry_status,
         github_token_validation_status=token_validation_status,
+        default_ai_pricing=_DEFAULT_AI_PRICING,
+        saved_ai_pricing=ai_pricing,
+        ai_pricing_sources=ai_pricing_sources,
+        confirmed_ai_pricing_models=sorted(_load_confirmed_ai_pricing_models(db)),
     )
 
 
@@ -24501,6 +25840,8 @@ async def save_ai_settings():
             "ai.github_token_last_validated_at",
             "ai.github_token_last_validation_status",
             "ai.github_token_last_validation_message",
+            "ai.model_pricing",  # handled separately with JSON validation below
+            "ai.model_pricing_confirmed",  # handled separately with JSON validation below
         }:
             # Guard thinking is intentionally not user-configured via the Settings UI.
             continue
@@ -24508,6 +25849,48 @@ async def save_ai_settings():
         field = key.removeprefix("ai.")
         value = (form.get(field) or "").strip()
         _save_ai_setting(db, key, value)
+
+    # Validate and save model pricing JSON
+    raw_pricing = (form.get("model_pricing") or "").strip()
+    clean: dict[str, Any] = {}
+    if raw_pricing:
+        try:
+            parsed = json.loads(raw_pricing)
+            if not isinstance(parsed, dict):
+                raise ValueError("pricing must be a JSON object")
+            # Re-serialize to normalize whitespace and strip invalid entries
+            for model_key, prices in parsed.items():
+                normalized_key = _normalize_ai_model_name(model_key)
+                entry = _coerce_ai_pricing_entry(prices)
+                if normalized_key and entry:
+                    clean[normalized_key] = entry
+            _save_ai_setting(db, "ai.model_pricing", json.dumps(clean))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return jsonify({"error": "Invalid model_pricing JSON"}), 400
+    else:
+        _save_ai_setting(db, "ai.model_pricing", "")
+
+    raw_confirmed_models = (form.get("model_pricing_confirmed") or "").strip()
+    if raw_confirmed_models:
+        try:
+            parsed_confirmed = json.loads(raw_confirmed_models)
+            if not isinstance(parsed_confirmed, list):
+                raise ValueError("confirmed list must be a JSON array")
+            confirmed_models: list[str] = []
+            seen_confirmed: set[str] = set()
+            for model_key in parsed_confirmed:
+                normalized_key = _normalize_ai_model_name(model_key)
+                if not normalized_key or normalized_key in seen_confirmed:
+                    continue
+                if normalized_key not in clean:
+                    continue
+                seen_confirmed.add(normalized_key)
+                confirmed_models.append(normalized_key)
+            _save_ai_setting(db, "ai.model_pricing_confirmed", json.dumps(confirmed_models))
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return jsonify({"error": "Invalid model_pricing_confirmed JSON"}), 400
+    else:
+        _save_ai_setting(db, "ai.model_pricing_confirmed", "")
 
     github_token = (form.get("github_token") or "").strip()
     github_token_expiry = _normalize_github_token_expiry_input(form.get("github_token_expires_at") or "")
@@ -24878,34 +26261,30 @@ async def create_agent_rule():
 @require_basic_auth
 async def delete_agent_rule(rule_id: str):
     db = get_db()
-    row = db.execute(
-        "SELECT Id, Name FROM sobs_agent_rules FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
-        [rule_id],
-    ).fetchone()
-    if not row:
-        await flash("Agent rule not found", "warning")
-        return redirect(url_for("view_agent_rules"))
-    _insert_rows_json_each_row(
+
+    def _deleted_row(row: RowCompat) -> dict[str, Any]:
+        return {
+            "Id": rule_id,
+            "Name": str(row["Name"]),
+            "Description": "",
+            "TriggerType": "manual",
+            "TriggerRefId": "",
+            "TriggerState": "any",
+            "Actions": "analyze",
+            "RateLimitMinutes": 60,
+            "IsEnabled": 0,
+        }
+
+    return await _soft_delete_latest_row(
         db,
-        "sobs_agent_rules",
-        [
-            {
-                "Id": rule_id,
-                "Name": str(row["Name"]),
-                "Description": "",
-                "TriggerType": "manual",
-                "TriggerRefId": "",
-                "TriggerState": "any",
-                "Actions": "analyze",
-                "RateLimitMinutes": 60,
-                "IsEnabled": 0,
-                "IsDeleted": 1,
-                "Version": int(time.time() * 1000),
-            }
-        ],
+        select_sql="SELECT Id, Name FROM sobs_agent_rules FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
+        select_params=[rule_id],
+        table_name="sobs_agent_rules",
+        build_deleted_row=_deleted_row,
+        not_found_message="Agent rule not found",
+        success_message="Agent rule '{name}' deleted",
+        redirect_endpoint="view_agent_rules",
     )
-    await flash(f"Agent rule '{row['Name']}' deleted", "success")
-    return redirect(url_for("view_agent_rules"))
 
 
 def _sse_json_event(event_name: str, payload: dict[str, Any]) -> str:

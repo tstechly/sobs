@@ -1583,6 +1583,65 @@ class TestErrorsIngest:
         body = await page.get_data(as_text=True)
         assert "[mapped] saveOrder (src/components/Checkout.tsx:88:21)" in body
 
+    async def test_errors_page_renders_with_invalid_utf8_bytes(self, client):
+        """Errors page must render without UnicodeDecodeError when stored data contains
+        invalid UTF-8 byte sequences in body or attributes on either error source."""
+        import app as sobs_app
+
+        original_data_dir = sobs_app.DATA_DIR
+        original_db_path = sobs_app.DB_PATH
+        with tempfile.TemporaryDirectory() as temp_data_dir:
+            try:
+                sobs_app._shutdown_db_resources()
+                sobs_app.DATA_DIR = temp_data_dir
+                sobs_app.DB_PATH = os.path.join(temp_data_dir, "sobs.chdb")
+                sobs_app.init_db()
+
+                db = sobs_app.get_db()
+                # Insert rows whose Body, attribute values, and one attribute key contain the
+                # byte sequence 0xe2 0x28 0xa1 - a canonical invalid UTF-8 sequence. We use
+                # unhex() so the raw bytes are stored directly in the String columns,
+                # bypassing Python's Unicode layer.
+                db.execute(
+                    "INSERT INTO otel_logs "
+                    "(Timestamp, TraceId, SpanId, TraceFlags, SeverityText, SeverityNumber, "
+                    "ServiceName, Body, ResourceSchemaUrl, ResourceAttributes, "
+                    "ScopeSchemaUrl, ScopeName, ScopeVersion, ScopeAttributes, "
+                    "LogAttributes, EventName) VALUES "
+                    "('2024-03-01 00:00:00.000000000', '', '', 0, 'ERROR', 17, "
+                    "'utf8-test-svc', unhex('e228a1'), '', map(), '', '', '', map(), "
+                    "map('exception.type', 'UTF8Error', "
+                    "    'exception.message', unhex('e228a1'), "
+                    "    unhex('e228a1'), 'bad-key-value'), "
+                    "'exception')"
+                )
+                db.execute(
+                    "INSERT INTO hyperdx_sessions "
+                    "(Timestamp, TraceId, SpanId, TraceFlags, SeverityText, SeverityNumber, "
+                    "ServiceName, Body, ResourceSchemaUrl, ResourceAttributes, "
+                    "ScopeSchemaUrl, ScopeName, ScopeVersion, ScopeAttributes, "
+                    "LogAttributes, EventName) VALUES "
+                    "('2024-03-01 00:00:01.000000000', '', '', 0, 'ERROR', 17, "
+                    "'utf8-test-svc', unhex('e228a1'), '', map(), '', '', '', map(), "
+                    "map('exception.type', 'UTF8Error', "
+                    "    'exception.message', unhex('e228a1'), "
+                    "    unhex('e228a1'), 'bad-key-value'), "
+                    "'error')"
+                )
+
+                # Both normal and grouped mode must return HTTP 200 without crashing when
+                # either side of ERROR_SOURCES_SQL contains invalid UTF-8 bytes.
+                r = await client.get("/errors?service=utf8-test-svc&resolved=")
+                assert r.status_code == 200, f"Normal mode failed: {r.status_code}"
+
+                r2 = await client.get("/errors?grouped=1&service=utf8-test-svc&resolved=")
+                assert r2.status_code == 200, f"Grouped mode failed: {r2.status_code}"
+            finally:
+                sobs_app._shutdown_db_resources()
+                sobs_app.DATA_DIR = original_data_dir
+                sobs_app.DB_PATH = original_db_path
+                sobs_app.init_db()
+
 
 class TestAppReleaseRegistry:
     async def test_create_and_list_app_release_artifacts(self, client):
@@ -2423,6 +2482,63 @@ class TestUIPages:
         empty_data = await r_empty.get_json()
         assert empty_data["ok"] is True
         assert empty_data.get("sample") is None
+
+        # Escaped literal && should be treated as text, not an expression separator.
+        scoped_service = f"regex-validate-logs-{time.time_ns()}"
+        await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": scoped_service}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": "literal && marker"},
+                                    },
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000) + 1),
+                                        "severityText": "INFO",
+                                        "body": {"stringValue": "known-noise-marker"},
+                                    },
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        r_literal = await client.post(
+            "/api/logs/validate-regex",
+            json={"pattern": r"literal \&& marker", "scope": {"service": scoped_service}},
+        )
+        assert r_literal.status_code == 200
+        literal_data = await r_literal.get_json()
+        assert literal_data["ok"] is True
+        assert literal_data.get("sample") == "literal && marker"
+
+        # Negative-only expressions should still return a sample that satisfies exclusions.
+        r_negative = await client.post(
+            "/api/logs/validate-regex",
+            json={"pattern": "!known-noise-marker", "scope": {"service": scoped_service}},
+        )
+        assert r_negative.status_code == 200
+        negative_data = await r_negative.get_json()
+        assert negative_data["ok"] is True
+        assert negative_data.get("sample") is not None
+        assert "known-noise-marker" not in str(negative_data.get("sample"))
+
+    def test_parse_regex_filter_expression_escaped_and(self):
+        from app import _parse_regex_filter_expression
+
+        include_patterns, exclude_patterns, error = _parse_regex_filter_expression(r"foo\&&bar&&baz&&!qux\&&z")
+        assert error is None
+        assert include_patterns == ["foo&&bar", "baz"]
+        assert exclude_patterns == ["qux&&z"]
 
     async def test_logs_attr_keys_catalog_and_hints(self, client):
         import time as _time
@@ -4375,7 +4491,7 @@ class TestUIPages:
         assert data_b["span"]["service"] == "raw-disambiguate-b"
 
     async def test_trace_detail_includes_raw_span_toggle(self, client):
-        """Trace detail view includes the raw span toggle button and panel markup."""
+        """Trace detail view includes the raw span toggle button and shared lazy-load panel markup."""
         from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
         from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
         from opentelemetry.proto.resource.v1.resource_pb2 import Resource
@@ -4406,14 +4522,62 @@ class TestUIPages:
         r = await client.get(f"/traces?trace_id={trace_id_hex}")
         assert r.status_code == 200
         body = await r.get_data(as_text=True)
-        # Raw toggle button and lazy-load panel present
+        # Raw toggle button and shared lazy-load panel present.
         assert "span-raw-toggle" in body
         assert "raw-span-panel" in body
         assert "raw-span-loading" in body
-        assert 'data-loaded="0"' in body
+        assert 'id="trace-shared-raw-panel"' in body
+        assert 'data-open="0"' in body
         assert "data-trace-id=" in body
         # JavaScript for lazy loading present
         assert "/api/traces/span/" in body
+
+    async def test_trace_detail_pagination_includes_ancestor_context(self, client):
+        """Paged trace detail includes ancestor rows so child-only orphan pages are avoided."""
+        from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+        from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
+        from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+        from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans, Span, Status
+
+        trace_id_bytes = bytes.fromhex("1234567811223344aabbccddeeff0011")
+        root_span_id = bytes.fromhex("1111111122222222")
+        child_span_id = bytes.fromhex("3333333344444444")
+        start_ns = 1704067200_000_000_000
+
+        root_span = Span(
+            trace_id=trace_id_bytes,
+            span_id=root_span_id,
+            name="ancestor-root-span",
+            start_time_unix_nano=start_ns,
+            end_time_unix_nano=start_ns + 2_000_000_000,
+            status=Status(code=1),
+        )
+        child_span = Span(
+            trace_id=trace_id_bytes,
+            span_id=child_span_id,
+            parent_span_id=root_span_id,
+            name="descendant-child-span",
+            start_time_unix_nano=start_ns + 500_000_000,
+            end_time_unix_nano=start_ns + 1_000_000_000,
+            status=Status(code=1),
+        )
+        resource = Resource(attributes=[KeyValue(key="service.name", value=AnyValue(string_value="paging-svc"))])
+        msg = ExportTraceServiceRequest(
+            resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[root_span, child_span])])]
+        )
+        r = await client.post(
+            "/v1/traces", data=msg.SerializeToString(), headers={"Content-Type": "application/x-protobuf"}
+        )
+        assert r.status_code == 200
+
+        trace_id_hex = trace_id_bytes.hex()
+        r = await client.get(f"/traces?trace_id={trace_id_hex}&trace_span_limit=1&trace_span_offset=1")
+        assert r.status_code == 200
+        body = await r.get_data(as_text=True)
+
+        assert "ancestor-root-span" in body
+        assert "descendant-child-span" in body
+        assert "+1 ancestor context row" in body
 
     async def test_rum_sort_by_type(self, client):
         r = await client.get("/rum?sort_by=EventName&sort_dir=asc")
@@ -4803,6 +4967,33 @@ class TestCrossLinkNavigation:
             resource_spans=[ResourceSpans(resource=resource, scope_spans=[ScopeSpans(spans=[span])])]
         )
 
+    async def _get_conv_html_for_trace(
+        self, client, service: str, trace_id_hex: str, from_ts: str = "", to_ts: str = ""
+    ) -> str:
+        """Fetch lazy-loaded conversation HTML for the most recent span of a service+trace."""
+        import app as app_module
+
+        db = app_module.get_db()
+        row = db.execute(
+            "SELECT Timestamp, TraceId, SpanName FROM otel_traces "
+            "WHERE ServiceName=? AND TraceId=? ORDER BY Timestamp DESC LIMIT 1",
+            [service, trace_id_hex],
+        ).fetchone()
+        assert row is not None, f"No span found for service={service} trace={trace_id_hex}"
+        r = await client.get(
+            "/api/ai/conversation",
+            query_string={
+                "ts": str(row["Timestamp"]),
+                "service": service,
+                "trace_id": str(row["TraceId"]),
+                "span_name": str(row["SpanName"]),
+                "from_ts": from_ts,
+                "to_ts": to_ts,
+            },
+        )
+        assert r.status_code == 200
+        return await r.get_data(as_text=True)
+
     def _extract_trace_link_href(self, body: str, trace_id_hex: str) -> str:
         pattern = rf'href="([^"]*/traces\?[^"]*trace_id={re.escape(trace_id_hex)}[^"]*)"'
         match = re.search(pattern, body)
@@ -4824,10 +5015,10 @@ class TestCrossLinkNavigation:
 
         r = await client.get(f"/ai?from_ts={from_ts}&to_ts={to_ts}")
         assert r.status_code == 200
-        body = await r.get_data(as_text=True)
 
-        # Assert the specific trace link carries time context.
-        href = self._extract_trace_link_href(body, trace_id_hex)
+        # Trace link is in lazy-loaded conversation HTML — fetch it with time context
+        conv = await self._get_conv_html_for_trace(client, "nav-svc", trace_id_hex, from_ts, to_ts)
+        href = self._extract_trace_link_href(conv, trace_id_hex)
         assert "from_ts=" in href
         assert "to_ts=" in href
 
@@ -4845,10 +5036,10 @@ class TestCrossLinkNavigation:
 
         r = await client.get(f"/ai?view=trace&from_ts={from_ts}&to_ts={to_ts}")
         assert r.status_code == 200
-        body = await r.get_data(as_text=True)
 
-        # Assert the specific trace link carries time context.
-        href = self._extract_trace_link_href(body, trace_id_hex)
+        # Trace link is in lazy-loaded conversation HTML — fetch it with time context
+        conv = await self._get_conv_html_for_trace(client, "nav-svc", trace_id_hex, from_ts, to_ts)
+        href = self._extract_trace_link_href(conv, trace_id_hex)
         assert "from_ts=" in href
         assert "to_ts=" in href
 
@@ -5633,6 +5824,31 @@ class TestSSETail:
 class TestGenAICompliance:
     """Tests for OTel GenAI semantic convention compliance in queries and UI."""
 
+    async def _get_conv_html(self, client, service: str, from_ts: str = "", to_ts: str = "") -> str:
+        """Fetch lazy-loaded conversation HTML for the most recent span of a service."""
+        import app as app_module
+
+        db = app_module.get_db()
+        row = db.execute(
+            "SELECT Timestamp, TraceId, SpanName FROM otel_traces "
+            "WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+            [service],
+        ).fetchone()
+        assert row is not None, f"No span found for service={service}"
+        r = await client.get(
+            "/api/ai/conversation",
+            query_string={
+                "ts": str(row["Timestamp"]),
+                "service": service,
+                "trace_id": str(row["TraceId"]),
+                "span_name": str(row["SpanName"]),
+                "from_ts": from_ts,
+                "to_ts": to_ts,
+            },
+        )
+        assert r.status_code == 200
+        return await r.get_data(as_text=True)
+
     async def test_gen_ai_system_legacy_fallback_counts_as_ai_span(self, client):
         """Spans with gen_ai.system (legacy) should be counted as AI spans."""
         import app as app_module
@@ -5695,9 +5911,10 @@ class TestGenAICompliance:
 
         r2 = await client.get("/ai")
         assert r2.status_code == 200
-        body = await r2.get_data(as_text=True)
-        assert "What is the capital of France?" in body
-        assert "Paris" in body
+
+        conv = await self._get_conv_html(client, "msg-svc")
+        assert "What is the capital of France?" in conv
+        assert "Paris" in conv
 
     async def test_extract_messages_text_helper(self):
         """_extract_messages_text should handle standard OTel message format."""
@@ -5802,9 +6019,11 @@ class TestGenAICompliance:
         r2 = await client.get("/ai")
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
-        # Operation data should be included in the rendered output
+        # Service name still present in page (accordion header data attrs)
         assert "op-svc" in body
-        assert "Operation:</strong> chat" in body
+
+        conv = await self._get_conv_html(client, "op-svc")
+        assert "Operation:</strong> chat" in conv
 
     async def test_ai_view_chat_operation_filter(self, client):
         """AI view chat filter should include chat calls and exclude non-chat calls."""
@@ -5841,8 +6060,9 @@ class TestGenAICompliance:
         r2 = await client.get("/ai?operation=chat")
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
-        assert "<strong>Service:</strong> chat-filter-svc" in body
-        assert "<strong>Service:</strong> embed-filter-svc" not in body
+        # Service is in page via data-conv-service attr on the lazy skeleton
+        assert "chat-filter-svc" in body
+        assert "embed-filter-svc" not in body
 
     async def test_ai_view_trace_group_mode_groups_calls(self, client):
         """AI view trace mode should group multiple calls sharing a trace id."""
@@ -5979,6 +6199,97 @@ class TestGenAICompliance:
         assert "Raw JSON" in body
         assert "raw_attrs" in body or "Span Attributes" in body
 
+    async def test_ai_span_attributes_endpoint_requires_ts_and_service(self, client):
+        r = await client.get("/api/ai/span-attributes")
+        assert r.status_code == 400
+        payload = await r.get_json()
+        assert payload["ok"] is False
+
+    async def test_ai_span_attributes_endpoint_returns_raw_attrs(self, client):
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "json-attrs-svc",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "input_messages": [{"role": "user", "content": "attrs endpoint test"}],
+                "output_messages": [{"role": "assistant", "content": "ok"}],
+                "tokens_in": 9,
+                "tokens_out": 3,
+                "duration_ms": 120,
+            },
+        )
+        assert r.status_code == 200
+
+        db = sobs_app.get_db()
+        row = db.execute(
+            "SELECT Timestamp, ServiceName, TraceId, SpanName "
+            "FROM otel_traces WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+            ["json-attrs-svc"],
+        ).fetchone()
+        assert row is not None
+
+        r2 = await client.get(
+            "/api/ai/span-attributes",
+            query_string={
+                "ts": str(row["Timestamp"]),
+                "service": str(row["ServiceName"]),
+                "trace_id": str(row["TraceId"]),
+                "span_name": str(row["SpanName"]),
+            },
+        )
+        assert r2.status_code == 200
+        payload = await r2.get_json()
+        assert payload["ok"] is True
+        assert "gen_ai.request.model" in payload["raw_attrs"]
+
+    async def test_ai_conversation_endpoint_requires_ts_and_service(self, client):
+        r = await client.get("/api/ai/conversation")
+        assert r.status_code == 400
+        body = await r.get_data(as_text=True)
+        assert "Missing required params" in body
+
+    async def test_ai_conversation_endpoint_returns_html(self, client):
+        r = await client.post(
+            "/v1/ai",
+            json={
+                "service": "conv-html-svc",
+                "provider": "openai",
+                "model": "gpt-4o",
+                "input_messages": [{"role": "user", "content": "hello conversation"}],
+                "output_messages": [{"role": "assistant", "content": "hi there"}],
+                "tokens_in": 10,
+                "tokens_out": 4,
+                "duration_ms": 80,
+            },
+        )
+        assert r.status_code == 200
+
+        db = sobs_app.get_db()
+        row = db.execute(
+            "SELECT Timestamp, ServiceName, TraceId, SpanName "
+            "FROM otel_traces WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+            ["conv-html-svc"],
+        ).fetchone()
+        assert row is not None
+
+        r2 = await client.get(
+            "/api/ai/conversation",
+            query_string={
+                "ts": str(row["Timestamp"]),
+                "service": str(row["ServiceName"]),
+                "trace_id": str(row["TraceId"]),
+                "span_name": str(row["SpanName"]),
+            },
+        )
+        assert r2.status_code == 200
+        body = await r2.get_data(as_text=True)
+        # Should contain conversation content
+        assert "hello conversation" in body
+        assert "hi there" in body
+        # Should contain metadata footer elements
+        assert "Service:" in body
+
     async def test_ai_view_handles_messages_missing_content(self, client):
         """AI view should not fail when message objects omit the content field."""
         r = await client.post(
@@ -6000,7 +6311,9 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "missing-content-svc" in body
-        assert "tool_call:lookup" in body
+
+        conv = await self._get_conv_html(client, "missing-content-svc")
+        assert "tool_call:lookup" in conv
 
     async def test_ai_trace_view_treats_message_only_span_as_llm_call(self, client):
         """Trace AI view should render full conversation tabs for conversational spans even with zero tokens."""
@@ -6025,11 +6338,13 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "message-only-trace-svc" in body
-        assert "Zero-token question" in body
-        assert "Zero-token answer" in body
         assert "Conversation" in body
         assert 'data-ai-call="1"' in body
         assert 'data-model="gpt-4o"' in body
+
+        conv = await self._get_conv_html(client, "message-only-trace-svc")
+        assert "Zero-token question" in conv
+        assert "Zero-token answer" in conv
 
     async def test_ai_trace_view_shows_turn_timeline_for_helper_spans(self, client):
         """Trace AI view should synthesize helper spans into a turn timeline summary."""
@@ -6157,7 +6472,9 @@ class TestGenAICompliance:
         body = await r2.get_data(as_text=True)
         assert "AI_PRICING" in body
         assert "aiCostEstimate" in body
+        assert "formatAiUsd" in body
         assert "Est. Cost" in body
+        assert "$0.00" in body
 
     async def test_ai_export_jsonl(self, client):
         """GET /api/ai/export should return JSONL training data."""
@@ -6286,6 +6603,8 @@ class TestGenAICompliance:
         import app as app_module
 
         real_db = app_module.get_db()
+        # Clear cache so the monkeypatched DB is actually queried (not served from cache)
+        monkeypatch.setattr(app_module, "_ai_filter_metadata_cache", {})
 
         class _DbProxy:
             def __init__(self, inner_db):
@@ -6502,14 +6821,16 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "parts-turns-svc" in body
-        assert "Follow safety rules." in body
-        assert "Weather in Paris?" in body
-        assert "rainy, 57F" in body
-        assert "It is rainy in Paris and about 57F." in body
-        assert ">system instruction<" in body
-        assert ">user<" in body
-        assert ">tool<" in body
-        assert ">assistant<" in body
+
+        conv = await self._get_conv_html(client, "parts-turns-svc")
+        assert "Follow safety rules." in conv
+        assert "Weather in Paris?" in conv
+        assert "rainy, 57F" in conv
+        assert "It is rainy in Paris and about 57F." in conv
+        assert ">system instruction<" in conv
+        assert ">user<" in conv
+        assert ">tool<" in conv
+        assert ">assistant<" in conv
 
     async def test_semconv_parts_tool_call_payloads_are_rendered(self, client):
         """Tool call style message parts should surface readable details in AI conversation view."""
@@ -6608,9 +6929,11 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "reasoning-visible-svc" in body
-        assert "Likely due to increased DB wait time." in body
-        assert "Thinking" in body
-        assert "Correlated spikes in db.client.duration with p95 latency." in body
+
+        conv = await self._get_conv_html(client, "reasoning-visible-svc")
+        assert "Likely due to increased DB wait time." in conv
+        assert "Thinking" in conv
+        assert "Correlated spikes in db.client.duration with p95 latency." in conv
 
     async def test_semconv_message_content_preferred_over_parts(self, client):
         """When both content and parts are present, explicit content should remain authoritative."""
@@ -6669,8 +6992,10 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "mixed-content-svc" in body
-        assert "Preferred content text" in body
-        assert "Assistant preferred text" in body
+
+        conv = await self._get_conv_html(client, "mixed-content-svc")
+        assert "Preferred content text" in conv
+        assert "Assistant preferred text" in conv
 
     async def test_system_instructions_displayed_in_ai_view(self, client):
         """gen_ai.system_instructions should be displayed in the AI view conversation tab."""
@@ -6695,8 +7020,10 @@ class TestGenAICompliance:
         assert r2.status_code == 200
         body = await r2.get_data(as_text=True)
         assert "sys-instr-svc" in body
-        assert "You are a helpful assistant that speaks only in haiku." in body
-        assert "System Prompt" in body
+
+        conv = await self._get_conv_html(client, "sys-instr-svc")
+        assert "You are a helpful assistant that speaks only in haiku." in conv
+        assert "System Prompt" in conv
 
     async def test_flat_view_dedupes_system_prompt_from_system_role_input_turn(self, client):
         """Flat AI view should hide duplicate system role turn when it matches system prompt content."""
@@ -6723,11 +7050,12 @@ class TestGenAICompliance:
 
         r2 = await client.get("/ai?service=flat-dedupe-svc")
         assert r2.status_code == 200
-        body = await r2.get_data(as_text=True)
-        assert "System Prompt" in body
-        assert "Hidden 1 duplicate system instruction turn." in body
+
+        conv = await self._get_conv_html(client, "flat-dedupe-svc")
+        assert "System Prompt" in conv
+        assert "Hidden 1 duplicate system instruction turn." in conv
         # The duplicated system role turn should be hidden from the conversation turn badges.
-        assert ">system instruction<" not in body
+        assert ">system instruction<" not in conv
 
     async def test_execution_event_label_replaces_system_event_label(self, client):
         """AI view should label non-LLM rows as Execution Event for taxonomy clarity."""
@@ -9972,6 +10300,140 @@ class TestTagRules:
         assert "Tag Rules" in text
         assert "Create Tag Rule" in text
 
+    async def test_tag_rule_condition_suggestions_api(self, client):
+        token = str(time.time_ns())
+        service_name = f"tag-suggest-{token}"
+        attr_key = f"http.route.suggest.{token}"
+        attr_value = f"/checkout/{token}"
+
+        r_seed = await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                        "severityText": "ERROR",
+                                        "body": {"stringValue": "tag suggestions seed"},
+                                        "attributes": [
+                                            {"key": attr_key, "value": {"stringValue": attr_value}},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        assert r_seed.status_code == 200
+
+        service_qs = (
+            "/api/settings/tags/condition-suggestions?target=value"
+            f"&field=service_name&operator=contains&q={service_name}"
+        )
+        r_service = await client.get(service_qs)
+        assert r_service.status_code == 200
+        service_data = await r_service.get_json()
+        assert service_data["ok"] is True
+        assert any(service_name in str(v) for v in (service_data.get("suggestions") or []))
+
+        r_attr_key = await client.get(
+            f"/api/settings/tags/condition-suggestions?target=attr_key&field=attribute&q={attr_key}"
+        )
+        assert r_attr_key.status_code == 200
+        attr_key_data = await r_attr_key.get_json()
+        assert attr_key_data["ok"] is True
+        assert any(attr_key in str(v) for v in (attr_key_data.get("suggestions") or []))
+
+        attr_value_qs = (
+            "/api/settings/tags/condition-suggestions?target=value"
+            f"&field=attribute&attr_key={attr_key}&q={attr_value}"
+        )
+        r_attr_value = await client.get(attr_value_qs)
+        assert r_attr_value.status_code == 200
+        attr_value_data = await r_attr_value.get_json()
+        assert attr_value_data["ok"] is True
+        assert any(attr_value in str(v) for v in (attr_value_data.get("suggestions") or []))
+
+    async def test_notification_rule_condition_suggestions_api(self, client):
+        token = str(time.time_ns())
+        service_name = f"notif-suggest-{token}"
+        tag_key = f"env-{token}"
+        tag_value = f"prod-{token}"
+
+        r_seed = await client.post(
+            "/v1/logs",
+            json={
+                "resourceLogs": [
+                    {
+                        "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                        "scopeLogs": [
+                            {
+                                "logRecords": [
+                                    {
+                                        "timeUnixNano": str(int(time.time() * 1_000_000_000)),
+                                        "severityText": "ERROR",
+                                        "body": {"stringValue": "notification suggestions seed"},
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        assert r_seed.status_code == 200
+
+        sobs_app._insert_rows_json_each_row(
+            sobs_app.get_db(),
+            "sobs_record_tags",
+            [
+                {
+                    "RecordType": "log",
+                    "RecordId": f"notif-tag-{token}",
+                    "TagKey": tag_key,
+                    "TagValue": tag_value,
+                    "IsAuto": 1,
+                    "IsDeleted": 0,
+                    "Version": int(time.time() * 1000),
+                }
+            ],
+        )
+
+        r_service = await client.get(
+            "/api/settings/tags/condition-suggestions?scope=notification_rule"
+            "&target=service&source=logs&signal=error_volume"
+            f"&q={service_name}"
+        )
+        assert r_service.status_code == 200
+        service_data = await r_service.get_json()
+        assert service_data["ok"] is True
+        assert service_data["scope"] == "notification_rule"
+        assert any(service_name in str(v) for v in (service_data.get("suggestions") or []))
+
+        r_tag_key = await client.get(
+            "/api/settings/tags/condition-suggestions?scope=notification_rule"
+            f"&target=tag_key&record_type=log&q={tag_key}"
+        )
+        assert r_tag_key.status_code == 200
+        tag_key_data = await r_tag_key.get_json()
+        assert tag_key_data["ok"] is True
+        assert any(tag_key in str(v) for v in (tag_key_data.get("suggestions") or []))
+
+        r_tag_value = await client.get(
+            "/api/settings/tags/condition-suggestions?scope=notification_rule"
+            f"&target=tag_value&record_type=log&tag_key={tag_key}&q={tag_value}"
+        )
+        assert r_tag_value.status_code == 200
+        tag_value_data = await r_tag_value.get_json()
+        assert tag_value_data["ok"] is True
+        assert any(tag_value in str(v) for v in (tag_value_data.get("suggestions") or []))
+
     async def test_auto_tag_rules_preview(self, client):
         ts_ns = int(time.time() * 1_000_000_000)
         payload = {
@@ -10138,6 +10600,94 @@ class TestTagRules:
             [rule_id],
         ).fetchone()
         assert row2 is None, "Rule was not deleted"
+
+    async def test_edit_tag_rule_via_reused_create_form(self, client):
+        await client.post(
+            "/settings/tags",
+            form={
+                "name": "editable-rule",
+                "record_types": "log",
+                "match_field": "severity",
+                "match_operator": "eq",
+                "match_value": "ERROR",
+                "match_attr_key": "",
+                "tag_key": "priority",
+                "tag_value": "high",
+            },
+        )
+
+        from app import get_db
+
+        db = get_db()
+        row = db.execute(
+            "SELECT Id FROM sobs_tag_rules FINAL WHERE Name='editable-rule' AND IsDeleted=0 LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        rule_id = str(row["Id"])
+
+        r = await client.post(
+            "/settings/tags",
+            form={
+                "edit_rule_id": rule_id,
+                "name": "editable-rule-updated",
+                "record_types": "trace",
+                "match_field": "service_name",
+                "match_operator": "contains",
+                "match_value": "checkout",
+                "match_attr_key": "",
+                "tag_key": "team",
+                "tag_value": "payments",
+            },
+        )
+        assert r.status_code in (200, 302)
+
+        updated = db.execute(
+            "SELECT Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, TagKey, TagValue "
+            "FROM sobs_tag_rules FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
+            [rule_id],
+        ).fetchone()
+        assert updated is not None
+        assert str(updated["Id"]) == rule_id
+        assert str(updated["Name"]) == "editable-rule-updated"
+        assert str(updated["RecordTypes"]) == "trace"
+        assert str(updated["MatchField"]) == "service_name"
+        assert str(updated["MatchOperator"]) == "contains"
+        assert str(updated["MatchValue"]) == "checkout"
+        assert str(updated["TagKey"]) == "team"
+        assert str(updated["TagValue"]) == "payments"
+
+    def test_load_tag_rules_falls_back_to_legacy_condition_columns(self):
+        db = sobs_app.get_db()
+        rule_id = f"legacy-tag-{time.time_ns()}"
+        sobs_app._insert_rows_json_each_row(
+            db,
+            "sobs_tag_rules",
+            [
+                {
+                    "Id": rule_id,
+                    "Name": "legacy-rule",
+                    "RecordTypes": "log",
+                    "MatchField": "service_name",
+                    "MatchOperator": "contains",
+                    "MatchValue": "checkout",
+                    "MatchAttrKey": "",
+                    "TagKey": "team",
+                    "TagValue": "payments",
+                    "ConditionsJson": "",
+                    "IsDeleted": 0,
+                    "Version": int(time.time() * 1000),
+                }
+            ],
+        )
+
+        rules = sobs_app._load_tag_rules(db)
+        loaded = next((rule for rule in rules if rule["id"] == rule_id), None)
+        assert loaded is not None
+        assert isinstance(loaded.get("conditions"), list)
+        assert len(loaded["conditions"]) == 1
+        assert loaded["conditions"][0]["match_field"] == "service_name"
+        assert loaded["conditions"][0]["match_operator"] == "contains"
+        assert loaded["conditions"][0]["match_value"] == "checkout"
 
     # ── Auto-tagging at ingest ────────────────────────────────────────────────
 
@@ -10597,6 +11147,93 @@ class TestTagRules:
         # Invalid regex must not raise, just return False
         assert _match_tag_rule(rule, "log", "svc", "ERROR", "any body", {}) is False
 
+    def test_match_tag_rule_composite_all_conditions_match(self):
+        from app import _match_tag_rule
+
+        # Legacy match_field says "severity=ERROR" but conditions include an additional
+        # body check – composite mode should evaluate ONLY the conditions list.
+        rule = {
+            "record_types": ["all"],
+            "match_field": "severity",
+            "match_operator": "eq",
+            "match_value": "ERROR",
+            "match_attr_key": "",
+            "tag_key": "k",
+            "tag_value": "v",
+            "conditions": [
+                {"match_field": "severity", "match_operator": "eq", "match_value": "ERROR", "match_attr_key": ""},
+                {"match_field": "body", "match_operator": "contains", "match_value": "timeout", "match_attr_key": ""},
+            ],
+        }
+        # Both conditions match → True
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "connection timeout error", {}) is True
+        # Legacy field would match (severity=ERROR), but body condition fails → False proves
+        # composite conditions take precedence over the legacy single-condition fields.
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "success message", {}) is False
+
+    def test_match_tag_rule_composite_with_attribute_condition(self):
+        from app import _match_tag_rule
+
+        rule = {
+            "record_types": ["all"],
+            "match_field": "severity",
+            "match_operator": "eq",
+            "match_value": "ERROR",
+            "match_attr_key": "",
+            "tag_key": "k",
+            "tag_value": "v",
+            "conditions": [
+                {"match_field": "severity", "match_operator": "eq", "match_value": "ERROR", "match_attr_key": ""},
+                {
+                    "match_field": "attribute",
+                    "match_operator": "eq",
+                    "match_value": "500",
+                    "match_attr_key": "http.status_code",
+                },
+            ],
+        }
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "", {"http.status_code": "500"}) is True
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "", {"http.status_code": "200"}) is False
+
+    def test_match_tag_rule_composite_wrong_record_type(self):
+        from app import _match_tag_rule
+
+        rule = {
+            "record_types": ["trace"],
+            "match_field": "severity",
+            "match_operator": "eq",
+            "match_value": "ERROR",
+            "match_attr_key": "",
+            "tag_key": "k",
+            "tag_value": "v",
+            "conditions": [
+                {"match_field": "severity", "match_operator": "eq", "match_value": "ERROR", "match_attr_key": ""},
+                {"match_field": "body", "match_operator": "contains", "match_value": "timeout", "match_attr_key": ""},
+            ],
+        }
+        # Record type doesn't match → False regardless of conditions
+        assert _match_tag_rule(rule, "log", "svc", "ERROR", "connection timeout error", {}) is False
+        assert _match_tag_rule(rule, "trace", "svc", "ERROR", "connection timeout error", {}) is True
+
+    def test_parse_tag_rule_conditions_json_handles_invalid_payloads(self):
+        from app import _parse_tag_rule_conditions_json
+
+        assert _parse_tag_rule_conditions_json("") == []
+        assert _parse_tag_rule_conditions_json("{bad-json") == []
+        assert _parse_tag_rule_conditions_json('{"match_field":"severity"}') == []
+
+        parsed = _parse_tag_rule_conditions_json(
+            '[{"match_field":"severity","match_operator":"eq","match_value":"ERROR"}]'
+        )
+        assert parsed == [
+            {
+                "match_field": "severity",
+                "match_operator": "eq",
+                "match_value": "ERROR",
+                "match_attr_key": "",
+            }
+        ]
+
 
 # ---------------------------------------------------------------------------
 # AI Settings, Contextual Helper, Agent Rules & Runs
@@ -10650,6 +11287,207 @@ class TestAISettingsAndAgentFlows:
         assert _load_ai_setting(db, "ai.endpoint_url") == "https://api.example.com/v1"
         assert _load_ai_setting(db, "ai.model") == "gpt-test"
         assert _load_ai_setting(db, "ai.agent_max_issues_per_hour") == "3"
+
+    async def test_save_ai_settings_persists_model_pricing(self, client):
+        pricing_json = '{"gpt-4o": {"in": 1.0, "out": 4.0}, "my-model": {"in": 0.5, "out": 2.0}}'
+        r = await client.post(
+            "/settings/ai",
+            form={
+                "endpoint_url": "",
+                "model": "",
+                "api_key": "",
+                "guard_endpoint_url": "",
+                "guard_model": "",
+                "dlp_endpoint_url": "",
+                "github_token": "",
+                "github_repo": "",
+                "agent_max_issues_per_hour": "10",
+                "system_prompt": "",
+                "model_pricing": pricing_json,
+                "model_pricing_confirmed": "[]",
+            },
+        )
+        assert r.status_code in (200, 302)
+
+        from app import _load_ai_pricing, get_db
+
+        db = get_db()
+        pricing = _load_ai_pricing(db)
+        assert pricing["gpt-4o"]["in"] == 1.0
+        assert pricing["gpt-4o"]["out"] == 4.0
+        assert pricing["my-model"]["in"] == 0.5
+        # Defaults not in the submission still present from merge
+        assert "gpt-4o-mini" in pricing
+
+    async def test_save_ai_settings_persists_confirmed_models(self, client):
+        from app import _load_ai_setting, get_db
+
+        pricing_json = '{"gpt-4o-audio-preview": {"in": 2.5, "out": 10.0}}'
+        confirmed_json = '["gpt-4o-audio-preview"]'
+        r = await client.post(
+            "/settings/ai",
+            form={
+                "endpoint_url": "",
+                "model": "",
+                "api_key": "",
+                "guard_endpoint_url": "",
+                "guard_model": "",
+                "dlp_endpoint_url": "",
+                "github_token": "",
+                "github_repo": "",
+                "agent_max_issues_per_hour": "10",
+                "system_prompt": "",
+                "model_pricing": pricing_json,
+                "model_pricing_confirmed": confirmed_json,
+            },
+        )
+        assert r.status_code in (200, 302)
+
+        raw_confirmed = _load_ai_setting(get_db(), "ai.model_pricing_confirmed", "")
+        assert "gpt-4o-audio-preview" in raw_confirmed
+
+    async def test_save_ai_settings_rejects_invalid_model_pricing(self, client):
+        r = await client.post(
+            "/settings/ai",
+            form={
+                "endpoint_url": "",
+                "model": "",
+                "api_key": "",
+                "guard_endpoint_url": "",
+                "guard_model": "",
+                "dlp_endpoint_url": "",
+                "github_token": "",
+                "github_repo": "",
+                "agent_max_issues_per_hour": "10",
+                "system_prompt": "",
+                "model_pricing": "not valid json {{{",
+            },
+        )
+        assert r.status_code == 400
+
+    async def test_save_ai_settings_rejects_invalid_confirmed_models(self, client):
+        r = await client.post(
+            "/settings/ai",
+            form={
+                "endpoint_url": "",
+                "model": "",
+                "api_key": "",
+                "guard_endpoint_url": "",
+                "guard_model": "",
+                "dlp_endpoint_url": "",
+                "github_token": "",
+                "github_repo": "",
+                "agent_max_issues_per_hour": "10",
+                "system_prompt": "",
+                "model_pricing": '{"gpt-4o-audio-preview": {"in": 2.5, "out": 10.0}}',
+                "model_pricing_confirmed": "not valid json {{{",
+            },
+        )
+        assert r.status_code == 400
+
+    async def test_load_ai_pricing_merges_defaults(self, client):
+        from app import _DEFAULT_AI_PRICING, _load_ai_pricing, _save_ai_setting, get_db
+
+        db = get_db()
+        # Save a partial override
+        import json
+
+        _save_ai_setting(db, "ai.model_pricing", json.dumps({"gpt-4o": {"in": 99.0, "out": 99.0}}))
+        pricing = _load_ai_pricing(db)
+        # Overridden model reflects saved values
+        assert pricing["gpt-4o"]["in"] == 99.0
+        # Default-only models still included
+        assert "gpt-4o-mini" in pricing
+        assert pricing["gpt-4o-mini"] == _DEFAULT_AI_PRICING["gpt-4o-mini"]
+
+    async def test_load_ai_pricing_auto_adds_observed_models(self, client, monkeypatch):
+        import app as sobs_app
+        from app import _DEFAULT_AI_PRICING, _load_ai_pricing, get_db
+
+        monkeypatch.setattr(
+            sobs_app,
+            "_load_observed_ai_models",
+            lambda db, limit=200: ["claude-3-7-sonnet", "gpt-4o-audio-preview", "brand-new-model"],
+        )
+
+        pricing = _load_ai_pricing(get_db())
+
+        assert pricing["claude-3-7-sonnet"] == _DEFAULT_AI_PRICING["claude-3-5-sonnet"]
+        assert pricing["gpt-4o-audio-preview"] == _DEFAULT_AI_PRICING["gpt-4o"]
+        assert pricing["brand-new-model"] == _DEFAULT_AI_PRICING["gpt-4o"]
+
+    async def test_ai_page_uses_configured_pricing(self, client):
+        import json
+        import re
+
+        from app import _save_ai_setting, get_db
+
+        db = get_db()
+        _save_ai_setting(
+            db,
+            "ai.model_pricing",
+            json.dumps({"gpt-4o": {"in": 7.77, "out": 8.88}}),
+        )
+        r = await client.get("/ai")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "var AI_PRICING = {" in text
+        assert "var AI_PRICING_SOURCES = {" in text
+        assert "estCostInferredHint" in text
+        assert 'title="Includes inferred pricing"' in text
+        assert 'href="/settings/ai"' in text
+        assert re.search(r'"gpt-4o"\s*:\s*\{\s*"in"\s*:\s*7\.77\s*,\s*"out"\s*:\s*8\.88\s*\}', text)
+        assert 'var AI_PRICING = "{' not in text
+
+    async def test_ai_settings_page_shows_pricing_table(self, client):
+        r = await client.get("/settings/ai")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "pricingTable" in text
+        assert "Model Pricing" in text
+        assert "modelPricingJson" in text
+
+    async def test_ai_settings_page_includes_auto_discovered_model_pricing(self, client, monkeypatch):
+        import app as sobs_app
+
+        monkeypatch.setattr(sobs_app, "_load_observed_ai_models", lambda db, limit=200: ["gpt-4o-audio-preview"])
+
+        r = await client.get("/settings/ai")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "gpt-4o-audio-preview" in text
+        assert '"gpt-4o-audio-preview": "inferred"' in text
+        assert "pricing was inferred from the closest known model family" in text
+        assert "Rows marked" in text
+        assert "inferred" in text
+        assert "buildRow('', '', '', 'custom')" in text
+
+    async def test_ai_settings_page_includes_confirmed_source(self, client, monkeypatch):
+        import json
+
+        import app as sobs_app
+        from app import _save_ai_setting, get_db
+
+        monkeypatch.setattr(sobs_app, "_load_observed_ai_models", lambda db, limit=200: ["gpt-4o-audio-preview"])
+        db = get_db()
+        _save_ai_setting(db, "ai.model_pricing", json.dumps({"gpt-4o-audio-preview": {"in": 2.5, "out": 10.0}}))
+        _save_ai_setting(db, "ai.model_pricing_confirmed", json.dumps(["gpt-4o-audio-preview"]))
+
+        r = await client.get("/settings/ai")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert '"gpt-4o-audio-preview": "confirmed"' in text
+
+    async def test_ai_settings_help_page_explains_model_pricing(self, client):
+        r = await client.get("/settings/help/ai")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "Model Pricing And Cost Estimates" in text
+        assert "How Inferred Pricing Works" in text
+        assert "Using Add Custom Model" in text
+        assert "gen_ai.request.model" in text
+        assert "Add Custom Model" in text
+        assert "inferred badge" in text
 
     # ── Agent Rules CRUD ──────────────────────────────────────────────────────
 
@@ -13225,6 +14063,240 @@ class TestNotifications:
         assert len(rule["conditions"]) == 1
         assert rule["conditions"][0]["signal"] == "error_volume"
 
+    async def test_create_notification_rule_with_tag_condition(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": "Tag Rule Channel",
+                "channel_type": "slack",
+                "slack_webhook_url": "https://hooks.slack.com/services/TAG_RULE_TEST",
+            },
+        )
+        channels = sobs_app._load_notification_channels(sobs_app.get_db())
+        ch = next((c for c in channels if c["name"] == "Tag Rule Channel"), None)
+        assert ch is not None
+
+        r = await client.post(
+            "/settings/notifications/rules",
+            form={
+                "name": "Prod Tag Burst",
+                "logic_operator": "all",
+                "severity": "critical",
+                "cooldown_seconds": "60",
+                "channel_ids": ch["id"],
+                "cond_type": "tag",
+                "cond_record_type": "log",
+                "cond_tag_key": "env",
+                "cond_tag_match_operator": "eq",
+                "cond_tag_value": "prod",
+                "cond_comparator": "gte",
+                "cond_threshold": "2",
+                "cond_window_minutes": "5",
+            },
+        )
+        assert r.status_code in (200, 302)
+
+        rules = sobs_app._load_notification_rules(sobs_app.get_db())
+        rule = next((rule for rule in rules if rule["name"] == "Prod Tag Burst"), None)
+        assert rule is not None
+        assert len(rule["conditions"]) == 1
+        assert rule["conditions"][0]["type"] == "tag"
+        assert rule["conditions"][0]["record_type"] == "log"
+        assert rule["conditions"][0]["tag_key"] == "env"
+        assert rule["conditions"][0]["tag_value"] == "prod"
+
+    async def test_create_notification_rule_rejects_invalid_tag_regex(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": "Regex Rule Channel",
+                "channel_type": "slack",
+                "slack_webhook_url": "https://hooks.slack.com/services/REGEX_RULE_TEST",
+            },
+        )
+        channels = sobs_app._load_notification_channels(sobs_app.get_db())
+        ch = next((c for c in channels if c["name"] == "Regex Rule Channel"), None)
+        assert ch is not None
+
+        r = await client.post(
+            "/settings/notifications/rules",
+            form={
+                "name": "Invalid Regex Rule",
+                "logic_operator": "all",
+                "severity": "critical",
+                "cooldown_seconds": "60",
+                "channel_ids": ch["id"],
+                "cond_type": "tag",
+                "cond_record_type": "log",
+                "cond_tag_key": "env",
+                "cond_tag_match_operator": "regex",
+                "cond_tag_value": "([invalid",
+                "cond_comparator": "gte",
+                "cond_threshold": "2",
+                "cond_window_minutes": "5",
+            },
+        )
+        assert r.status_code in (200, 302)
+
+        rules = sobs_app._load_notification_rules(sobs_app.get_db())
+        created = next((rule for rule in rules if rule["name"] == "Invalid Regex Rule"), None)
+        assert created is None
+
+    async def test_edit_notification_rule_updates_channels_and_conditions(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": "Edit Rule Channel A",
+                "channel_type": "slack",
+                "slack_webhook_url": "https://hooks.slack.com/services/EDIT_RULE_A",
+            },
+        )
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": "Edit Rule Channel B",
+                "channel_type": "slack",
+                "slack_webhook_url": "https://hooks.slack.com/services/EDIT_RULE_B",
+            },
+        )
+
+        channels = sobs_app._load_notification_channels(sobs_app.get_db())
+        ch_a = next((c for c in channels if c["name"] == "Edit Rule Channel A"), None)
+        ch_b = next((c for c in channels if c["name"] == "Edit Rule Channel B"), None)
+        assert ch_a is not None
+        assert ch_b is not None
+
+        create_resp = await client.post(
+            "/settings/notifications/rules",
+            form={
+                "name": "Editable Rule",
+                "logic_operator": "any",
+                "severity": "warning",
+                "cooldown_seconds": "60",
+                "channel_ids": ch_a["id"],
+                "cond_type": "signal",
+                "cond_source": "logs",
+                "cond_signal": "error_volume",
+                "cond_service": "",
+                "cond_comparator": "gt",
+                "cond_threshold": "10",
+                "cond_window_minutes": "5",
+            },
+        )
+        assert create_resp.status_code in (200, 302)
+
+        rules = sobs_app._load_notification_rules(sobs_app.get_db())
+        created = next((rule for rule in rules if rule["name"] == "Editable Rule"), None)
+        assert created is not None
+
+        update_resp = await client.post(
+            "/settings/notifications/rules",
+            form={
+                "edit_rule_id": created["id"],
+                "name": "Editable Rule Updated",
+                "logic_operator": "all",
+                "severity": "critical",
+                "cooldown_seconds": "120",
+                "channel_ids": ch_b["id"],
+                "cond_type": "tag",
+                "cond_record_type": "log",
+                "cond_tag_key": "env",
+                "cond_tag_match_operator": "eq",
+                "cond_tag_value": "prod",
+                "cond_comparator": "gte",
+                "cond_threshold": "1",
+                "cond_window_minutes": "5",
+            },
+        )
+        assert update_resp.status_code in (200, 302)
+
+        updated_rules = sobs_app._load_notification_rules(sobs_app.get_db())
+        updated = next((rule for rule in updated_rules if rule["id"] == created["id"]), None)
+        assert updated is not None
+        assert updated["name"] == "Editable Rule Updated"
+        assert updated["logic_operator"] == "all"
+        assert updated["severity"] == "critical"
+        assert updated["cooldown_seconds"] == 120
+        assert updated["channel_ids"] == [ch_b["id"]]
+        assert len(updated["conditions"]) == 1
+        assert updated["conditions"][0]["type"] == "tag"
+
+    def test_parse_notification_conditions_json_normalizes_legacy_and_tag_conditions(self):
+        parsed = sobs_app._parse_notification_conditions_json(
+            json.dumps(
+                [
+                    {
+                        "source": "logs",
+                        "signal": "error_volume",
+                        "service": "api",
+                        "comparator": "gt",
+                        "threshold": 10,
+                        "window_minutes": 5,
+                    },
+                    {
+                        "type": "tag",
+                        "record_type": "log",
+                        "tag_key": "env",
+                        "tag_match_operator": "contains",
+                        "tag_value": "prod",
+                        "comparator": "gte",
+                        "threshold": 1,
+                        "window_minutes": 10,
+                    },
+                ]
+            )
+        )
+
+        assert parsed[0]["type"] == "signal"
+        assert parsed[0]["signal"] == "error_volume"
+        assert parsed[1]["type"] == "tag"
+        assert parsed[1]["tag_match_operator"] == "contains"
+
+    def test_evaluate_tag_condition_counts_recent_matching_tags(self):
+        db = sobs_app.get_db()
+        now_version = int(time.time() * 1000)
+        sobs_app._insert_rows_json_each_row(
+            db,
+            "sobs_record_tags",
+            [
+                {
+                    "RecordType": "log",
+                    "RecordId": f"tag-cond-{time.time_ns()}",
+                    "TagKey": "env",
+                    "TagValue": "prod",
+                    "IsAuto": 1,
+                    "IsDeleted": 0,
+                    "Version": now_version,
+                },
+                {
+                    "RecordType": "log",
+                    "RecordId": f"tag-cond-{time.time_ns()}-2",
+                    "TagKey": "env",
+                    "TagValue": "prod-eu",
+                    "IsAuto": 1,
+                    "IsDeleted": 0,
+                    "Version": now_version,
+                },
+            ],
+        )
+
+        matched, count = sobs_app._evaluate_tag_condition(
+            db,
+            {
+                "type": "tag",
+                "record_type": "log",
+                "tag_key": "env",
+                "tag_match_operator": "contains",
+                "tag_value": "prod",
+                "comparator": "gte",
+                "threshold": 2,
+                "window_minutes": 5,
+            },
+        )
+
+        assert matched is True
+        assert count >= 2
+
     async def test_create_rule_missing_name_rejected(self, client):
         r = await client.post(
             "/settings/notifications/rules",
@@ -13311,6 +14383,58 @@ class TestNotifications:
         assert isinstance(data["results"], list)
         assert "agent_runs" in data
 
+    async def test_check_notification_rule_supports_mixed_signal_and_tag_conditions(self, monkeypatch):
+        db = sobs_app.get_db()
+        rule = {
+            "id": f"mixed-rule-{time.time_ns()}",
+            "name": "Signal plus tag",
+            "enabled": True,
+            "logic_operator": "all",
+            "conditions": [
+                {
+                    "type": "signal",
+                    "source": "logs",
+                    "signal": "error_volume",
+                    "service": "",
+                    "comparator": "gt",
+                    "threshold": 1,
+                    "window_minutes": 5,
+                },
+                {
+                    "type": "tag",
+                    "record_type": "log",
+                    "tag_key": "env",
+                    "tag_match_operator": "eq",
+                    "tag_value": "prod",
+                    "comparator": "gte",
+                    "threshold": 1,
+                    "window_minutes": 5,
+                },
+            ],
+            "channel_ids": ["mixed-channel"],
+            "severity": "warning",
+            "cooldown_seconds": 0,
+        }
+        channels_by_id = {
+            "mixed-channel": {
+                "id": "mixed-channel",
+                "name": "Mixed",
+                "enabled": True,
+                "channel_type": "webhook",
+                "config": {"url": "https://example.com/mixed", "mask_output_enabled": "1"},
+            }
+        }
+
+        monkeypatch.setattr(sobs_app, "_evaluate_signal_condition", lambda _db, _cond: (True, 42.0))
+        monkeypatch.setattr(sobs_app, "_evaluate_tag_condition", lambda _db, _cond: (True, 3.0))
+        monkeypatch.setattr(sobs_app, "_dispatch_notification_channel", AsyncMock(return_value="ok"))
+
+        result = await sobs_app._check_notification_rule(db, rule, channels_by_id)
+
+        assert result["fired"] is True
+        assert len(result["dispatch_results"]) == 1
+        assert result["dispatch_results"][0]["status"] == "ok"
+
     async def test_notifications_check_auto_triggers_anomaly_agent_rule(self, client, monkeypatch):
         await client.post(
             "/settings/agents",
@@ -13366,7 +14490,7 @@ class TestNotifications:
             def execute(self, sql, _params=None):
                 # Ensure collector returns the latest timestamp so seasonal rules
                 # can evaluate the correct UTC time bucket.
-                assert "argMax(time, time) AS time" in sql
+                assert "argMax(time, time) AS latest_time" in sql
                 return _FakeResult(
                     [
                         {
@@ -13376,7 +14500,7 @@ class TestNotifications:
                             "AttrFingerprint": "",
                             "value": 25.0,
                             "SampleCount": 5,
-                            "time": "2024-01-01 12:30:00",
+                            "latest_time": "2024-01-01 12:30:00",
                         }
                     ]
                 )
@@ -13561,6 +14685,26 @@ class TestNotifications:
         payload = _build_notification_payload(rule, conditions, mask_output_enabled=True)
         assert payload["conditions"][0]["service"] == "****"
         assert payload["summary"].count("****") >= 1
+
+    def test_build_notification_payload_includes_tag_condition_summary(self):
+        from app import _build_notification_payload
+
+        rule = {"name": "Tagged Rule", "severity": "warning"}
+        conditions = [
+            {
+                "type": "tag",
+                "record_type": "log",
+                "tag_key": "env",
+                "tag_match_operator": "eq",
+                "tag_value": "prod",
+                "comparator": "gte",
+                "threshold": 1,
+                "_value": 3.0,
+            }
+        ]
+
+        payload = _build_notification_payload(rule, conditions)
+        assert "tag [log] env eq prod" in payload["summary"]
 
     def test_mask_channel_config_hides_password(self):
         from app import _mask_channel_config
