@@ -19994,19 +19994,18 @@ class TestSelfTelemetry:
 
     # ── OTEL backend ──────────────────────────────────────────────────────────
 
-    def test_otel_endpoint_default_is_empty(self, monkeypatch):
+    def test_otel_endpoint_default_is_empty(self):
         """SOBS_OTEL_ENDPOINT defaults to empty string (self-telemetry disabled)."""
-        monkeypatch.setattr(sobs_app, "_SELF_OTEL_ENDPOINT", "")
+        # The module-level constant is read from the env at import time;
+        # in the test environment SOBS_OTEL_ENDPOINT is not set so it must be ''.
         assert sobs_app._SELF_OTEL_ENDPOINT == ""
 
-    def test_otel_service_name_default(self, monkeypatch):
+    def test_otel_service_name_default(self):
         """SOBS_OTEL_SERVICE_NAME defaults to 'sobs'."""
-        monkeypatch.setattr(sobs_app, "_SELF_OTEL_SERVICE_NAME", "sobs")
         assert sobs_app._SELF_OTEL_SERVICE_NAME == "sobs"
 
-    def test_otel_environment_default(self, monkeypatch):
+    def test_otel_environment_default(self):
         """SOBS_OTEL_ENVIRONMENT defaults to 'production'."""
-        monkeypatch.setattr(sobs_app, "_SELF_OTEL_ENVIRONMENT", "production")
         assert sobs_app._SELF_OTEL_ENVIRONMENT == "production"
 
     def test_setup_self_telemetry_no_op_when_endpoint_empty(self, monkeypatch):
@@ -20028,14 +20027,12 @@ class TestSelfTelemetry:
 
     # ── RUM self-monitoring ───────────────────────────────────────────────────
 
-    def test_rum_self_endpoint_default_is_empty(self, monkeypatch):
+    def test_rum_self_endpoint_default_is_empty(self):
         """SOBS_RUM_SELF_ENDPOINT defaults to empty string (self-RUM disabled)."""
-        monkeypatch.setattr(sobs_app, "_SELF_RUM_ENDPOINT", "")
         assert sobs_app._SELF_RUM_ENDPOINT == ""
 
-    def test_rum_self_service_default(self, monkeypatch):
+    def test_rum_self_service_default(self):
         """SOBS_RUM_SELF_SERVICE defaults to 'sobs-ui'."""
-        monkeypatch.setattr(sobs_app, "_SELF_RUM_SERVICE", "sobs-ui")
         assert sobs_app._SELF_RUM_SERVICE == "sobs-ui"
 
     async def test_rum_snippet_absent_by_default(self, client):
@@ -20075,5 +20072,5 @@ class TestSelfTelemetry:
         r = await client.get("/")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
-        assert "http://rum.example.com" in text
-        assert "custom-sobs-ui" in text
+        assert 'data-sobs-endpoint="http://rum.example.com/v1/rum"' in text
+        assert 'data-sobs-app="custom-sobs-ui"' in text
