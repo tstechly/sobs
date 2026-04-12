@@ -74,12 +74,34 @@ def _clear_mcp_keys(db):
 
 @pytest.fixture(autouse=True)
 def _clean_mcp_state():
-    """Clear MCP keys and reset MCP enabled state before each test."""
+    """
+    Clean MCP state before and after each test to ensure test isolation.
+
+    This fixture guarantees that each test starts with a clean slate (no MCP keys,
+    MCP enabled by default) and ends with the same state, preventing state leakage
+    between tests. The cleanup happens regardless of whether the test passes or fails,
+    thanks to the try/finally pattern.
+
+    Test isolation is critical to prevent flaky tests that pass/fail depending on
+    execution order. This fixture handles tests that don't have explicit teardown.
+    """
     db = _get_db()
-    _clear_mcp_keys(db)
-    # Ensure MCP is enabled by default for tests (some tests disable it)
-    sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
-    yield
+    try:
+        # BEFORE: Set clean initial state
+        _clear_mcp_keys(db)
+        # Ensure MCP is enabled by default for tests (some tests disable it)
+        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
+        yield
+    finally:
+        # AFTER: Restore clean state regardless of success/failure
+        # This prevents state leakage to subsequent tests
+        try:
+            db = _get_db()
+            _clear_mcp_keys(db)
+            sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
+        except Exception:
+            # Silently ignore cleanup errors to avoid masking test failures
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -286,13 +308,28 @@ class TestMcpAuthentication:
 # ---------------------------------------------------------------------------
 class TestMcpToolsCall:
     def setup_method(self):
-        """Create a fresh MCP API key before each test method."""
+        """
+        Create a fresh MCP API key before each test method.
+
+        IMPORTANT: This method ensures each test has its own unique key to prevent
+        test isolation issues. The key is stored in self._raw_key for use in test methods.
+        The corresponding teardown_method ensures cleanup after the test to prevent
+        state leakage to subsequent tests.
+
+        Test isolation is essential for reliable tests that don't flake depending on
+        execution order.
+        """
         db = _get_db()
         _clear_mcp_keys(db)  # Clean slate
         self._raw_key = _create_mcp_key(db, "test-tool-call")
 
     def teardown_method(self):
-        """Clean up keys after each test method."""
+        """
+        Clean up keys after each test method.
+
+        IMPORTANT: This cleanup is critical for preventing state leakage to the next test.
+        Even if a test method fails, this teardown WILL run due to pytest's design.
+        """
         db = _get_db()
         _clear_mcp_keys(db)
 
@@ -490,13 +527,28 @@ class TestMcpOutputMasking:
     """Verify that the masking framework is applied to tool outputs via POST /mcp."""
 
     def setup_method(self):
-        """Create a fresh MCP API key before each test method."""
+        """
+        Create a fresh MCP API key before each test method.
+
+        IMPORTANT: This method ensures each test has its own unique key to prevent
+        test isolation issues. The key is stored in self._raw_key for use in test methods.
+        The corresponding teardown_method ensures cleanup after the test to prevent
+        state leakage to subsequent tests.
+
+        Test isolation is essential for reliable tests that don't flake depending on
+        execution order.
+        """
         db = _get_db()
         _clear_mcp_keys(db)  # Clean slate
         self._raw_key = _create_mcp_key(db, "test-masking")
 
     def teardown_method(self):
-        """Clean up keys after each test method."""
+        """
+        Clean up keys after each test method.
+
+        IMPORTANT: This cleanup is critical for preventing state leakage to the next test.
+        Even if a test method fails, this teardown WILL run due to pytest's design.
+        """
         db = _get_db()
         _clear_mcp_keys(db)
 
