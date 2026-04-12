@@ -1925,6 +1925,7 @@ WORK_ITEMS_PAGE_CACHE_TTL_SEC = int(os.environ.get("SOBS_WORK_ITEMS_PAGE_CACHE_T
 WORK_ITEMS_FILTER_CACHE_TTL_SEC = int(os.environ.get("SOBS_WORK_ITEMS_FILTER_CACHE_TTL_SEC", "30"))
 ERRORS_SERVICES_CACHE_TTL_SEC = int(os.environ.get("SOBS_ERRORS_SERVICES_CACHE_TTL_SEC", "30"))
 SUMMARY_STATS_CACHE_TTL_SEC = int(os.environ.get("SOBS_SUMMARY_STATS_CACHE_TTL_SEC", "60"))
+RUM_SESSION_DETAIL_EVENT_CAP = int(os.environ.get("SOBS_RUM_SESSION_DETAIL_EVENT_CAP", "200"))
 
 
 @dataclass
@@ -8001,6 +8002,18 @@ def _error_id(ts: str, service: str, err_type: str, message: str, trace_id: str,
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _error_id_sql_expr() -> str:
+    """Return the shared SQL expression for stable ErrorId derivation."""
+    return (
+        "lower(hex(MD5(concat("
+        "toString(Timestamp), '|', ServiceName, '|', "
+        "if(mapContains(LogAttributes, 'exception.type'), LogAttributes['exception.type'], 'Error'), '|', "
+        "if(mapContains(LogAttributes, 'exception.message'), LogAttributes['exception.message'], Body), '|', "
+        "TraceId, '|', SpanId"
+        "))))"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Internal write-table allowlist
 # ---------------------------------------------------------------------------
@@ -10069,17 +10082,28 @@ def _fmt_bytes(n: int | None) -> str:
 @require_basic_auth
 async def summary():
     db = get_db()
-    resolved_ids = _get_resolved_error_ids(db)
-    error_items = []
+    error_id_sql = _error_id_sql_expr()
+    unresolved_condition = f"{error_id_sql} NOT IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
+
+    recent_errors = []
     for row in db.execute(
-        f"SELECT * FROM ({ERROR_SOURCES_SQL})"
-        " WHERE Timestamp >= now() - INTERVAL 48 HOUR"
-        " ORDER BY Timestamp DESC"
-        " LIMIT 500"
+        "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
+        f"FROM ({ERROR_SOURCES_SQL}) "
+        "WHERE Timestamp >= now() - INTERVAL 48 HOUR "
+        f"AND {unresolved_condition} "
+        "ORDER BY Timestamp DESC "
+        "LIMIT 5"
     ).fetchall():
         item = _build_error_item(dict(row))
-        item["resolved"] = item["id"] in resolved_ids
-        error_items.append(item)
+        recent_errors.append(
+            {
+                "id": item["id"],
+                "ts": item["ts"],
+                "service": item["service"],
+                "err_type": item["err_type"],
+                "message": item["message"],
+            }
+        )
 
     _now = time.monotonic()
     with _summary_stats_cache_lock:
@@ -10087,20 +10111,18 @@ async def summary():
             _summary_stats_cache["data"] if _summary_stats_cache["expires_at"] > _now else {}
         )
     if not _cached_stats:
-        all_error_rows = db.execute(f"SELECT * FROM ({ERROR_SOURCES_SQL})").fetchall()
-        unresolved_total = 0
-        for row in all_error_rows:
-            error_id = _build_error_item(dict(row))["id"]
-            if error_id not in resolved_ids:
-                unresolved_total += 1
+        errors_total = db.execute(f"SELECT count() AS cnt FROM ({ERROR_SOURCES_SQL})").fetchone()
+        unresolved_total_row = db.execute(
+            f"SELECT count() AS cnt FROM ({ERROR_SOURCES_SQL}) WHERE {unresolved_condition}"
+        ).fetchone()
 
         _cached_stats = {
             "logs": _active_part_rows(db, "otel_logs"),
             "spans": _active_part_rows(db, "otel_traces"),
             "rum": _active_part_rows(db, "hyperdx_sessions"),
             "ai": db.execute("SELECT COUNT(*) FROM otel_traces " f"WHERE {_AI_SPAN_CONDITION}").fetchone()[0],
-            "errors_total": len(all_error_rows),
-            "errors": unresolved_total,
+            "errors_total": int(errors_total["cnt"]) if errors_total else 0,
+            "errors": int(unresolved_total_row["cnt"]) if unresolved_total_row else 0,
             "services": [
                 r[0]
                 for r in db.execute(
@@ -10116,18 +10138,7 @@ async def summary():
     stats = {
         **_cached_stats,
     }
-    # Recent errors (last 5)
-    recent_errors = [
-        {
-            "id": item["id"],
-            "ts": item["ts"],
-            "service": item["service"],
-            "err_type": item["err_type"],
-            "message": item["message"],
-        }
-        for item in error_items
-        if not item["resolved"]
-    ][:5]
+
     # Recent logs (last 10)
     recent_logs = []
     for r in db.execute(
@@ -10423,6 +10434,31 @@ def _validate_re2_patterns(db: "ChDbConnection", patterns: list[str]) -> str | N
     return None
 
 
+def _prepare_re2_filter_patterns(db: "ChDbConnection", raw: str) -> tuple[list[str], list[str], str | None]:
+    """Parse and RE2-validate regex filters intended for SQL match() clauses.
+
+    This helper is for the RE2 DB path only. It does not affect Python-only regex
+    behavior or client-side JavaScript regex handling.
+    """
+    include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(raw)
+    if parse_error:
+        return [], [], parse_error
+    re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
+    if re2_error:
+        return [], [], re2_error
+    return include_patterns, exclude_patterns, None
+
+
+def _append_time_window_filter(conditions: list[str], params: list[Any], column: str, from_ts: str, to_ts: str) -> None:
+    time_conditions, time_params = _time_window_conditions(column, from_ts, to_ts)
+    conditions.extend(time_conditions)
+    params.extend(time_params)
+
+
+def _where_clause(conditions: list[str]) -> str:
+    return ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+
 def _append_regex_expression_clauses(
     *,
     conditions: list[str],
@@ -10482,13 +10518,9 @@ async def view_logs():
         error_msg = time_error
 
     if q:
-        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
-        if parse_error:
-            error_msg = parse_error
-        if not error_msg:
-            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-            if re2_error:
-                error_msg = re2_error
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            error_msg = regex_error
 
     if error_msg:
         pass
@@ -10551,10 +10583,8 @@ async def view_logs():
         elif trace_id:
             conditions.append("lower(TraceId)=?")
             params.append(trace_id.lower())
-        time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-        conditions.extend(time_conditions)
-        params.extend(time_params)
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
+        where = _where_clause(conditions)
 
     if not error_msg:
         try:
@@ -12686,9 +12716,7 @@ async def view_metrics():
         params.append(attr_fp)
 
     if not time_error:
-        time_conditions, time_params = _time_window_conditions("time", from_ts, to_ts)
-        where_parts.extend(time_conditions)
-        params.extend(time_params)
+        _append_time_window_filter(where_parts, params, "time", from_ts, to_ts)
 
     hour_clause = ""
     if not from_ts and not to_ts:
@@ -12700,28 +12728,22 @@ async def view_metrics():
     include_patterns: list[str] = []
     exclude_patterns: list[str] = []
     if q and not error_msg:
-        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
-        if parse_error:
-            error_msg = parse_error
-        if not error_msg:
-            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-            if re2_error:
-                error_msg = re2_error
-            else:
-                _append_regex_expression_clauses(
-                    conditions=where_parts,
-                    params=params,
-                    column="SignalName",
-                    include_patterns=include_patterns,
-                    exclude_patterns=exclude_patterns,
-                )
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            error_msg = regex_error
+        else:
+            _append_regex_expression_clauses(
+                conditions=where_parts,
+                params=params,
+                column="SignalName",
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            )
 
     if hour_clause:
         params.append(hours)
 
-    where_clause = ""
-    if where_parts:
-        where_clause = " WHERE " + " AND ".join(where_parts)
+    where_clause = f" {_where_clause(where_parts)}" if where_parts else ""
     if hour_clause:
         where_clause = f"{where_clause} AND {hour_clause}" if where_clause else f" WHERE {hour_clause}"
 
@@ -13422,6 +13444,7 @@ def _load_work_item_links_for_ref_ids(db: ChDbConnection, ref_ids: list[str]) ->
 @require_basic_auth
 async def view_errors():
     db = get_db()
+    error_id_sql = _error_id_sql_expr()
     grouped_trace_chunk_size = 200
     hydrate_key_chunk_size = 200
 
@@ -13499,13 +13522,9 @@ async def view_errors():
     exclude_patterns: list[str] = []
     error_msg = time_error or ""
     if q and not error_msg:
-        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
-        if parse_error:
-            error_msg = parse_error
-        if not error_msg:
-            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-            if re2_error:
-                error_msg = re2_error
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            error_msg = regex_error
     resolved_ids: set[str] = set()
     if resolved not in ("0", "1"):
         resolved_ids = _get_resolved_error_ids(db)
@@ -13515,9 +13534,7 @@ async def view_errors():
         placeholders = ",".join(["?"] * len(selected_services))
         where_parts.append(f"ServiceName IN ({placeholders})")
         where_params.extend(selected_services)
-    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    where_parts.extend(time_conditions)
-    where_params.extend(time_params)
+    _append_time_window_filter(where_parts, where_params, "Timestamp", from_ts, to_ts)
     if q and not error_msg:
         _append_regex_expression_clauses(
             conditions=where_parts,
@@ -13526,19 +13543,11 @@ async def view_errors():
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
         )
-    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    where_sql = _where_clause(where_parts)
 
     if grouped_mode:
         # Best-effort deduplication: probe recent raw events, then aggregate in SQL.
         probe_limit = max(2000, min(10000, limit * 100))
-        error_id_sql = (
-            "lower(hex(MD5(concat("
-            "toString(Timestamp), '|', ServiceName, '|', "
-            "if(mapContains(LogAttributes, 'exception.type'), LogAttributes['exception.type'], 'Error'), '|', "
-            "if(mapContains(LogAttributes, 'exception.message'), LogAttributes['exception.message'], Body), '|', "
-            "TraceId, '|', SpanId"
-            "))))"
-        )
         grouped_where_sql = where_sql
         if resolved == "1":
             resolved_condition = f"{error_id_sql} IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)"
@@ -13681,14 +13690,7 @@ async def view_errors():
         )
         use_resolved_sql_path = resolved in ("0", "1")
         if use_resolved_sql_path:
-            error_id_expr = (
-                "lower(hex(MD5(concat("
-                "toString(Timestamp), '|', ServiceName, '|', "
-                "if(mapContains(LogAttributes, 'exception.type'), LogAttributes['exception.type'], 'Error'), '|', "
-                "if(mapContains(LogAttributes, 'exception.message'), LogAttributes['exception.message'], Body), '|', "
-                "TraceId, '|', SpanId"
-                "))))"
-            )
+            error_id_expr = error_id_sql
             poc_where_sql = where_sql
             poc_where_params: list[Any] = list(where_params)
             if resolved == "1":
@@ -14543,6 +14545,7 @@ def _fetch_trace_metric_context(
 @require_basic_auth
 async def view_traces():
     db = get_db()
+    error_id_sql = _error_id_sql_expr()
     selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
     service = selected_services[0] if selected_services else ""
     trace_id = request.args.get("trace_id", "").strip()
@@ -14574,13 +14577,9 @@ async def view_traces():
     include_patterns: list[str] = []
     exclude_patterns: list[str] = []
     if q:
-        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
-        if parse_error:
-            q_error = parse_error
-        if not q_error:
-            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-            if re2_error:
-                q_error = re2_error
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            q_error = regex_error
     if selected_services:
         placeholders = ",".join(["?"] * len(selected_services))
         conditions.append(f"ServiceName IN ({placeholders})")
@@ -14588,9 +14587,7 @@ async def view_traces():
     if trace_id:
         conditions.append("TraceId=?")
         params.append(trace_id)
-    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    conditions.extend(time_conditions)
-    params.extend(time_params)
+    _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
     if q and not q_error:
         _append_regex_expression_clauses(
             conditions=conditions,
@@ -14599,7 +14596,7 @@ async def view_traces():
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
         )
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = _where_clause(conditions)
     if trace_id and not time_error:
         total = 0
         rows = []
@@ -14703,17 +14700,22 @@ async def view_traces():
             trace_activity_ts_ms: list[float] = []
             try:
                 err_rows = db.execute(
-                    "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes "
-                    f"FROM ({ERROR_SOURCES_SQL}) WHERE TraceId=? LIMIT ?",
+                    "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes, ErrorId, "
+                    "(ErrorId IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId)) AS IsResolved "
+                    "FROM ("
+                    "SELECT Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes, "
+                    f"{error_id_sql} AS ErrorId "
+                    f"FROM ({ERROR_SOURCES_SQL}) WHERE TraceId=? LIMIT ?"
+                    ")",
                     [trace_id, _TRACE_ERROR_LIMIT + 1],
                 ).fetchall()
-                resolved_ids = _get_resolved_error_ids(db)
                 if len(err_rows) > _TRACE_ERROR_LIMIT:
                     errors_truncated = True
                     err_rows = err_rows[:_TRACE_ERROR_LIMIT]
                 for row in err_rows:
                     item = _build_error_item(dict(row))
-                    item["resolved"] = item["id"] in resolved_ids
+                    item["id"] = str(row["ErrorId"] or item["id"])
+                    item["resolved"] = bool(row["IsResolved"])
                     trace_errors.append(item)
                     ts_raw = str(item.get("ts") or "")
                     if ts_raw:
@@ -16309,13 +16311,9 @@ async def view_rum():
     include_patterns: list[str] = []
     exclude_patterns: list[str] = []
     if q:
-        include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(q)
-        if parse_error:
-            q_error = parse_error
-        if not q_error:
-            re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-            if re2_error:
-                q_error = re2_error
+        include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+        if regex_error:
+            q_error = regex_error
 
     conditions = []
     params = []
@@ -16325,9 +16323,7 @@ async def view_rum():
     if error_source:
         conditions.append("LogAttributes['errorSource']=?")
         params.append(error_source)
-    time_conditions, time_params = _time_window_conditions("Timestamp", from_ts, to_ts)
-    conditions.extend(time_conditions)
-    params.extend(time_params)
+    _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
     if q and not q_error:
         _append_regex_expression_clauses(
             conditions=conditions,
@@ -16336,7 +16332,7 @@ async def view_rum():
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
         )
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = _where_clause(conditions)
     total = 0
     events: list[dict[str, Any]] = []
     session_groups: list[dict[str, Any]] = []
@@ -16383,9 +16379,15 @@ async def view_rum():
             detail_where = "WHERE " + " AND ".join(detail_conditions)
             detail_rows = db.execute(
                 "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId "
-                f"FROM hyperdx_sessions {detail_where} "
-                f"ORDER BY {_RUM_SESSION_KEY_SQL} ASC, Timestamp DESC",
-                params + session_keys,
+                "FROM ("
+                "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, "
+                f"{_RUM_SESSION_KEY_SQL} AS session_key, "
+                f"row_number() OVER (PARTITION BY {_RUM_SESSION_KEY_SQL} ORDER BY Timestamp DESC) AS row_rank "
+                f"FROM hyperdx_sessions {detail_where}"
+                ") "
+                "WHERE row_rank <= ? "
+                "ORDER BY session_key ASC, Timestamp DESC",
+                params + session_keys + [RUM_SESSION_DETAIL_EVENT_CAP],
             ).fetchall()
             events_by_session: dict[str, list[dict[str, Any]]] = {}
             for row in detail_rows:
@@ -17589,7 +17591,7 @@ async def view_ai():
         conditions.append(base_ai_condition)
         conditions.extend(time_conditions)
         params.extend(time_params)
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where = _where_clause(conditions)
 
     trace_ids: list[str] = []
     total = 0
@@ -17820,7 +17822,9 @@ async def view_ai():
         metadata_base_conditions.extend(metadata_time_conditions)
     metadata_base_where = " AND ".join(metadata_base_conditions)
     metadata_source_sql = (
-        "SELECT Timestamp, ServiceName, SpanName, SpanAttributes "
+        "SELECT Timestamp, ServiceName, SpanName, "
+        "SpanAttributes['gen_ai.request.model'] AS RequestModel, "
+        "SpanAttributes['gen_ai.operation.name'] AS OperationName "
         "FROM otel_traces "
         f"WHERE {metadata_base_where} "
         "ORDER BY Timestamp DESC LIMIT ?"
@@ -17843,16 +17847,16 @@ async def view_ai():
 
     try:
         models = _fetch_distinct_ai_metadata_values(
-            "SpanAttributes['gen_ai.request.model']",
-            "SpanAttributes['gen_ai.request.model'] != ''",
+            "RequestModel",
+            "RequestModel != ''",
         )
     except Exception as exc:
         metadata_errors.append(f"models={_public_dashboard_query_error(exc)}")
 
     try:
         operations = _fetch_distinct_ai_metadata_values(
-            "SpanAttributes['gen_ai.operation.name']",
-            "SpanAttributes['gen_ai.operation.name'] != ''",
+            "OperationName",
+            "OperationName != ''",
         )
     except Exception as exc:
         metadata_errors.append(f"operations={_public_dashboard_query_error(exc)}")
@@ -17863,6 +17867,8 @@ async def view_ai():
         metadata_errors.append(f"span_names={_public_dashboard_query_error(exc)}")
 
     try:
+        totals_where = where if where else f"WHERE {_AI_SPAN_CONDITION}"
+        totals_params = list(params) if where else []
         totals_row = db.execute(
             "SELECT "
             "SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) ti, "
@@ -17870,7 +17876,8 @@ async def view_ai():
             "COUNT(*) cnt, "
             "countIf(SpanAttributes['error.type'] != '') errors "
             "FROM otel_traces "
-            f"WHERE {_AI_SPAN_CONDITION}"
+            f"{totals_where}",
+            totals_params,
         ).fetchone()
         if totals_row:
             totals = {
@@ -22710,12 +22717,9 @@ def _regex_scope_time_conditions(scope: dict[str, Any], column: str) -> tuple[li
 
 
 def _parse_and_validate_regex_expression_for_api(db: Any, expression: str) -> tuple[list[str], list[str], str | None]:
-    include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(expression)
-    if parse_error:
-        return [], [], parse_error.replace("Regex error: ", "", 1)
-    re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-    if re2_error:
-        return [], [], re2_error.replace("Regex error: ", "", 1)
+    include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, expression)
+    if regex_error:
+        return [], [], regex_error.replace("Regex error: ", "", 1)
     return include_patterns, exclude_patterns, None
 
 
