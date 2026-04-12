@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% from "_page_header_macros.html" import render_page_header %}
+{% block title %}MCP Settings{% endblock %}
+{% block styles %}{{ super() }}<style>
+  /* Mobile card mode for API keys table */
+  @media (max-width: {{ mobile_breakpoint_max }}) {
+    .mcp-keys-table thead { display: none; }
+    .mcp-keys-table,
+    .mcp-keys-table tbody,
+    .mcp-keys-table tr,
+    .mcp-keys-table td { display: block; width: 100%; }
+    .mcp-keys-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .mcp-keys-table td { border: 0; padding: 0.2rem 0; }
+    .mcp-keys-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+    /* Mobile card mode for tools reference table */
+    .mcp-tools-table thead { display: none; }
+    .mcp-tools-table,
+    .mcp-tools-table tbody,
+    .mcp-tools-table tr,
+    .mcp-tools-table td { display: block; width: 100%; }
+    .mcp-tools-table tr { border: 1px solid var(--bs-border-color); border-radius: 0.5rem; margin-bottom: 0.75rem; padding: 0.5rem 0.625rem; }
+    .mcp-tools-table td { border: 0; padding: 0.2rem 0; }
+    .mcp-tools-table td::before { content: attr(data-label); display: block; font-size: 0.72rem; color: var(--bs-secondary-color); text-transform: uppercase; letter-spacing: 0.02em; margin-bottom: 0.1rem; }
+    /* Hide button labels at mobile, show icon only */
+    .mcp-btn-label { display: none; }
+    .btn:has(> .mcp-btn-label) i { margin-right: 0 !important; }
+  }
+</style>{% endblock %}
+{% block content %}
+{% set mcp_header_actions %}
+  <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_settings') }}" title="Back to Settings">
+    <i class="bi bi-arrow-left me-1"></i><span class="mcp-btn-label settings-btn-label">Back to Settings</span>
+  </a>
+{% endset %}
+{{ render_page_header('MCP (Model Context Protocol)', icon_class='bi bi-plugin', icon_text_class='text-primary', actions_html=mcp_header_actions, subtext='The SOBS MCP server exposes observability data (logs, traces, and metrics) to AI-powered tools such as GitHub Copilot Agent and VS Code Copilot via the <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener noreferrer">Model Context Protocol</a>. Generate API keys below to authenticate MCP clients, then point your Copilot configuration at <code>POST /mcp</code>.') }}
+
+<!-- Enable / disable toggle -->
+<div class="card border-secondary mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-toggles me-2"></i>Server Status</div>
+  <div class="card-body">
+    <div class="form-check form-switch mb-2">
+      <input class="form-check-input" type="checkbox" role="switch" id="mcpEnabledSwitch"
+             {% if mcp_enabled %}checked{% endif %}>
+      <label class="form-check-label fw-semibold" for="mcpEnabledSwitch">
+        MCP server enabled
+      </label>
+    </div>
+    <div class="form-text text-secondary mb-3">
+      When disabled, all <code>POST /mcp</code> calls return <code>503 Service Unavailable</code>.
+      The <code>GET /mcp/tools</code> discovery endpoint is always available.
+    </div>
+    <button type="button" class="btn btn-sm btn-primary" id="saveMcpEnabled">
+      <i class="bi bi-floppy me-1"></i>Save
+    </button>
+    <span id="mcpEnabledFeedback" class="ms-2 small text-secondary"></span>
+  </div>
+</div>
+
+<!-- API key list -->
+<div class="card border-secondary mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center justify-content-between">
+    <span><i class="bi bi-key me-2"></i>API Keys</span>
+    <button class="btn btn-sm btn-outline-primary" id="generateKeyBtn" title="Generate Key">
+      <i class="bi bi-plus-circle me-1"></i><span class="mcp-btn-label">Generate Key</span>
+    </button>
+  </div>
+  <div class="card-body p-0">
+    <div id="newKeyAlert" class="alert alert-success alert-dismissible m-3 d-none" role="alert">
+      <strong>New key generated.</strong> Copy it now – it will not be shown again.<br>
+      <code id="newKeyValue" class="user-select-all"></code>
+      <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"
+              onclick="document.getElementById('newKeyValue').textContent=''"></button>
+    </div>
+    {% if mcp_keys %}
+    <table class="table table-sm align-middle mb-0 mcp-keys-table">
+      <thead class="table-secondary">
+        <tr>
+          <th>Label</th>
+          <th>Created</th>
+          <th style="width:80px"></th>
+        </tr>
+      </thead>
+      <tbody id="keyTableBody">
+        {% for k in mcp_keys %}
+        <tr id="key-row-{{ k.id }}">
+          <td class="font-monospace small" data-label="Label">{{ k.label }}</td>
+          <td class="small text-secondary" data-label="Created">{{ k.created_at }}</td>
+          <td data-label="Actions">
+            <button class="btn btn-sm btn-outline-danger delete-key-btn"
+                    data-key-id="{{ k.id }}">
+              <i class="bi bi-trash"></i>
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-secondary small m-3" id="noKeysMsg">No API keys yet. Click <strong>Generate Key</strong> to create one.</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Quick-start guide -->
+<div class="card border-secondary mb-4">
+  <div class="card-header fw-semibold"><i class="bi bi-code-slash me-2"></i>Quick-start: Copilot configuration</div>
+  <div class="card-body">
+    <p class="small text-secondary mb-2">
+      Add the following to your VS Code <code>.vscode/mcp.json</code> or GitHub Copilot agent
+      configuration to connect to this SOBS instance:
+    </p>
+    <pre class="bg-dark border rounded p-3 small"><code>{
+  "servers": {
+    "sobs": {
+      "type": "http",
+      "url": "https://&lt;your-sobs-host&gt;/mcp",
+      "headers": {
+        "X-MCP-API-Key": "&lt;your-api-key&gt;"
+      }
+    }
+  }
+}</code></pre>
+    <div class="alert alert-warning small mt-2 mb-0 py-2 px-3" role="alert">
+      <i class="bi bi-shield-exclamation me-1"></i>
+      <strong>Use HTTPS in production</strong> to protect your API key in transit.
+    </div>
+
+    <p class="small text-secondary mb-2 mt-3">
+      Available tools (returned by <code>tools/list</code> and <code>GET /mcp/tools</code>):
+    </p>
+    <table class="table table-sm align-middle mb-0 mcp-tools-table">
+      <thead class="table-secondary">
+        <tr>
+          <th style="width:30%">Tool name</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">list_services</td>
+          <td class="small" data-label="Description">List all services that have sent telemetry to SOBS.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">query_otel_logs</td>
+          <td class="small" data-label="Description">Query log records from <code>otel_logs</code> with optional service, severity, and text filters.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">query_otel_traces</td>
+          <td class="small" data-label="Description">Query distributed trace spans from <code>otel_traces</code>.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">query_metrics</td>
+          <td class="small" data-label="Description">Query pre-aggregated 1-minute metrics from <code>v_otel_metrics_1m</code>.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">query_metrics_raw</td>
+          <td class="small" data-label="Description">Query raw metric data points from gauge / sum / histogram tables.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">get_metric_names</td>
+          <td class="small" data-label="Description">List all distinct metric names currently stored in SOBS.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">get_anomaly_rules</td>
+          <td class="small" data-label="Description">Return configured anomaly detection rules and their thresholds.</td>
+        </tr>
+        <tr>
+          <td class="font-monospace small" data-label="Tool name">get_recent_errors</td>
+          <td class="small" data-label="Description">Surface recent error-level log events and error-status trace spans.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  // Toggle enabled / disabled
+  document.getElementById('saveMcpEnabled').addEventListener('click', async function () {
+    const enabled = document.getElementById('mcpEnabledSwitch').checked;
+    const fb = document.getElementById('mcpEnabledFeedback');
+    try {
+      const r = await fetch('{{ url_for("mcp.mcp_api_set_enabled") }}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const d = await r.json();
+      fb.textContent = d.ok ? 'Saved.' : (d.error || 'Error saving.');
+      fb.className = 'ms-2 small ' + (d.ok ? 'text-success' : 'text-danger');
+    } catch (e) {
+      fb.textContent = 'Request failed.';
+      fb.className = 'ms-2 small text-danger';
+    }
+    setTimeout(() => { fb.textContent = ''; }, 3000);
+  });
+
+  // Generate a new key
+  document.getElementById('generateKeyBtn').addEventListener('click', async function () {
+    const label = prompt('Label for this key (e.g. "copilot-vscode"):');
+    if (label === null) return;
+    try {
+      const r = await fetch('{{ url_for("mcp.mcp_api_create_key") }}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: label.trim() || 'API Key' }),
+      });
+      const d = await r.json();
+      if (!d.ok) { alert(d.error || 'Failed to generate key.'); return; }
+      // Show the raw key once.
+      document.getElementById('newKeyValue').textContent = d.key;
+      document.getElementById('newKeyAlert').classList.remove('d-none');
+      // Add row to the table.
+      const tbody = document.getElementById('keyTableBody');
+      const noMsg = document.getElementById('noKeysMsg');
+      if (noMsg) noMsg.remove();
+      let tableEl = tbody ? tbody.closest('table') : null;
+      if (!tableEl) {
+        // Table did not exist yet – reload to show it properly.
+        window.location.reload();
+        return;
+      }
+      const tr = document.createElement('tr');
+      tr.id = 'key-row-' + d.id;
+      tr.innerHTML = '<td class="font-monospace small" data-label="Label">' + (d.label || 'API Key') + '</td>' +
+        '<td class="small text-secondary" data-label="Created">just now</td>' +
+        '<td data-label="Actions"><button class="btn btn-sm btn-outline-danger delete-key-btn" data-key-id="' + d.id + '">' +
+        '<i class="bi bi-trash"></i></button></td>';
+      tbody.appendChild(tr);
+      tr.querySelector('.delete-key-btn').addEventListener('click', handleDelete);
+    } catch (e) {
+      alert('Request failed.');
+    }
+  });
+
+  // Delete a key
+  const _deleteKeyUrlBase = '{{ url_for("mcp.mcp_api_list_keys") }}/';
+  function handleDelete(evt) {
+    const btn = evt.currentTarget;
+    const keyId = btn.dataset.keyId;
+    if (!confirm('Revoke this API key? This cannot be undone.')) return;
+    fetch(_deleteKeyUrlBase + keyId, { method: 'DELETE' })
+      .then(r => r.json())
+      .then(d => {
+        if (!d.ok) { alert(d.error || 'Failed to delete key.'); return; }
+        const row = document.getElementById('key-row-' + keyId);
+        if (row) row.remove();
+      })
+      .catch(() => alert('Request failed.'));
+  }
+
+  document.querySelectorAll('.delete-key-btn').forEach(btn => {
+    btn.addEventListener('click', handleDelete);
+  });
+}());
+</script>
+{% endblock %}
