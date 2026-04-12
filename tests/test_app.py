@@ -19984,3 +19984,96 @@ class TestSetupWizard:
         text = (await r.get_data()).decode()
         assert "tourOpenWizardBtn" in text
         assert "__sobsOpenSetupWizard" in text
+
+
+# ---------------------------------------------------------------------------
+# Self-telemetry (OTEL + RUM) Tests
+# ---------------------------------------------------------------------------
+class TestSelfTelemetry:
+    """Tests for SOBS self-telemetry: OTEL backend instrumentation and RUM snippet."""
+
+    # ── OTEL backend ──────────────────────────────────────────────────────────
+
+    def test_otel_endpoint_default_is_empty(self, monkeypatch):
+        """SOBS_OTEL_ENDPOINT defaults to empty string (self-telemetry disabled)."""
+        monkeypatch.setattr(sobs_app, "_SELF_OTEL_ENDPOINT", "")
+        assert sobs_app._SELF_OTEL_ENDPOINT == ""
+
+    def test_otel_service_name_default(self, monkeypatch):
+        """SOBS_OTEL_SERVICE_NAME defaults to 'sobs'."""
+        monkeypatch.setattr(sobs_app, "_SELF_OTEL_SERVICE_NAME", "sobs")
+        assert sobs_app._SELF_OTEL_SERVICE_NAME == "sobs"
+
+    def test_otel_environment_default(self, monkeypatch):
+        """SOBS_OTEL_ENVIRONMENT defaults to 'production'."""
+        monkeypatch.setattr(sobs_app, "_SELF_OTEL_ENVIRONMENT", "production")
+        assert sobs_app._SELF_OTEL_ENVIRONMENT == "production"
+
+    def test_setup_self_telemetry_no_op_when_endpoint_empty(self, monkeypatch):
+        """_setup_self_telemetry must be a no-op when endpoint is empty."""
+        monkeypatch.setattr(sobs_app, "_SELF_OTEL_ENDPOINT", "")
+        original_tp = sobs_app._self_tracer_provider
+        original_lp = sobs_app._self_logger_provider
+        sobs_app._setup_self_telemetry()
+        # Should still be unchanged
+        assert sobs_app._self_tracer_provider == original_tp
+        assert sobs_app._self_logger_provider == original_lp
+
+    def test_shutdown_self_telemetry_safe_when_none(self, monkeypatch):
+        """_shutdown_self_telemetry must not raise when providers are None."""
+        monkeypatch.setattr(sobs_app, "_self_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_logger_provider", None)
+        # Should not raise
+        sobs_app._shutdown_self_telemetry()
+
+    # ── RUM self-monitoring ───────────────────────────────────────────────────
+
+    def test_rum_self_endpoint_default_is_empty(self, monkeypatch):
+        """SOBS_RUM_SELF_ENDPOINT defaults to empty string (self-RUM disabled)."""
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_ENDPOINT", "")
+        assert sobs_app._SELF_RUM_ENDPOINT == ""
+
+    def test_rum_self_service_default(self, monkeypatch):
+        """SOBS_RUM_SELF_SERVICE defaults to 'sobs-ui'."""
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_SERVICE", "sobs-ui")
+        assert sobs_app._SELF_RUM_SERVICE == "sobs-ui"
+
+    async def test_rum_snippet_absent_by_default(self, client):
+        """RUM snippet must not appear when SOBS_RUM_SELF_ENDPOINT is not set."""
+        r = await client.get("/")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "data-sobs-endpoint" not in text
+
+    async def test_rum_snippet_present_when_endpoint_configured(self, client, monkeypatch):
+        """RUM snippet must appear in base when SOBS_RUM_SELF_ENDPOINT is set."""
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_ENDPOINT", "http://sobs.example.com")
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_SERVICE", "sobs-ui")
+        r = await client.get("/")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "http://sobs.example.com/static/rum.js" in text
+        assert 'data-sobs-endpoint="http://sobs.example.com/v1/rum"' in text
+        assert 'data-sobs-app="sobs-ui"' in text
+        assert "data-sobs-capture-console" in text
+        assert "data-sobs-capture-errors" in text
+        assert "data-sobs-capture-replays" in text
+
+    async def test_rum_snippet_includes_release(self, client, monkeypatch):
+        """RUM snippet must carry the sobs_version as data-sobs-release."""
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_ENDPOINT", "http://sobs.example.com")
+        monkeypatch.setattr(sobs_app, "BUILD_VERSION", "v3.1.0")
+        r = await client.get("/")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert 'data-sobs-release="v3.1.0"' in text
+
+    async def test_feature_flags_context_includes_rum_config(self, client, monkeypatch):
+        """inject_feature_flags must expose rum_self_endpoint and rum_self_service."""
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_ENDPOINT", "http://rum.example.com")
+        monkeypatch.setattr(sobs_app, "_SELF_RUM_SERVICE", "custom-sobs-ui")
+        r = await client.get("/")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "http://rum.example.com" in text
+        assert "custom-sobs-ui" in text

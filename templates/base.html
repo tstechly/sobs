@@ -680,6 +680,17 @@
     }
   </style>
   {% block styles %}{% endblock %}
+  {%- if rum_self_endpoint %}
+  <script
+    src="{{ rum_self_endpoint }}/static/rum.js"
+    data-sobs-app="{{ rum_self_service }}"
+    data-sobs-endpoint="{{ rum_self_endpoint }}/v1/rum"
+    data-sobs-release="{{ sobs_version }}"
+    data-sobs-capture-console="true"
+    data-sobs-capture-errors="true"
+    data-sobs-capture-replays="true"
+    defer></script>
+  {%- endif %}
 </head>
 <body>
 <!-- Overlay backdrop for hamburger sidebar -->

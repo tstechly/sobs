@@ -48,6 +48,7 @@ from quart import (
     Quart,
     Response,
     flash,
+    g,
     jsonify,
     redirect,
     render_template,
@@ -365,6 +366,59 @@ async def _apply_security_headers(response: Response):
     return response
 
 
+@app.before_request
+async def _start_request_span() -> None:
+    """Open an OTEL HTTP server span for every incoming request when self-telemetry is active."""
+    if not _SELF_OTEL_ENDPOINT:
+        return
+    try:
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.trace import SpanKind
+
+        tracer = otel_trace.get_tracer("sobs.http")
+        route = request.endpoint or request.path or "unknown"
+        span = tracer.start_span(
+            f"{request.method} {route}",
+            kind=SpanKind.SERVER,
+            attributes={
+                "http.method": request.method,
+                "http.route": route,
+                "http.url": request.url,
+                "net.peer.ip": (request.headers.get("X-Forwarded-For") or request.remote_addr or ""),
+            },
+        )
+        ctx = otel_trace.set_span_in_context(span)
+        g._otel_span = span
+        g._otel_ctx_token = otel_context.attach(ctx)
+    except Exception:
+        pass
+
+
+@app.after_request
+async def _end_request_span(response: Response) -> Response:
+    """Close the OTEL HTTP server span and record the response status code."""
+    span = getattr(g, "_otel_span", None)
+    ctx_token = getattr(g, "_otel_ctx_token", None)
+    if span is None:
+        return response
+    try:
+        from opentelemetry import context as otel_context
+        from opentelemetry.trace import StatusCode
+
+        span.set_attribute("http.status_code", response.status_code)
+        if response.status_code >= 500:
+            span.set_status(StatusCode.ERROR, f"HTTP {response.status_code}")
+        else:
+            span.set_status(StatusCode.OK)
+        span.end()
+        if ctx_token is not None:
+            otel_context.detach(ctx_token)
+    except Exception:
+        pass
+    return response
+
+
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -587,6 +641,105 @@ _http_log_level_name = os.environ.get("SOBS_HTTP_CLIENT_LOG_LEVEL", "WARNING").s
 _http_log_level = getattr(logging, _http_log_level_name, logging.WARNING)
 logging.getLogger("httpx").setLevel(_http_log_level)
 logging.getLogger("httpcore").setLevel(_http_log_level)
+
+# ---------------------------------------------------------------------------
+# Self-telemetry – optional OTEL instrumentation for SOBS itself
+# ---------------------------------------------------------------------------
+# Set SOBS_OTEL_ENDPOINT to an OTLP/HTTP base URL (e.g. http://sobs:4317) to
+# have SOBS emit its own traces and logs.  All other settings have sensible
+# defaults and are optional.
+_SELF_OTEL_ENDPOINT = os.environ.get("SOBS_OTEL_ENDPOINT", "").strip()
+_SELF_OTEL_SERVICE_NAME = os.environ.get("SOBS_OTEL_SERVICE_NAME", "sobs").strip() or "sobs"
+_SELF_OTEL_ENVIRONMENT = os.environ.get("SOBS_OTEL_ENVIRONMENT", "production").strip() or "production"
+
+# Self-RUM: set SOBS_RUM_SELF_ENDPOINT to the base URL of the SOBS instance that
+# should receive RUM data for SOBS' own UI (e.g. http://sobs:4317).
+# Leave empty to disable the self-RUM snippet.
+_SELF_RUM_ENDPOINT = os.environ.get("SOBS_RUM_SELF_ENDPOINT", "").strip()
+_SELF_RUM_SERVICE = os.environ.get("SOBS_RUM_SELF_SERVICE", "sobs-ui").strip() or "sobs-ui"
+
+# Module-level references so tests can monkeypatch them.
+_self_tracer_provider = None
+_self_logger_provider = None
+
+
+def _setup_self_telemetry() -> None:
+    """Initialise OTEL TracerProvider + LoggerProvider for SOBS itself.
+
+    Only activates when ``SOBS_OTEL_ENDPOINT`` is set.  The providers are
+    stored in module-level variables so they can be shut down cleanly on exit.
+    """
+    global _self_tracer_provider, _self_logger_provider
+    if not _SELF_OTEL_ENDPOINT:
+        return
+    try:
+        from opentelemetry import trace as otel_trace
+        from opentelemetry._logs import set_logger_provider
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        resource = Resource.create(
+            {
+                "service.name": _SELF_OTEL_SERVICE_NAME,
+                "service.version": BUILD_VERSION or "dev",
+                "deployment.environment": _SELF_OTEL_ENVIRONMENT,
+            }
+        )
+
+        # ---- Traces ----
+        tracer_provider = TracerProvider(resource=resource)
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{_SELF_OTEL_ENDPOINT}/v1/traces"))
+        )
+        otel_trace.set_tracer_provider(tracer_provider)
+        _self_tracer_provider = tracer_provider
+
+        # ---- Logs ----
+        logger_provider = LoggerProvider(resource=resource)
+        logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{_SELF_OTEL_ENDPOINT}/v1/logs"))
+        )
+        set_logger_provider(logger_provider)
+        _self_logger_provider = logger_provider
+
+        # Bridge existing Python logging so every log.* call flows to OTEL.
+        otel_handler = LoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
+        logging.getLogger().addHandler(otel_handler)
+
+        log.info(
+            "Self-telemetry enabled: endpoint=%s service=%s env=%s",
+            _SELF_OTEL_ENDPOINT,
+            _SELF_OTEL_SERVICE_NAME,
+            _SELF_OTEL_ENVIRONMENT,
+        )
+    except Exception as exc:  # pragma: no cover – startup only
+        log.warning("Failed to initialise self-telemetry: %s", exc)
+
+
+def _shutdown_self_telemetry() -> None:
+    """Flush and shut down self-telemetry providers on process exit."""
+    global _self_tracer_provider, _self_logger_provider
+    try:
+        if _self_tracer_provider is not None:
+            _self_tracer_provider.shutdown()
+            _self_tracer_provider = None
+    except Exception:
+        pass
+    try:
+        if _self_logger_provider is not None:
+            _self_logger_provider.shutdown()
+            _self_logger_provider = None
+    except Exception:
+        pass
+
+
+_setup_self_telemetry()
+atexit.register(_shutdown_self_telemetry)
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -3089,6 +3242,8 @@ def inject_feature_flags() -> dict:
             "raise_issue_mask_toggle_effective": raise_issue_mask_toggle_effective,
             "mobile_breakpoint_max": MOBILE_BREAKPOINT_MAX,
             "sobs_version": BUILD_VERSION or "dev",
+            "rum_self_endpoint": _SELF_RUM_ENDPOINT,
+            "rum_self_service": _SELF_RUM_SERVICE,
         }
     except Exception:
         return {
@@ -3097,6 +3252,8 @@ def inject_feature_flags() -> dict:
             "raise_issue_mask_toggle_effective": False,
             "mobile_breakpoint_max": MOBILE_BREAKPOINT_MAX,
             "sobs_version": BUILD_VERSION or "dev",
+            "rum_self_endpoint": _SELF_RUM_ENDPOINT,
+            "rum_self_service": _SELF_RUM_SERVICE,
         }
 
 
