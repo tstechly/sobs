@@ -36,6 +36,7 @@ Available MCP tools
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -491,6 +492,35 @@ def _clamp(value: int | None, lo: int, hi: int, default: int) -> int:
         return default
 
 
+def _normalize_map_value(raw: Any) -> dict[str, Any]:
+    """Return a dict for map-like chDB values across runtime/test representations."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            parsed_json = json.loads(text)
+            if isinstance(parsed_json, dict):
+                return parsed_json
+        except (json.JSONDecodeError, TypeError):
+            pass
+        try:
+            parsed_literal = ast.literal_eval(text)
+            if isinstance(parsed_literal, dict):
+                return parsed_literal
+        except (ValueError, SyntaxError):
+            pass
+        return {}
+    try:
+        return dict(raw)
+    except (TypeError, ValueError):
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations
 # ---------------------------------------------------------------------------
@@ -551,7 +581,7 @@ def _tool_query_otel_logs(db: Any, args: dict) -> dict:
                 "body": row[3],
                 "trace_id": row[4],
                 "span_id": row[5],
-                "attributes": dict(row[6]) if row[6] else {},
+                "attributes": _normalize_map_value(row[6]),
             }
         )
     return {"count": len(result), "rows": result}
@@ -706,7 +736,7 @@ def _tool_query_metrics_raw(db: Any, args: dict) -> dict:
                     "service": row[1],
                     "metric_name": row[2],
                     "metric_unit": row[3],
-                    "attributes": dict(row[4]) if row[4] else {},
+                    "attributes": _normalize_map_value(row[4]),
                     "count": row[5],
                     "sum": row[6],
                 }
@@ -727,7 +757,7 @@ def _tool_query_metrics_raw(db: Any, args: dict) -> dict:
                     "service": row[1],
                     "metric_name": row[2],
                     "metric_unit": row[3],
-                    "attributes": dict(row[4]) if row[4] else {},
+                    "attributes": _normalize_map_value(row[4]),
                     "value": row[5],
                 }
             )
