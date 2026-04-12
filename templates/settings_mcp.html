@@ -58,11 +58,22 @@
 
   .mcp-new-key-display {
     position: relative;
-    background-color: var(--bs-code-color, #d63384);
-    opacity: 0.1;
+    background-color: var(--bs-success-bg-subtle);
+    border: 1px solid var(--bs-success-border-subtle);
+    color: var(--bs-emphasis-color);
     padding: 1rem;
     border-radius: 0.375rem;
     margin: 1rem 0;
+  }
+
+  .mcp-config-pre {
+    background-color: var(--bs-tertiary-bg);
+    border-color: var(--bs-border-color);
+    color: var(--bs-emphasis-color);
+  }
+
+  .mcp-config-pre code {
+    color: inherit;
   }
 
   @media (max-width: {{ mobile_breakpoint_max }}) {
@@ -184,7 +195,7 @@
           <i class="bi bi-clipboard me-1"></i><span class="mcp-btn-label">Copy Config</span>
         </button>
       </div>
-      <pre class="bg-dark border rounded p-3 small mcp-code-block" id="configCodeBlock"><code>{
+      <pre class="border rounded p-3 small mcp-code-block mcp-config-pre" id="configCodeBlock"><code>{
   "servers": {
     "sobs": {
       "type": "http",
