@@ -26,6 +26,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -104,7 +106,7 @@ jobs:
             .github/cache-key-lint.txt
 
       - name: Install linting dependencies
-        run: pip install black isort flake8 mypy flask
+        run: pip install black isort flake8 mypy djlint flask
 
       - name: Run black
         run: black --check .
@@ -117,6 +119,9 @@ jobs:
 
       - name: Run mypy
         run: mypy app.py
+
+      - name: Run djlint
+        run: python3 scripts/run_djlint.py --check --lint templates
 
   test:
     name: Tests
