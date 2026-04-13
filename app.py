@@ -5711,10 +5711,33 @@ def _serialize_github_work_item_row(row: dict | Any) -> dict[str, Any]:
     r = row if isinstance(row, dict) else dict(row)
     related_issue_urls_raw = _safe_json_loads(r.get("RelatedIssueUrls", "[]"), [])
     related_issue_urls = cast(list[Any], related_issue_urls_raw) if isinstance(related_issue_urls_raw, list) else []
+
+    def _to_utc_iso(ts_value: Any) -> str:
+        raw = str(ts_value or "").strip()
+        if not raw:
+            return ""
+        if isinstance(ts_value, datetime):
+            dt = ts_value
+        else:
+            normalized = raw.replace(" ", "T")
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            if not re.search(r"[zZ]|[+\-]\d\d:?\d\d$", normalized):
+                normalized += "+00:00"
+            try:
+                dt = datetime.fromisoformat(normalized)
+            except ValueError:
+                return raw
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
     return {
         "id": str(r.get("Id", "")),
-        "created_at": str(r.get("CreatedAt", ""))[:19],
-        "completed_at": str(r.get("CompletedAt", ""))[:19],
+        "created_at": _to_utc_iso(r.get("CreatedAt", "")),
+        "completed_at": _to_utc_iso(r.get("CompletedAt", "")),
         "agent_rule_id": str(r.get("AgentRuleId", "")),
         "agent_rule_name": str(r.get("AgentRuleName", "")),
         "agent_action": str(r.get("AgentAction", "")),
@@ -6293,6 +6316,7 @@ def _persist_github_work_item(
     """Persist a GitHub issue decision as a work item for tracking and cross-linking."""
 
     try:
+        now_ts = _normalize_ch_timestamp(datetime.now(timezone.utc))
         issue_number = 0
         try:
             parts = github_issue_url.rstrip("/").split("/")
@@ -6323,6 +6347,8 @@ def _persist_github_work_item(
 
         work_item = {
             "Id": run_id,
+            "CreatedAt": now_ts,
+            "CompletedAt": now_ts,
             "AgentRunId": run_id,
             "AgentRuleId": rule.get("id", ""),
             "AgentRuleName": rule.get("name", ""),
@@ -6383,6 +6409,7 @@ def _persist_onboarding_work_item(
         return
 
     try:
+        now_ts = _normalize_ch_timestamp(datetime.now(timezone.utc))
         owner, repo = _parse_github_repo_owner_name(github_repo)
         if not owner or not repo:
             owner, repo, _ = _parse_issue_ref_from_url(issue_url)
@@ -6390,6 +6417,8 @@ def _persist_onboarding_work_item(
 
         work_item = {
             "Id": uuid.uuid4().hex,
+            "CreatedAt": now_ts,
+            "CompletedAt": now_ts,
             "AgentRunId": "",
             "AgentRuleId": "",
             "AgentRuleName": "Onboarding Wizard",
@@ -24992,13 +25021,28 @@ def _get_app_setting(db: "ChDbConnection", key: str) -> str | None:
     return value if value else None
 
 
+_APP_SETTINGS_LAST_UPDATED_AT_MS = 0
+
+
+def _next_app_setting_updated_at() -> str:
+    """Return a monotonic UTC timestamp string for sobs_app_settings writes."""
+    global _APP_SETTINGS_LAST_UPDATED_AT_MS
+    now_ms = int(time.time() * 1000)
+    if now_ms <= _APP_SETTINGS_LAST_UPDATED_AT_MS:
+        now_ms = _APP_SETTINGS_LAST_UPDATED_AT_MS + 1
+    _APP_SETTINGS_LAST_UPDATED_AT_MS = now_ms
+    dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
 def _set_app_setting(db: "ChDbConnection", key: str, value: str) -> None:
     """Upsert a value in sobs_app_settings."""
     stored = _encrypt_secret_value(value) if key in {"vapid_private_key"} else value
+    updated_at_value = _next_app_setting_updated_at()
     _insert_rows_json_each_row(
         db,
         "sobs_app_settings",
-        [{"Key": key, "Value": stored, "UpdatedAt": int(time.time() * 1000)}],
+        [{"Key": key, "Value": stored, "UpdatedAt": updated_at_value}],
     )
     if key == _MASKING_OUTPUT_ENABLED_SETTING:
         _set_masking_settings_cache(output_enabled=_is_truthy_setting(value, default=True))
@@ -25008,10 +25052,11 @@ def _set_app_setting(db: "ChDbConnection", key: str, value: str) -> None:
 
 def _del_app_setting(db: "ChDbConnection", key: str) -> None:
     """Clear a setting from sobs_app_settings by writing an empty value (tombstone)."""
+    updated_at_value = _next_app_setting_updated_at()
     _insert_rows_json_each_row(
         db,
         "sobs_app_settings",
-        [{"Key": key, "Value": "", "UpdatedAt": int(time.time() * 1000)}],
+        [{"Key": key, "Value": "", "UpdatedAt": updated_at_value}],
     )
     if key == _MASKING_OUTPUT_ENABLED_SETTING:
         _set_masking_settings_cache(output_enabled=True)

@@ -15349,6 +15349,10 @@ class TestReports:
         assert item["occurrence_count"] >= 1
         assert item["copilot_assignment_status"] == "requested"
         assert item["related_issue_urls"] == ["https://github.com/abartrim/sobs/issues/101"]
+        assert item["created_at"].endswith("Z")
+        assert "T" in item["created_at"]
+        assert item["completed_at"].endswith("Z")
+        assert "T" in item["completed_at"]
 
 
 # ChdbSqlRunner & Vanna Query Service
@@ -17580,6 +17584,21 @@ class TestWebTraffic:
 
         db = sobs_app.get_db()
         assert sobs_app._get_app_setting(db, sobs_app._GITHUB_BACKFILL_MAX_RELEASES_SETTING) == "123"
+
+    def test_app_settings_writes_are_monotonic_per_process(self, monkeypatch):
+        db = sobs_app.get_db()
+        test_key = "test.monotonic.updated_at"
+        original_last = sobs_app._APP_SETTINGS_LAST_UPDATED_AT_MS
+
+        try:
+            sobs_app._APP_SETTINGS_LAST_UPDATED_AT_MS = 0
+            monkeypatch.setattr(sobs_app.time, "time", lambda: 1_700_000_000.0)
+            sobs_app._set_app_setting(db, test_key, "first")
+            sobs_app._set_app_setting(db, test_key, "second")
+            assert sobs_app._get_app_setting(db, test_key) == "second"
+        finally:
+            sobs_app._APP_SETTINGS_LAST_UPDATED_AT_MS = original_last
+            sobs_app._del_app_setting(db, test_key)
 
     async def test_web_traffic_browsers_api_empty(self, client):
         r = await client.get("/api/web-traffic/browsers")
@@ -20347,6 +20366,49 @@ class TestOnboardingWizard:
             assert wi is not None
             assert str(wi["AgentRuleName"]) == "Onboarding Wizard"
             assert str(wi["AgentAction"]) == "onboarding_ci"
+        finally:
+            sobs_app._save_ai_setting(db, "ai.github_token", original_token)
+
+    async def test_create_issues_persist_onboarding_work_item_sets_explicit_utc_timestamps(self, client, monkeypatch):
+        """Onboarding work-item inserts should pass explicit UTC CreatedAt/CompletedAt values."""
+        import app as sobs_app
+
+        db = sobs_app.get_db()
+        original_token = sobs_app._load_ai_setting(db, "ai.github_token", "")
+        original_insert = sobs_app._insert_rows_json_each_row
+        captured_rows = []
+
+        async def _fake_upsert(_token, _repo, _title, _body_md, labels):
+            return {
+                "issue_url": "https://github.com/owner/myrepo/issues/779",
+                "issue_number": 779,
+                "issue_title": "[Sobs] Set up CI metadata scripts for myrepo",
+                "issue_state": "open",
+                "status": "created",
+                "note": "Created a new onboarding issue.",
+            }
+
+        def _capture_insert(_db, _table_name, _rows):
+            if _table_name == "sobs_github_work_items":
+                captured_rows.extend(_rows)
+            return original_insert(_db, _table_name, _rows)
+
+        try:
+            sobs_app._save_ai_setting(db, "ai.github_token", "test-token")
+            monkeypatch.setattr(sobs_app, "_create_or_update_onboarding_issue", _fake_upsert)
+            monkeypatch.setattr(sobs_app, "_insert_rows_json_each_row", _capture_insert)
+
+            r = await client.post(
+                "/api/onboarding/create-issues",
+                json={"repo": "owner/myrepo", "create_ci": True, "create_otel": False},
+            )
+            assert r.status_code == 200
+            data = await r.get_json()
+            assert data["ok"] is True
+            assert captured_rows
+            inserted = captured_rows[0]
+            assert inserted.get("CreatedAt")
+            assert inserted.get("CompletedAt")
         finally:
             sobs_app._save_ai_setting(db, "ai.github_token", original_token)
 
