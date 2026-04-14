@@ -20652,3 +20652,129 @@ class TestOnboardingWizard:
         assert status == "requested"
         assert "accepted" in reason.lower() or "requested" in reason.lower()
         assert requested_at > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests for OTEL & RUM self-instrumentation (Issue: OTEL & RUM telemetry audit)
+# ---------------------------------------------------------------------------
+
+
+class TestSelfOtelSetup:
+    """Verify the SOBS self-OTEL instrumentation helpers."""
+
+    def test_self_otel_disabled_by_default(self):
+        """SOBS_SELF_OTEL_ENDPOINT is empty by default so no providers are created."""
+        original = sobs_app.SELF_OTEL_ENDPOINT
+        try:
+            sobs_app.SELF_OTEL_ENDPOINT = ""
+            sobs_app._self_otel_tracer_provider = None
+            sobs_app._self_otel_logger_provider = None
+            sobs_app._self_otel_meter_provider = None
+            sobs_app._setup_self_otel()
+            assert sobs_app._self_otel_tracer_provider is None
+            assert sobs_app._self_otel_logger_provider is None
+            assert sobs_app._self_otel_meter_provider is None
+        finally:
+            sobs_app.SELF_OTEL_ENDPOINT = original
+
+    def test_self_otel_providers_created_when_endpoint_set(self, monkeypatch):
+        """When endpoint is set, all three providers are created."""
+        import opentelemetry.sdk.trace as _sdk_trace
+        import opentelemetry.sdk._logs as _sdk_logs
+        import opentelemetry.sdk.metrics as _sdk_metrics
+
+        monkeypatch.setattr(sobs_app, "SELF_OTEL_ENDPOINT", "http://localhost:44317")
+        # Reset providers to None so setup can run cleanly.
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+
+        sobs_app._setup_self_otel()
+
+        assert isinstance(sobs_app._self_otel_tracer_provider, _sdk_trace.TracerProvider)
+        assert isinstance(sobs_app._self_otel_logger_provider, _sdk_logs.LoggerProvider)
+        assert isinstance(sobs_app._self_otel_meter_provider, _sdk_metrics.MeterProvider)
+
+        # Cleanup — shutdown the providers so threads don't linger.
+        sobs_app._shutdown_self_otel()
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+
+    def test_get_self_tracer_returns_noop_when_no_provider(self, monkeypatch):
+        """get_self_tracer() returns a no-op tracer when self-OTEL is not configured."""
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        tracer = sobs_app.get_self_tracer()
+        # Must be usable (no-op) – creating a span should not raise.
+        with tracer.start_as_current_span("test-noop-span"):
+            pass
+
+    def test_shutdown_safe_when_providers_none(self, monkeypatch):
+        """_shutdown_self_otel() is safe to call even when providers were never set up."""
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+        # Should not raise.
+        sobs_app._shutdown_self_otel()
+
+    def test_resource_attributes_include_service_metadata(self, monkeypatch):
+        """The OTEL Resource created for self-monitoring includes the required attributes."""
+        from opentelemetry.sdk.resources import Resource
+
+        monkeypatch.setattr(sobs_app, "SELF_OTEL_ENDPOINT", "http://localhost:44317")
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+        monkeypatch.setattr(sobs_app, "BUILD_VERSION", "test-1.2.3")
+
+        sobs_app._setup_self_otel()
+        provider = sobs_app._self_otel_tracer_provider
+        assert provider is not None
+        attrs = provider.resource.attributes
+        assert attrs.get("service.name") == sobs_app._SOBS_SELF_SERVICE_NAME
+        assert attrs.get("service.version") == "test-1.2.3"
+        assert "deployment.environment" in attrs
+
+        sobs_app._shutdown_self_otel()
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+
+
+class TestSelfRumSnippet:
+    """Verify the self-monitoring RUM snippet is present on every page."""
+
+    async def test_rum_snippet_in_summary_page(self, client):
+        """The RUM init script is present in the SOBS summary page <head>."""
+        r = await client.get("/")
+        assert r.status_code == 200
+        body = (await r.get_data()).decode("utf-8", errors="replace")
+        assert "/static/rum.min.js" in body, "rum.min.js script tag should be present"
+        assert "SOBS.init" in body, "SOBS.init call should be present"
+        assert "sobs-ui" in body, "appName 'sobs-ui' should be set in SOBS.init"
+        assert "window.location.origin + '/v1/rum'" in body, "endpoint should use window.location.origin"
+
+    async def test_rum_snippet_in_errors_page(self, client):
+        r = await client.get("/errors")
+        assert r.status_code == 200
+        body = (await r.get_data()).decode("utf-8", errors="replace")
+        assert "SOBS.init" in body
+
+    async def test_rum_snippet_in_traces_page(self, client):
+        r = await client.get("/traces")
+        assert r.status_code == 200
+        body = (await r.get_data()).decode("utf-8", errors="replace")
+        assert "SOBS.init" in body
+
+    async def test_rum_snippet_includes_web_vitals(self, client):
+        r = await client.get("/")
+        assert r.status_code == 200
+        body = (await r.get_data()).decode("utf-8", errors="replace")
+        assert "trackWebVitals" in body, "Web Vitals tracking should be configured"
+        assert "trackErrors" in body, "Error tracking should be configured"
+        assert "trackConsole" in body, "Console tracking should be configured"

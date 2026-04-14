@@ -44,6 +44,19 @@ from hypercorn.config import Config as HypercornConfig
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry import trace as _otel_trace
+from opentelemetry.trace import StatusCode as _OtelStatusCode
 from quart import (
     Quart,
     Response,
@@ -314,6 +327,7 @@ async def _get_async_http_client() -> httpx.AsyncClient:
 async def _startup_async_http_client() -> None:
     await _get_async_http_client()
     _warn_unimplemented_ai_action_annotations()
+    _setup_self_otel()
 
 
 @app.after_serving
@@ -336,6 +350,7 @@ async def _shutdown_async_http_client() -> None:
         except asyncio.CancelledError:
             pass
         _RAW_WINDOW_COPY_TASK = None
+    _shutdown_self_otel()
     _shutdown_db_resources()
 
 
@@ -546,6 +561,56 @@ class BasePathMiddleware:
 
 
 app.asgi_app = BasePathMiddleware(app.asgi_app, BASE_PATH)  # type: ignore[method-assign]
+
+
+class OtelRequestTracingMiddleware:
+    """ASGI middleware that wraps each HTTP request in an OTEL span when self-instrumentation is active."""
+
+    # Paths that generate too much noise and are excluded from tracing.
+    _SKIP_PREFIXES = ("/static/", "/v1/rum", "/v1/traces", "/v1/logs", "/v1/metrics")
+
+    def __init__(self, wrapped_app) -> None:
+        self.wrapped_app = wrapped_app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or _self_otel_tracer_provider is None:
+            return await self.wrapped_app(scope, receive, send)
+
+        path = scope.get("path", "")
+        for prefix in self._SKIP_PREFIXES:
+            if path == prefix or path.startswith(prefix):
+                return await self.wrapped_app(scope, receive, send)
+
+        method = scope.get("method", "GET")
+        tracer = get_self_tracer()
+        status_code = 500
+        with tracer.start_as_current_span(
+            f"{method} {path}",
+            kind=_otel_trace.SpanKind.SERVER,
+            attributes={
+                "http.method": method,
+                "http.route": path,
+                "http.target": path,
+            },
+        ) as span:
+            async def _send_wrapper(message):
+                nonlocal status_code
+                if message.get("type") == "http.response.start":
+                    status_code = message.get("status", 500)
+                    span.set_attribute("http.status_code", status_code)
+                    if status_code >= 500:
+                        span.set_status(_OtelStatusCode.ERROR, f"HTTP {status_code}")
+                await send(message)
+
+            try:
+                await self.wrapped_app(scope, receive, _send_wrapper)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(_OtelStatusCode.ERROR, str(exc))
+                raise
+
+
+app.asgi_app = OtelRequestTracingMiddleware(app.asgi_app)  # type: ignore[method-assign]
 app.register_blueprint(_mcp.mcp_bp)
 
 DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
@@ -565,6 +630,7 @@ CSRF_ORIGIN_CHECK = _env_flag("SOBS_CSRF_ORIGIN_CHECK", _BEHIND_TLS)
 SOURCE_MAP_DIR = os.environ.get("SOBS_SOURCE_MAP_DIR", "").strip()
 SOURCE_MAP_ENABLE = _env_flag("SOBS_SOURCE_MAP_ENABLE", False)
 BUILD_VERSION = os.environ.get("SOBS_BUILD_VERSION", "").strip()
+SELF_OTEL_ENDPOINT = os.environ.get("SOBS_SELF_OTEL_ENDPOINT", "").strip()  # empty = disabled
 APP_REGISTRY_SEED_JSON_ENV = "SOBS_APP_REGISTRY_SEED_JSON"
 APP_REGISTRY_SEED_JSON_FILE_ENV = "SOBS_APP_REGISTRY_SEED_JSON_FILE"
 CHDB_CONFIG_FILE_ENV = "SOBS_CLICKHOUSE_CONFIG_FILE"
@@ -3263,6 +3329,104 @@ def inject_feature_flags() -> dict:
             "mobile_breakpoint_max": MOBILE_BREAKPOINT_MAX,
             "sobs_version": BUILD_VERSION or "dev",
         }
+
+
+# ---------------------------------------------------------------------------
+# Self-OTEL instrumentation
+# ---------------------------------------------------------------------------
+# When SOBS_SELF_OTEL_ENDPOINT is set, SOBS instruments itself and exports
+# its own traces, logs, and metrics to the given OTLP/HTTP endpoint.
+# Set to the SOBS base URL (e.g. http://localhost:44317) to self-monitor.
+# ---------------------------------------------------------------------------
+
+_self_otel_tracer_provider: TracerProvider | None = None
+_self_otel_logger_provider: LoggerProvider | None = None
+_self_otel_meter_provider: MeterProvider | None = None
+_self_otel_log_handler: LoggingHandler | None = None
+
+_SOBS_SELF_SERVICE_NAME = "sobs"
+
+
+def _setup_self_otel() -> None:
+    """Initialise OTEL SDK providers for self-monitoring when SOBS_SELF_OTEL_ENDPOINT is set."""
+    global _self_otel_tracer_provider, _self_otel_logger_provider
+    global _self_otel_meter_provider, _self_otel_log_handler
+
+    if not SELF_OTEL_ENDPOINT:
+        return
+
+    base = SELF_OTEL_ENDPOINT.rstrip("/")
+    svc_version = BUILD_VERSION or "dev"
+    resource = Resource.create(
+        {
+            "service.name": _SOBS_SELF_SERVICE_NAME,
+            "service.version": svc_version,
+            "deployment.environment": os.environ.get("SOBS_ENVIRONMENT", "production"),
+        }
+    )
+
+    # ── Traces ──
+    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{base}/v1/traces"))
+    )
+    _otel_trace.set_tracer_provider(tracer_provider)
+    _self_otel_tracer_provider = tracer_provider
+
+    # ── Logs ──
+    logger_provider = LoggerProvider(resource=resource)
+    logger_provider.add_log_record_processor(
+        BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{base}/v1/logs"))
+    )
+    set_logger_provider(logger_provider)
+    _self_otel_logger_provider = logger_provider
+
+    log_handler = LoggingHandler(level=logging.DEBUG, logger_provider=logger_provider)
+    logging.getLogger().addHandler(log_handler)
+    _self_otel_log_handler = log_handler
+
+    # ── Metrics ──
+    metric_reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint=f"{base}/v1/metrics"),
+        export_interval_millis=60_000,
+    )
+    meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+    _self_otel_meter_provider = meter_provider
+
+    app.logger.info(
+        "SOBS self-OTEL instrumentation enabled; exporting to %s (service=%s version=%s)",
+        base,
+        _SOBS_SELF_SERVICE_NAME,
+        svc_version,
+    )
+
+
+def _shutdown_self_otel() -> None:
+    """Flush and shut down OTEL SDK providers on exit."""
+    global _self_otel_log_handler
+    if _self_otel_log_handler is not None:
+        logging.getLogger().removeHandler(_self_otel_log_handler)
+        _self_otel_log_handler = None
+    if _self_otel_tracer_provider is not None:
+        try:
+            _self_otel_tracer_provider.shutdown()
+        except Exception:
+            pass
+    if _self_otel_logger_provider is not None:
+        try:
+            _self_otel_logger_provider.shutdown()
+        except Exception:
+            pass
+    if _self_otel_meter_provider is not None:
+        try:
+            _self_otel_meter_provider.shutdown()
+        except Exception:
+            pass
+
+
+def get_self_tracer():
+    """Return the OTEL tracer for internal self-instrumentation spans (or a no-op tracer)."""
+    return _otel_trace.get_tracer(_SOBS_SELF_SERVICE_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -7299,6 +7463,7 @@ def _shutdown_db_resources() -> None:
 
 
 atexit.register(_shutdown_db_resources)
+atexit.register(_shutdown_self_otel)
 
 
 # ---------------------------------------------------------------------------

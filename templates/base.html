@@ -680,6 +680,19 @@
     }
   </style>
   {% block styles %}{% endblock %}
+  {# ── Self-monitoring RUM: instrument the SOBS web UI itself ── #}
+  <script src="{{ url_for('rum_min_js') }}"></script>
+  <script>
+    SOBS.init({
+      endpoint: window.location.origin + '/v1/rum',
+      appName:  'sobs-ui',
+      appVersion: '{{ sobs_version | default("dev") }}',
+      trackWebVitals: true,
+      trackErrors:   true,
+      trackConsole:  true,
+      trackBreadcrumbs: true
+    });
+  </script>
 </head>
 <body>
 <!-- Overlay backdrop for hamburger sidebar -->
