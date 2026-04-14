@@ -1,8 +1,8 @@
 # SOBS – Simple Observe Stack
 
-## v0.1.0-beta.1 – First public beta
+## v0.1.0-beta.2 – Second public beta
 
-SOBS is actively used and under continued development. Beta APIs and UI behavior may evolve before stable v0.1.0. See [What's New](#whats-new-in-v010-beta1) below.
+SOBS is actively used and under continued development. Beta APIs and UI behavior may evolve before stable v0.1.0. See [What's New](#whats-new-in-v010-beta2) below.
 
 **SOBS** is a single-user OpenTelemetry-compatible telemetry container focused on simplicity and transparency. It collects **Logs**, **Errors**, **Traces**, **RUM** (Real User Monitoring), **Web Traffic analytics**, and **AI call transparency** — all in one container you can run as a standalone pod or sidecar. Taking an AI-first approach it implements an automation layer that can automatically raise GitHub issues and assign GitHub Copilot to create fix PRs and inform the user for a collaborative AI/DevOps experience.
 
@@ -53,6 +53,24 @@ SOBS is actively used and under continued development. Beta APIs and UI behavior
 - **Report import / export / share** – export saved report presets to JSON, import on another instance, or share via URL
 - **Bootstrap 5 theming** – served locally with light/dark/system theme toggle, no CDN required
 - **Docker ready** – Dockerfile + docker-compose + Kubernetes manifests
+
+## What's New in v0.1.0-beta.2
+
+Released 2026-04-14.  Full details in
+[`docs/RELEASE_NOTES_v0.1.0-beta.2_PUBLIC.md`](docs/RELEASE_NOTES_v0.1.0-beta.2_PUBLIC.md)
+and the [operator notes](docs/RELEASE_NOTES_v0.1.0-beta.2_OPERATOR.md).
+
+Highlights:
+
+- **MCP server and UI** – new MCP server integration and settings UX fixes (including accessibility/contrast and expiry handling).
+- **Privacy controls** – PII/secret masking expanded across UI output, notifications, and GitHub issue flows.
+- **Model cost visibility** – AI model pricing auto-discovery and inferred-state management.
+- **Performance improvements** – SQL pushdown and query strategy optimizations across Summary, Traces, RUM, and Errors.
+- **Reliability fixes** – container startup/module packaging fixes (`mcp.py`, `masking.py`) and robust UTF-8 handling on `/errors`.
+- **Operations polish** – timezone rendering fixes in Work Items and broader help-page coverage.
+- **CI and release pipeline updates** – `djlint` validation and safer GHCR cleanup behavior.
+
+For previous release details, see [What's New in v0.1.0-beta.1](#whats-new-in-v010-beta1).
 
 ## What's New in v0.1.0-beta.1
 
