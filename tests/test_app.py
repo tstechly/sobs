@@ -20745,6 +20745,48 @@ class TestSelfOtelSetup:
         monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
         monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
 
+    def test_otlp_exporters_use_configured_endpoint(self, monkeypatch):
+        """The OTLP exporters are configured with the correct endpoint URLs."""
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+        captured_trace_endpoint: list[str] = []
+        captured_log_endpoint: list[str] = []
+
+        orig_span_exporter = OTLPSpanExporter
+        orig_log_exporter = OTLPLogExporter
+
+        class _CapturingSpanExporter(orig_span_exporter):
+            def __init__(self, endpoint=None, **kwargs):
+                captured_trace_endpoint.append(endpoint or "")
+                super().__init__(endpoint=endpoint, **kwargs)
+
+        class _CapturingLogExporter(orig_log_exporter):
+            def __init__(self, endpoint=None, **kwargs):
+                captured_log_endpoint.append(endpoint or "")
+                super().__init__(endpoint=endpoint, **kwargs)
+
+        monkeypatch.setattr(sobs_app, "SELF_OTEL_ENDPOINT", "http://sobs-host:44317")
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+        monkeypatch.setattr("app.OTLPSpanExporter", _CapturingSpanExporter)
+        monkeypatch.setattr("app.OTLPLogExporter", _CapturingLogExporter)
+
+        sobs_app._setup_self_otel()
+
+        assert captured_trace_endpoint, "Trace exporter should have been created"
+        assert captured_trace_endpoint[0] == "http://sobs-host:44317/v1/traces"
+        assert captured_log_endpoint, "Log exporter should have been created"
+        assert captured_log_endpoint[0] == "http://sobs-host:44317/v1/logs"
+
+        sobs_app._shutdown_self_otel()
+        monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_meter_provider", None)
+        monkeypatch.setattr(sobs_app, "_self_otel_log_handler", None)
+
 
 class TestSelfRumSnippet:
     """Verify the self-monitoring RUM snippet is present on every page."""
