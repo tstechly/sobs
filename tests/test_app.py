@@ -20696,7 +20696,7 @@ class TestSelfOtelSetup:
         assert isinstance(sobs_app._self_otel_logger_provider, _sdk_logs.LoggerProvider)
         assert isinstance(sobs_app._self_otel_meter_provider, _sdk_metrics.MeterProvider)
 
-        # Cleanup — shutdown the providers so threads don't linger.
+        # Cleanup - shutdown the providers so threads don't linger.
         sobs_app._shutdown_self_otel()
         monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
         monkeypatch.setattr(sobs_app, "_self_otel_logger_provider", None)
@@ -20707,7 +20707,7 @@ class TestSelfOtelSetup:
         """get_self_tracer() returns a no-op tracer when self-OTEL is not configured."""
         monkeypatch.setattr(sobs_app, "_self_otel_tracer_provider", None)
         tracer = sobs_app.get_self_tracer()
-        # Must be usable (no-op) – creating a span should not raise.
+        # Must be usable (no-op) - creating a span should not raise.
         with tracer.start_as_current_span("test-noop-span"):
             pass
 
