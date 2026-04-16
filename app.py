@@ -364,6 +364,25 @@ _OTLP_CORS_ALLOWED_ORIGINS = tuple(
     if item.strip()
 )
 
+# Exact paths that are OTLP/RUM ingest endpoints exposed to browsers.
+# CORS is applied only to these paths, NOT to management API routes like
+# /v1/apps or /v1/releases which are not intended for browser cross-origin use.
+_OTLP_CORS_INGEST_PATHS = frozenset(
+    {
+        "/v1/logs",
+        "/v1/traces",
+        "/v1/metrics",
+        "/v1/rum",
+        "/v1/rum/assets",
+        "/v1/rum/client-token",
+        "/v1/errors",
+        "/v1/ai",
+    }
+)
+
+# Default ports per scheme – used to normalise origins for matching.
+_SCHEME_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
 
 def _origin_allowed_for_otlp(origin: str) -> bool:
     parsed = urllib.parse.urlparse(origin)
@@ -374,11 +393,31 @@ def _origin_allowed_for_otlp(origin: str) -> bool:
         return False
 
     with_port = f"{scheme}://{netloc}"
-    without_port = f"{scheme}://{host}" if host else with_port
+    # Include the port-stripped form only when the origin carries no explicit
+    # port or uses the scheme default (e.g. https://example.com:443 →
+    # https://example.com).  Non-default ports must be matched explicitly so
+    # that a pattern like "https://example.com" does not accidentally allow
+    # "https://example.com:8443".
+    candidates: list[str] = [with_port]
+    if parsed.port is None or parsed.port == _SCHEME_DEFAULT_PORTS.get(scheme):
+        without_port = f"{scheme}://{host}" if host else with_port
+        if without_port != with_port:
+            candidates.append(without_port)
     for pattern in _OTLP_CORS_ALLOWED_ORIGINS:
         p = pattern.lower()
-        if fnmatch.fnmatch(with_port, p) or fnmatch.fnmatch(without_port, p):
+        if any(fnmatch.fnmatch(c, p) for c in candidates):
             return True
+    return False
+
+
+def _path_needs_otlp_cors(path: str) -> bool:
+    """Return True if *path* is an OTLP/RUM ingest endpoint that may receive
+    browser cross-origin requests."""
+    if path in _OTLP_CORS_INGEST_PATHS:
+        return True
+    # Dynamic sub-paths under /v1/rum/assets/ (individual asset downloads).
+    if path.startswith("/v1/rum/assets/"):
+        return True
     return False
 
 
@@ -388,7 +427,8 @@ def _append_vary_header(response: Response, value: str) -> None:
         response.headers["Vary"] = value
         return
     parts = [p.strip() for p in existing.split(",") if p.strip()]
-    if value not in parts:
+    # Vary tokens are case-insensitive; compare in lower-case to avoid dupes.
+    if value.lower() not in {p.lower() for p in parts}:
         response.headers["Vary"] = ", ".join(parts + [value])
 
 
@@ -402,7 +442,7 @@ async def _apply_security_headers(response: Response):
     if _request_is_secure_context():
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
-    if request.path.startswith("/v1/"):
+    if _path_needs_otlp_cors(request.path):
         origin = str(request.headers.get("Origin") or "").strip()
         if origin and _origin_allowed_for_otlp(origin):
             response.headers["Access-Control-Allow-Origin"] = origin
@@ -411,7 +451,11 @@ async def _apply_security_headers(response: Response):
             response.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
             response.headers.setdefault(
                 "Access-Control-Allow-Headers",
-                "Content-Type, Authorization, X-SOBS-RUM-Client, X-SOBS-RUM-Signature, X-SOBS-RUM-Timestamp",
+                (
+                    "Content-Type, Authorization, X-API-Key, "
+                    "X-SOBS-RUM-Client, X-SOBS-RUM-Signature, X-SOBS-RUM-Timestamp, "
+                    "X-SOBS-Asset-Timestamp, X-SOBS-Asset-Signature"
+                ),
             )
             response.headers.setdefault("Access-Control-Max-Age", "600")
 
