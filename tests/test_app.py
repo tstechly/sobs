@@ -631,7 +631,7 @@ class TestOtlpCors:
         return "https://evil.example.com"
 
     # ------------------------------------------------------------------ _origin_allowed_for_otlp unit tests
-    def test_allowed_origin_with_wildcard_port(self, monkeypatch):
+    def test_origin_allowed_for_otlp_with_wildcard_port(self, monkeypatch):
         monkeypatch.setattr(
             sobs_app,
             "_OTLP_CORS_ALLOWED_ORIGINS",
@@ -639,7 +639,7 @@ class TestOtlpCors:
         )
         assert sobs_app._origin_allowed_for_otlp("http://localhost:3000") is True
 
-    def test_disallowed_origin(self, monkeypatch):
+    def test_origin_allowed_for_otlp_rejects_disallowed_origin(self, monkeypatch):
         monkeypatch.setattr(
             sobs_app,
             "_OTLP_CORS_ALLOWED_ORIGINS",
@@ -673,7 +673,7 @@ class TestOtlpCors:
         )
         assert sobs_app._origin_allowed_for_otlp("https://example.com:443") is True
 
-    def test_invalid_origin_rejected(self, monkeypatch):
+    def test_origin_allowed_for_otlp_rejects_invalid_origin(self, monkeypatch):
         monkeypatch.setattr(
             sobs_app,
             "_OTLP_CORS_ALLOWED_ORIGINS",
@@ -684,20 +684,16 @@ class TestOtlpCors:
 
     # ------------------------------------------------------------------ _append_vary_header unit tests
     def test_append_vary_case_insensitive_dedup(self):
-        from quart import Quart
+        from quart.wrappers import Response as QuartResponse
 
-        _tmp = Quart(__name__)
-        with _tmp.test_request_context("/"):
-            from quart.wrappers import Response as QuartResponse
-
-            resp = QuartResponse("")
-            sobs_app._append_vary_header(resp, "Origin")
-            # Adding 'origin' (different case) should not duplicate.
-            sobs_app._append_vary_header(resp, "origin")
-            vary = resp.headers.get("Vary", "")
-            # There should be exactly one "Origin"-like token.
-            tokens = [t.strip() for t in vary.split(",") if t.strip()]
-            assert len(tokens) == 1
+        resp = QuartResponse("")
+        sobs_app._append_vary_header(resp, "Origin")
+        # Adding 'origin' (different case) should not duplicate.
+        sobs_app._append_vary_header(resp, "origin")
+        vary = resp.headers.get("Vary", "")
+        # There should be exactly one "Origin"-like token.
+        tokens = [t.strip() for t in vary.split(",") if t.strip()]
+        assert len(tokens) == 1
 
     # ------------------------------------------------------------------ CORS headers on ingest routes
     @pytest.mark.parametrize(
