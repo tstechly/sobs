@@ -31198,8 +31198,7 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
     if metric_format == "prometheus":
         # --- Namespaces (kube-state-metrics Prometheus format) ---
         try:
-            namespace_rows = db.execute(
-                """
+            namespace_rows = db.execute("""
                 SELECT
                     Attributes['namespace'] AS name,
                     anyIf(Attributes['phase'], Value > 0) AS status,
@@ -31209,8 +31208,7 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 AND MetricName = 'kube_namespace_status_phase'
                 GROUP BY name
                 ORDER BY name
-                """
-            ).fetchall()
+                """).fetchall()
             result["namespaces"] = [
                 {
                     "name": str(row["name"]),
@@ -31224,8 +31222,7 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
             errors.append(f"namespaces: {exc}")
     else:
         try:
-            namespace_rows = db.execute(
-                """
+            namespace_rows = db.execute("""
                 SELECT
                     Attributes['k8s.namespace.name'] AS name,
                     max(TimeUnix) AS last_seen
@@ -31233,8 +31230,7 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 WHERE Attributes['k8s.namespace.name'] != ''
                 GROUP BY name
                 ORDER BY name
-                """
-            ).fetchall()
+                """).fetchall()
             result["namespaces"] = [
                 {
                     "name": str(row["name"]),
