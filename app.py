@@ -10,6 +10,7 @@ import atexit
 import base64
 import copy
 import difflib
+import fnmatch
 import hashlib
 import hmac
 import html
@@ -354,6 +355,43 @@ def _request_is_secure_context() -> bool:
     return str(request.scheme or "").lower() == "https"
 
 
+_OTLP_CORS_ALLOWED_ORIGINS = tuple(
+    item.strip()
+    for item in os.environ.get(
+        "SOBS_OTLP_CORS_ALLOWED_ORIGINS",
+        "http://localhost:*,https://localhost:*,http://127.0.0.1:*,https://127.0.0.1:*",
+    ).split(",")
+    if item.strip()
+)
+
+
+def _origin_allowed_for_otlp(origin: str) -> bool:
+    parsed = urllib.parse.urlparse(origin)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    netloc = (parsed.netloc or "").lower()
+    if scheme not in {"http", "https"} or not netloc:
+        return False
+
+    with_port = f"{scheme}://{netloc}"
+    without_port = f"{scheme}://{host}" if host else with_port
+    for pattern in _OTLP_CORS_ALLOWED_ORIGINS:
+        p = pattern.lower()
+        if fnmatch.fnmatch(with_port, p) or fnmatch.fnmatch(without_port, p):
+            return True
+    return False
+
+
+def _append_vary_header(response: Response, value: str) -> None:
+    existing = str(response.headers.get("Vary") or "")
+    if not existing:
+        response.headers["Vary"] = value
+        return
+    parts = [p.strip() for p in existing.split(",") if p.strip()]
+    if value not in parts:
+        response.headers["Vary"] = ", ".join(parts + [value])
+
+
 @app.after_request
 async def _apply_security_headers(response: Response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -363,6 +401,19 @@ async def _apply_security_headers(response: Response):
     response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
     if _request_is_secure_context():
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    if request.path.startswith("/v1/"):
+        origin = str(request.headers.get("Origin") or "").strip()
+        if origin and _origin_allowed_for_otlp(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            _append_vary_header(response, "Origin")
+            response.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
+            response.headers.setdefault(
+                "Access-Control-Allow-Headers",
+                "Content-Type, Authorization, X-SOBS-RUM-Client, X-SOBS-RUM-Signature, X-SOBS-RUM-Timestamp",
+            )
+            response.headers.setdefault("Access-Control-Max-Age", "600")
+
     return response
 
 
@@ -9429,6 +9480,14 @@ async def _parse_otlp_request(proto_class):
 # ---------------------------------------------------------------------------
 # OTLP Ingest – Logs  POST /v1/logs
 # ---------------------------------------------------------------------------
+@app.route("/v1/logs", methods=["OPTIONS"])
+@app.route("/v1/traces", methods=["OPTIONS"])
+@app.route("/v1/metrics", methods=["OPTIONS"])
+@app.route("/v1/rum/assets", methods=["OPTIONS"])
+async def ingest_preflight():
+    return "", 204
+
+
 @app.route("/v1/logs", methods=["POST"])
 @require_api_key
 async def ingest_logs():
@@ -24411,11 +24470,7 @@ async def _dispatch_browser_push_channel(config: dict, payload: dict) -> None:
     try:
         from cryptography.hazmat.backends import default_backend
         from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1
-        from cryptography.hazmat.primitives.serialization import (
-            Encoding,
-            PublicFormat,
-            load_der_private_key,
-        )
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_private_key
     except ImportError as exc:
         raise RuntimeError("The `cryptography` package is required for browser push notifications") from exc
 
@@ -24493,11 +24548,7 @@ def _encrypt_push_payload(
     plaintext: bytes, subscriber_pub_key_bytes: bytes, auth_bytes: bytes, backend: object
 ) -> tuple[bytes, bytes, bytes]:
     """Encrypt a Web Push payload using AES-128-GCM (RFC 8291 / RFC 8188)."""
-    from cryptography.hazmat.primitives.asymmetric.ec import (
-        ECDH,
-        SECP256R1,
-        generate_private_key,
-    )
+    from cryptography.hazmat.primitives.asymmetric.ec import ECDH, SECP256R1, generate_private_key
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.hashes import SHA256
     from cryptography.hazmat.primitives.hmac import HMAC as CryptoHMAC
@@ -24998,12 +25049,7 @@ def _generate_vapid_keys() -> tuple[str, str]:
     """Generate a new VAPID key pair. Returns (private_key_b64url, public_key_b64url)."""
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        NoEncryption,
-        PrivateFormat,
-        PublicFormat,
-    )
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
     private_key = generate_private_key(SECP256R1(), default_backend())
     private_bytes = private_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
@@ -31151,7 +31197,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
     if metric_format == "prometheus":
         # --- Namespaces (kube-state-metrics Prometheus format) ---
         try:
-            namespace_rows = db.execute("""
+            namespace_rows = db.execute(
+                """
                 SELECT
                     Attributes['namespace'] AS name,
                     anyIf(Attributes['phase'], Value > 0) AS status,
@@ -31161,7 +31208,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 AND MetricName = 'kube_namespace_status_phase'
                 GROUP BY name
                 ORDER BY name
-                """).fetchall()
+                """
+            ).fetchall()
             result["namespaces"] = [
                 {
                     "name": str(row["name"]),
@@ -31175,7 +31223,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
             errors.append(f"namespaces: {exc}")
     else:
         try:
-            namespace_rows = db.execute("""
+            namespace_rows = db.execute(
+                """
                 SELECT
                     Attributes['k8s.namespace.name'] AS name,
                     max(TimeUnix) AS last_seen
@@ -31183,7 +31232,8 @@ def _fetch_k8s_from_otel(db: "ChDbConnection", query: dict[str, Any] | None = No
                 WHERE Attributes['k8s.namespace.name'] != ''
                 GROUP BY name
                 ORDER BY name
-                """).fetchall()
+                """
+            ).fetchall()
             result["namespaces"] = [
                 {
                     "name": str(row["name"]),
