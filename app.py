@@ -407,6 +407,7 @@ async def _apply_security_headers(response: Response):
         if origin and _origin_allowed_for_otlp(origin):
             response.headers["Access-Control-Allow-Origin"] = origin
             _append_vary_header(response, "Origin")
+            response.headers.setdefault("Access-Control-Allow-Credentials", "true")
             response.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
             response.headers.setdefault(
                 "Access-Control-Allow-Headers",
