@@ -1,8 +1,11 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/abartrim/sobs/internal/features/tags"
 )
 
 func (s *Server) settingsMaskingPage(w http.ResponseWriter, r *http.Request) {
@@ -143,12 +146,12 @@ func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {
 		}
 		s.pageTemplateHandler("/settings/tags", "settings_tags.html")(w, r)
 	case http.MethodPost:
-		vals, err := decodeStringMap(r)
-		if err != nil {
+		var input tags.RuleInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			return
 		}
-		rule, err := s.tagService.CreateRule(vals["name"], vals["condition"], vals["tag_key"], vals["tag_value"])
+		rule, err := s.tagService.CreateRule(input)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return

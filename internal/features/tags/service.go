@@ -2,6 +2,7 @@ package tags
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -12,20 +13,41 @@ import (
 	"github.com/abartrim/sobs/internal/features/persist"
 )
 
+// Condition mirrors Python's per-condition dict inside ConditionsJson.
+type Condition struct {
+	MatchField    string `json:"match_field"`
+	MatchOperator string `json:"match_operator"`
+	MatchValue    string `json:"match_value"`
+	MatchAttrKey  string `json:"match_attr_key,omitempty"`
+}
+
+// Rule mirrors Python's _load_tag_rules output dict.
 type Rule struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Condition  string `json:"condition"`
-	TagKey     string `json:"tag_key"`
-	TagValue   string `json:"tag_value"`
-	CreatedAt  string `json:"created_at"`
+	ID            string      `json:"id"`
+	Name          string      `json:"name"`
+	RecordTypes   []string    `json:"record_types"`
+	MatchField    string      `json:"match_field"`
+	MatchOperator string      `json:"match_operator"`
+	MatchValue    string      `json:"match_value"`
+	MatchAttrKey  string      `json:"match_attr_key,omitempty"`
+	TagKey        string      `json:"tag_key"`
+	TagValue      string      `json:"tag_value"`
+	Conditions    []Condition `json:"conditions"`
+	CreatedAt     string      `json:"created_at"`
+}
+
+// RuleInput is the input for creating or editing a rule, matching Python's
+// create_tag_rule form fields.
+type RuleInput struct {
+	Name        string      `json:"name"`
+	RecordTypes []string    `json:"record_types"`
+	Conditions  []Condition `json:"conditions"`
+	TagKey      string      `json:"tag_key"`
+	TagValue    string      `json:"tag_value"`
 }
 
 type Service struct {
-	mu         sync.RWMutex
-	rules      map[string]Rule
-	recordTags map[string]map[string]string
-	nextID     int64
+	mu           sync.RWMutex
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -72,7 +94,7 @@ func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
 		return nil
 	}
 	defer func() { _ = store.Close() }()
-	rows, err := store.Query(ctx, "SELECT Id, Name, MatchValue, TagKey, TagValue, Version FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name")
+	rows, err := store.Query(ctx, "SELECT Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, MatchAttrKey, TagKey, TagValue, ConditionsJson, Version FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name")
 	if err != nil {
 		return nil
 	}
@@ -80,43 +102,105 @@ func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
 	out := []Rule{}
 	for rows.Next() {
 		var rule Rule
+		var recordTypesStr, conditionsJSON string
 		var version uint64
-		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Condition, &rule.TagKey, &rule.TagValue, &version); err != nil {
+		if err := rows.Scan(&rule.ID, &rule.Name, &recordTypesStr, &rule.MatchField, &rule.MatchOperator, &rule.MatchValue, &rule.MatchAttrKey, &rule.TagKey, &rule.TagValue, &conditionsJSON, &version); err != nil {
 			return out
 		}
 		rule.CreatedAt = time.Unix(0, int64(version)).UTC().Format(time.RFC3339)
+		// Parse RecordTypes from comma-separated string.
+		for _, t := range strings.Split(recordTypesStr, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				rule.RecordTypes = append(rule.RecordTypes, t)
+			}
+		}
+		if len(rule.RecordTypes) == 0 {
+			rule.RecordTypes = []string{"all"}
+		}
+		// Parse ConditionsJson; fall back to legacy columns for old rows.
+		var conditions []Condition
+		if conditionsJSON != "" && conditionsJSON != "[]" {
+			_ = json.Unmarshal([]byte(conditionsJSON), &conditions)
+		}
+		if len(conditions) == 0 && strings.TrimSpace(rule.MatchField) != "" {
+			conditions = []Condition{{
+				MatchField:    rule.MatchField,
+				MatchOperator: rule.MatchOperator,
+				MatchValue:    rule.MatchValue,
+				MatchAttrKey:  rule.MatchAttrKey,
+			}}
+		}
+		rule.Conditions = conditions
 		out = append(out, rule)
 	}
 	return out
 }
 
-func (s *Service) CreateRule(name, condition, tagKey, tagValue string) (Rule, error) {
-	return s.createRuleStoreBacked(context.Background(), name, condition, tagKey, tagValue)
+func (s *Service) CreateRule(input RuleInput) (Rule, error) {
+	return s.createRuleStoreBacked(context.Background(), input)
 }
 
-func (s *Service) createRuleStoreBacked(ctx context.Context, name, condition, tagKey, tagValue string) (Rule, error) {
-	if strings.TrimSpace(name) == "" {
+func (s *Service) createRuleStoreBacked(ctx context.Context, input RuleInput) (Rule, error) {
+	if strings.TrimSpace(input.Name) == "" {
 		return Rule{}, errors.New("name is required")
 	}
-	if strings.TrimSpace(tagKey) == "" {
+	if len(input.Conditions) == 0 {
+		return Rule{}, errors.New("at least one condition is required")
+	}
+	if strings.TrimSpace(input.TagKey) == "" {
 		return Rule{}, errors.New("tag_key is required")
 	}
 	if err := s.ensureSchema(ctx); err != nil {
 		return Rule{}, err
 	}
+
+	// Normalise record types; default to "all".
+	recordTypes := input.RecordTypes
+	if len(recordTypes) == 0 {
+		recordTypes = []string{"all"}
+	}
+	recordTypesStr := strings.Join(recordTypes, ",")
+
+	// Primary (legacy) condition columns use first condition.
+	primary := input.Conditions[0]
+
+	conditionsJSON, err := json.Marshal(input.Conditions)
+	if err != nil {
+		return Rule{}, err
+	}
+
 	id := persist.NewID()
 	version := persist.Version()
 	createdAt := time.Unix(0, int64(version)).UTC().Format(time.RFC3339)
+
 	store, err := persist.Open(ctx, s.storeFactory)
 	if err != nil {
 		return Rule{}, err
 	}
 	defer func() { _ = store.Close() }()
-	_, err = store.Exec(ctx, "INSERT INTO sobs_tag_rules (Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, MatchAttrKey, TagKey, TagValue, ConditionsJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", id, name, "all", "body", "contains", condition, "", tagKey, tagValue, "[]", 0, version)
+	_, err = store.Exec(ctx,
+		"INSERT INTO sobs_tag_rules (Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, MatchAttrKey, TagKey, TagValue, ConditionsJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, input.Name, recordTypesStr,
+		primary.MatchField, primary.MatchOperator, primary.MatchValue, primary.MatchAttrKey,
+		input.TagKey, input.TagValue,
+		string(conditionsJSON), 0, version,
+	)
 	if err != nil {
 		return Rule{}, err
 	}
-	return Rule{ID: id, Name: name, Condition: condition, TagKey: tagKey, TagValue: tagValue, CreatedAt: createdAt}, nil
+	return Rule{
+		ID:            id,
+		Name:          input.Name,
+		RecordTypes:   recordTypes,
+		MatchField:    primary.MatchField,
+		MatchOperator: primary.MatchOperator,
+		MatchValue:    primary.MatchValue,
+		MatchAttrKey:  primary.MatchAttrKey,
+		TagKey:        input.TagKey,
+		TagValue:      input.TagValue,
+		Conditions:    input.Conditions,
+		CreatedAt:     createdAt,
+	}, nil
 }
 
 func (s *Service) DeleteRule(id string) bool {
@@ -152,14 +236,22 @@ func (s *Service) AutoGenerate() []Rule {
 	out := make([]Rule, 0, 2)
 	for _, c := range []struct {
 		name      string
-		condition string
+		field     string
+		operator  string
+		value     string
 		tagKey    string
 		tagValue  string
 	}{
-		{name: "Error severity", condition: "severity_text = 'ERROR'", tagKey: "priority", tagValue: "high"},
-		{name: "Latency hotspot", condition: "duration_ms > 1000", tagKey: "hotspot", tagValue: "true"},
+		{name: "Error severity", field: "severity", operator: "eq", value: "ERROR", tagKey: "priority", tagValue: "high"},
+		{name: "Latency hotspot", field: "body", operator: "contains", value: "timeout", tagKey: "hotspot", tagValue: "true"},
 	} {
-		r, _ := s.CreateRule(c.name, c.condition, c.tagKey, c.tagValue)
+		r, _ := s.CreateRule(RuleInput{
+			Name:        c.name,
+			RecordTypes: []string{"all"},
+			Conditions:  []Condition{{MatchField: c.field, MatchOperator: c.operator, MatchValue: c.value}},
+			TagKey:      c.tagKey,
+			TagValue:    c.tagValue,
+		})
 		out = append(out, r)
 	}
 	return out

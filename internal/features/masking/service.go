@@ -2,6 +2,7 @@ package masking
 
 import (
 	"context"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -16,6 +17,48 @@ const (
 	outputEnabledSetting    = "masking.output_enabled"
 	sqlOutputEnabledSetting = "masking.sql_output_enabled"
 )
+
+// defaultSensitiveKeys mirrors Python's DEFAULT_SENSITIVE_KEYS frozenset.
+var defaultSensitiveKeys = map[string]struct{}{
+	"password": {}, "passwd": {}, "pwd": {}, "secret": {},
+	"client_secret": {}, "api_key": {}, "api_secret": {}, "apikey": {},
+	"token": {}, "access_token": {}, "refresh_token": {}, "id_token": {},
+	"auth_token": {}, "bearer_token": {},
+	"authorization": {}, "x-authorization": {}, "x-api-key": {},
+	"private_key": {}, "private-key": {},
+	"credit_card": {}, "card_number": {}, "cvv": {}, "cvc": {},
+	"ssn": {}, "social_security_number": {},
+	"s3_secret_access_key": {}, "backup_encryption_password": {}, "smtp_password": {},
+}
+
+// defaultSensitivePatterns mirrors Python's DEFAULT_SENSITIVE_PATTERNS list.
+// Each pattern's entire match is replaced with the mask.
+var defaultSensitivePatterns = []*regexp.Regexp{
+	// Email addresses
+	regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`),
+	// JWT tokens (three base64url-encoded segments)
+	regexp.MustCompile(`\beyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]*\b`),
+	// Bearer token in text / HTTP headers
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9\-_.~+/]+=*`),
+	// AWS access key IDs
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	// US Social Security Numbers (###-##-####)
+	regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
+	// Visa (13 or 16 digits)
+	regexp.MustCompile(`\b4[0-9]{12}(?:[0-9]{3})?\b`),
+	// Mastercard
+	regexp.MustCompile(`\b5[1-5][0-9]{14}\b`),
+	// Amex
+	regexp.MustCompile(`\b3[47][0-9]{13}\b`),
+	// Discover
+	regexp.MustCompile(`\b6(?:011|5[0-9]{2})[0-9]{12}\b`),
+	// PEM private key blocks
+	regexp.MustCompile(`(?s)-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
+	// Generic key=value / key: value assignment in log lines
+	regexp.MustCompile(`(?i)(?:password|passwd|pwd|secret|api[_\-]?key|auth[_\-]?token|access[_\-]?token)\s*[=:]\s*['"]?[A-Za-z0-9\-_.~+/!@#$%^&*]{6,}['"]?`),
+	// Authorization header value
+	regexp.MustCompile(`(?i)(?:Authorization|X-Api-Key|X-Auth-Token)\s*:\s*[^\r\n]+`),
+}
 
 type Service struct {
 	storeFactory extensionpoints.StoreFactory
@@ -115,14 +158,37 @@ func (s *Service) SetSQLOutput(mode string) {
 }
 
 func (s *Service) Preview(input string) map[string]string {
+	const mask = "****"
 	rules := s.listRulesStoreBacked(context.Background())
 	masked := input
-	for _, key := range toStringSlice(rules["keys"]) {
-		masked = strings.ReplaceAll(masked, key, "***")
+
+	// Apply default sensitive patterns (regex).
+	for _, re := range defaultSensitivePatterns {
+		masked = re.ReplaceAllString(masked, mask)
 	}
+
+	// Apply custom user-defined patterns (compiled on the fly).
 	for _, pattern := range toStringSlice(rules["patterns"]) {
-		masked = strings.ReplaceAll(masked, pattern, "***")
+		if re, err := regexp.Compile(pattern); err == nil {
+			masked = re.ReplaceAllString(masked, mask)
+		}
 	}
+
+	// Apply default sensitive key names: replace key=value / key: value patterns.
+	for key := range defaultSensitiveKeys {
+		re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(key) + `\s*[=:]\s*['"]?[^\s'"]{1,}['"]?`)
+		masked = re.ReplaceAllString(masked, mask)
+	}
+
+	// Apply custom key names.
+	for _, key := range toStringSlice(rules["keys"]) {
+		if key == "" {
+			continue
+		}
+		re := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(key) + `\s*[=:]\s*['"]?[^\s'"]{1,}['"]?`)
+		masked = re.ReplaceAllString(masked, mask)
+	}
+
 	return map[string]string{"input": input, "output": masked}
 }
 

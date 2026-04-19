@@ -57,7 +57,7 @@ func TestSettingsTagsAndRecordTagAPI(t *testing.T) {
 		t.Fatalf("expected 200, got %d", autoRec.Code)
 	}
 
-	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/tags", bytes.NewReader([]byte(`{"name":"Rule 1","condition":"severity_text='ERROR'","tag_key":"priority","tag_value":"high"}`)))
+	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/tags", bytes.NewReader([]byte(`{"name":"Rule 1","record_types":["log","error"],"conditions":[{"match_field":"severity","match_operator":"eq","match_value":"ERROR"}],"tag_key":"priority","tag_value":"high"}`)))
 	createRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(createRec, createReq)
 	if createRec.Code != http.StatusCreated {

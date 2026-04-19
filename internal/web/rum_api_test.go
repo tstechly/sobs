@@ -33,10 +33,20 @@ func TestRUMAssetsAndClientToken(t *testing.T) {
 		t.Fatalf("expected 200, got %d", getRec.Code)
 	}
 
+	// When SOBS_RUM_CLIENT_AUTH_MODE is unset (default "none"), returns
+	// {"enabled":false,...} with 200 — matching Python's behavior.
 	tokenReq := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum/client-token", nil)
 	tokenRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(tokenRec, tokenReq)
 	if tokenRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", tokenRec.Code)
+	}
+	var tokenResp map[string]any
+	if err := json.Unmarshal(tokenRec.Body.Bytes(), &tokenResp); err != nil {
+		t.Fatalf("unmarshal token resp: %v", err)
+	}
+	enabled, _ := tokenResp["enabled"].(bool)
+	if enabled {
+		t.Fatal("expected enabled=false when auth mode is none")
 	}
 }

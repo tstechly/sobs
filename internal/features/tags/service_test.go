@@ -4,7 +4,13 @@ import "testing"
 
 func TestTagsRulesAndRecordTags(t *testing.T) {
 	svc := NewService()
-	r, err := svc.CreateRule("rule", "severity_text = 'ERROR'", "priority", "high")
+	r, err := svc.CreateRule(RuleInput{
+		Name:        "rule",
+		RecordTypes: []string{"log", "error"},
+		Conditions:  []Condition{{MatchField: "severity", MatchOperator: "eq", MatchValue: "ERROR"}},
+		TagKey:      "priority",
+		TagValue:    "high",
+	})
 	if err != nil {
 		t.Fatalf("create rule: %v", err)
 	}
