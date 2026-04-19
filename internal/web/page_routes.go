@@ -9,11 +9,8 @@ import (
 
 var pageRouteTemplates = map[string]string{
 	"/summary":                        "summary.html",
-	"/logs":                           "logs.html",
 	"/logs/help":                      "logs_help.html",
-	"/errors":                         "errors.html",
 	"/errors/help":                    "errors_help.html",
-	"/traces":                         "traces.html",
 	"/traces/help":                    "traces_help.html",
 	"/incident":                       "incident.html",
 	"/incident/help":                  "incident_help.html",
@@ -52,8 +49,13 @@ var pageRouteTemplates = map[string]string{
 	"/cve/help":                       "cve_help.html",
 }
 
-func (s *Server) registerCompatibilityRoutes(mux *http.ServeMux) {
-	// Register all template-based pages with generic handler
+func (s *Server) registerPageRoutes(mux *http.ServeMux) {
+	// Real handlers for data-heavy pages.
+	mux.HandleFunc("/logs", s.pageLogsHandler)
+	mux.HandleFunc("/errors", s.pageErrorsHandler)
+	mux.HandleFunc("/traces", s.pageTracesHandler)
+
+	// Direct template pages for non-data routes.
 	for path, tpl := range pageRouteTemplates {
 		mux.HandleFunc(path, s.pageTemplateHandler(path, tpl))
 	}

@@ -270,7 +270,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/static/rum.min.js.map", s.rumMinJSMap)
 	mux.HandleFunc("/static/rum.d.ts", s.rumDTS)
 	s.otlpHTTP.Register(mux)
-	s.registerCompatibilityRoutes(mux)
+	s.registerPageRoutes(mux)
 	return s.wrapSecurity(mux)
 }
 
