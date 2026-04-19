@@ -58,11 +58,11 @@ Executed validation:
 - No tests found for `_same_origin_request` forwarded-header trust behavior.
 - Current external-auth cookie fallback tests only use `session` and do not verify behavior when `SESSION_COOKIE_NAME` is customized.
 
-## Suggested Next Fix PRs
+## Migration Follow-up (Single PR)
 
-1. Auth reliability patch:
-   - session cookie-name consistency fix + tests.
-2. CSRF trust-boundary patch:
-   - trusted proxy switch + tests for spoofed forwarded headers.
-3. Filter safety patch:
-   - complexity limits + timeout guard for filter validation.
+1. Implement auth reliability fixes in Go migration scope:
+  - session cookie-name consistency + tests.
+2. Implement CSRF trust-boundary behavior in Go migration scope:
+  - trusted proxy switch + tests for spoofed forwarded headers.
+3. Implement filter safety controls in Go migration scope:
+  - complexity limits + timeout/resource guard for filter validation.

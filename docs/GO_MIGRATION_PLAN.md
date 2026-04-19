@@ -6,6 +6,11 @@ Migrate the backend from Python/Quart to Go incrementally while preserving:
 - existing template-driven UI behavior
 - route and API contracts
 - data model and ClickHouse/chDB semantics
+- SOBS as an OTLP receiver/service for traces, metrics, and logs ingest
+
+Migration scope assumption:
+- This is a forward-only migration. We are not carrying backward-compatibility obligations for existing installations.
+- We can make clean breaking changes to runtime/bootstrap/deployment shape as needed, as long as the new Go path is well documented.
 
 ## Template Engine Decision
 
@@ -20,23 +25,26 @@ Notes:
 - `pongo2` is Jinja-like, not 100% Jinja2-compatible. Macro/filter parity must be validated page by page.
 - Custom filters/tags will be needed for SOBS-specific helpers (timezone rendering helpers, shared UI macros, format helpers).
 
-## Migration Strategy
+## OTEL Receiver Libraries (Go)
 
-### Phase 0: Safety Baseline (Current Python)
+Use OTEL receiver/server-side libraries (not app instrumentation middleware):
+- `google.golang.org/grpc`
+- `go.opentelemetry.io/proto/otlp/collector/trace/v1`
+- `go.opentelemetry.io/proto/otlp/collector/metrics/v1`
+- `go.opentelemetry.io/proto/otlp/collector/logs/v1`
+- `go.opentelemetry.io/proto/otlp/common/v1`
+- `go.opentelemetry.io/proto/otlp/resource/v1`
+- `go.opentelemetry.io/collector/pdata/plog`
+- `go.opentelemetry.io/collector/pdata/pmetric`
+- `go.opentelemetry.io/collector/pdata/ptrace`
 
-Objectives:
-- Stabilize known auth/query risks before dual-run migration.
-- Define parity test matrix for APIs and rendered pages.
-
-Deliverables:
-- Fix PRs for high-severity review findings.
-- Golden snapshots for representative page renders and core JSON API responses.
+## Migration Strategy (Single PR)
 
 ### Phase 1: Go Skeleton + Compatibility Layer
 
 Objectives:
 - Introduce a Go service that can render existing templates with minimal edits.
-- Keep Python service as source of truth for business logic.
+- Build Go as the primary and only target runtime (no dual-run dependency).
 
 Deliverables:
 - New Go app scaffold (router, middleware, config, health endpoint).
@@ -68,7 +76,7 @@ Acceptance criteria:
 ### Phase 3: Ingest + Write Path Porting
 
 Objectives:
-- Move OTEL/RUM ingest and internal write queues to Go.
+- Move OTLP receiver handlers, RUM ingest, and internal write queues to Go.
 - Preserve schema compatibility and retention/window behavior.
 
 Deliverables:
@@ -93,16 +101,16 @@ Acceptance criteria:
 ### Phase 5: Cutover and Decommission
 
 Objectives:
-- Switch default runtime to Go.
-- Keep Python fallback until production stability window closes.
+- Complete one-way cutover to Go runtime.
 
 Deliverables:
-- deployment flag to select runtime (`python`, `go`, `dual`)
-- rollback playbook
-- deprecation timeline for Python service path
+- production deployment artifacts for Go runtime only
+- installation and operations docs updated for Go-first deployment
+- explicit removal/deprecation plan for Python runtime paths in repository
 
 Acceptance criteria:
-- Two release cycles with no Sev1/Sev2 regressions on Go primary.
+- Go runtime is the only supported runtime for new deployments.
+- Python runtime path is removed or marked unsupported for forward releases.
 
 ## Target Go Architecture
 
@@ -116,12 +124,58 @@ Proposed package layout:
 - `internal/ingest` OTEL/RUM ingest pipelines and write batching
 - `internal/agents` issue/PR orchestration and policy checks
 
+## Extension Point Signatures
+
+```go
+package extensionpoints
+
+import (
+  "context"
+  "net/http"
+)
+
+type Identity struct {
+  Subject string
+  Email   string
+  Roles   []string
+}
+
+type AuthProvider interface {
+  Authenticate(ctx context.Context, r *http.Request) (Identity, error)
+  Authorize(ctx context.Context, id Identity, permission string) error
+}
+
+type RowIterator interface {
+  Next() bool
+  Scan(dest ...any) error
+  Err() error
+  Close() error
+}
+
+type Result interface {
+  RowsAffected() (int64, error)
+}
+
+type ClickHouseStore interface {
+  Ping(ctx context.Context) error
+  Query(ctx context.Context, query string, args ...any) (RowIterator, error)
+  Exec(ctx context.Context, query string, args ...any) (Result, error)
+  Close() error
+}
+
+type StoreFactory interface {
+  Open(ctx context.Context) (ClickHouseStore, error)
+}
+```
+
 ## Contract and Parity Requirements
 
 - Preserve existing endpoint paths and status codes where possible.
 - Preserve JSON field names and error shapes.
 - Keep template block structure and page layout behavior unchanged.
 - Preserve responsive/mobile card behavior and existing helper macros.
+- Ensure Go auth/session handling always uses configured session cookie name (no hardcoded cookie key fallback behavior).
+- Ensure Go CSRF origin checking does not trust forwarded host/proto headers unless trusted-proxy mode is explicitly enabled.
 
 ## Risk Register
 
@@ -131,21 +185,23 @@ Proposed package layout:
 2. Query behavior drift (type coercion/timezone/NULL semantics).
 - Mitigation: golden-query fixtures and response diff tooling.
 
-3. Auth/CSRF behavior mismatch during dual-run.
-- Mitigation: shared auth conformance tests before any endpoint cutover.
+3. Auth/CSRF behavior mismatch during migration.
+- Mitigation: enforce explicit conformance tests for cookie-name configuration and trusted-proxy-gated forwarded-header behavior in Go implementation.
 
 4. Performance regressions in ingest path.
 - Mitigation: load tests and staged shadow traffic.
 
 ## PR Roadmap
 
-1. PR A: Security/reliability fixes from review findings.
-2. PR B: Go skeleton + pongo2 renderer + health/template smoke tests.
-3. PR C+: Domain-by-domain endpoint migration with parity gates.
+1. Single PR: Complete migration end-to-end in one change set.
+2. The PR includes Go skeleton, template migration, endpoint migration, ingest/write migration, AI/agent migration, parity tests, and Go-side auth/CSRF non-regression coverage.
 
 ## Definition of Done (Migration)
 
 - Go service is default runtime.
-- Python service retained only as rollback path for one stabilization window.
+- No dual-runtime requirement or rollback obligation for existing installations.
 - Parity matrix green for APIs/templates across required viewports and auth modes.
 - Runbooks, alerts, and operational docs updated.
+- Go implementation includes explicit coverage for:
+  - configured session cookie-name handling in external-auth/browser flows
+  - trusted-proxy boundary enforcement for forwarded-header-based origin checks
