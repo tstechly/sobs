@@ -118,7 +118,17 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		sortDir = "DESC"
 	}
 	sortCol := "Timestamp"
-	if sortBy == "service" {
+	if grouped {
+		sortCol = "Count"
+		switch sortBy {
+		case "last_seen", "Timestamp":
+			sortCol = "LastSeen"
+		case "service", "ServiceName":
+			sortCol = "ServiceName"
+		case "count":
+			sortCol = "Count"
+		}
+	} else if sortBy == "service" {
 		sortCol = "ServiceName"
 	}
 	orderClause := fmt.Sprintf("ORDER BY %s %s", sortCol, sortDir)
@@ -135,9 +145,16 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, total, err := s.queryErrors(r, where, params, orderClause, limit, offset)
-	if err != nil {
-		s.renderPageError(w, "errors", err)
+	var rows []map[string]any
+	var total int
+	var queryErr error
+	if grouped {
+		rows, total, queryErr = s.queryErrorsGrouped(r, where, params, orderClause, limit, offset)
+	} else {
+		rows, total, queryErr = s.queryErrors(r, where, params, orderClause, limit, offset)
+	}
+	if queryErr != nil {
+		s.renderPageError(w, "errors", queryErr)
 		return
 	}
 
@@ -236,11 +253,22 @@ func (s *Server) pageTracesHandler(w http.ResponseWriter, r *http.Request) {
 
 func buildLogsWhereClause(levels, services []string, traceID, fromTS, toTS, q, sqlWhere string) (string, []any, string) {
 	if sqlWhere != "" {
-		upper := strings.ToUpper(sqlWhere)
+		safeSQL := strings.ReplaceAll(strings.TrimSpace(sqlWhere), ";", "")
+		upper := strings.ToUpper(safeSQL)
 		if strings.Contains(upper, "INSERT") || strings.Contains(upper, "DELETE") || strings.Contains(upper, "DROP") || strings.Contains(upper, "ALTER") {
 			return "", nil, "SQL filter contains disallowed keywords"
 		}
-		return "WHERE " + sqlWhere, nil, ""
+		where := "WHERE " + safeSQL
+		params := []any{}
+		if fromTS != "" {
+			where += " AND Timestamp >= parseDateTime64BestEffort(?, 9)"
+			params = append(params, fromTS)
+		}
+		if toTS != "" {
+			where += " AND Timestamp < parseDateTime64BestEffort(?, 9)"
+			params = append(params, toTS)
+		}
+		return where, params, ""
 	}
 	conditions := []string{}
 	params := []any{}
@@ -278,11 +306,11 @@ func buildLogsWhereClause(levels, services []string, traceID, fromTS, toTS, q, s
 		params = append(params, strings.ToLower(traceID))
 	}
 	if fromTS != "" {
-		conditions = append(conditions, "Timestamp >= ?")
+		conditions = append(conditions, "Timestamp >= parseDateTime64BestEffort(?, 9)")
 		params = append(params, fromTS)
 	}
 	if toTS != "" {
-		conditions = append(conditions, "Timestamp <= ?")
+		conditions = append(conditions, "Timestamp < parseDateTime64BestEffort(?, 9)")
 		params = append(params, toTS)
 	}
 	if q != "" {
@@ -314,11 +342,11 @@ func buildErrorsWhereClause(services []string, fromTS, toTS, q string) (string, 
 		}
 	}
 	if fromTS != "" {
-		conditions = append(conditions, "Timestamp >= ?")
+		conditions = append(conditions, "Timestamp >= parseDateTime64BestEffort(?, 9)")
 		params = append(params, fromTS)
 	}
 	if toTS != "" {
-		conditions = append(conditions, "Timestamp <= ?")
+		conditions = append(conditions, "Timestamp < parseDateTime64BestEffort(?, 9)")
 		params = append(params, toTS)
 	}
 	if q != "" {
@@ -354,11 +382,11 @@ func buildTracesWhereClause(services []string, traceID, fromTS, toTS, q string) 
 		params = append(params, traceID)
 	}
 	if fromTS != "" {
-		conditions = append(conditions, "Timestamp >= ?")
+		conditions = append(conditions, "Timestamp >= parseDateTime64BestEffort(?, 9)")
 		params = append(params, fromTS)
 	}
 	if toTS != "" {
-		conditions = append(conditions, "Timestamp <= ?")
+		conditions = append(conditions, "Timestamp < parseDateTime64BestEffort(?, 9)")
 		params = append(params, toTS)
 	}
 	if q != "" {
@@ -534,6 +562,69 @@ func (s *Server) queryErrors(r *http.Request, where string, params []any, orderC
 	return result, total, nil
 }
 
+func (s *Server) queryErrorsGrouped(r *http.Request, where string, params []any, orderClause string, limit, offset int) ([]map[string]any, int, error) {
+	store, err := s.storeFactory.Open(r.Context())
+	if err != nil {
+		return nil, 0, err
+	}
+	defer store.Close()
+
+	finalWhere := "WHERE SeverityText IN ('ERROR','FATAL')"
+	if where != "" {
+		finalWhere = "WHERE SeverityText IN ('ERROR','FATAL') AND (" + strings.TrimPrefix(where, "WHERE ") + ")"
+	}
+
+	groupedSQL := "SELECT ServiceName, SeverityText, Body, TraceId, SpanId, min(Timestamp) AS FirstSeen, max(Timestamp) AS LastSeen, count() AS Count FROM otel_logs " + finalWhere + " GROUP BY ServiceName, SeverityText, Body, TraceId, SpanId"
+
+	countRows, err := store.Query(r.Context(), "SELECT count() FROM ("+groupedSQL+")", params...)
+	if err != nil {
+		if isMissingTableError(err) {
+			return []map[string]any{}, 0, nil
+		}
+		return nil, 0, err
+	}
+	defer countRows.Close()
+	total := 0
+	if countRows.Next() {
+		var c any
+		if scanErr := countRows.Scan(&c); scanErr == nil {
+			total = anyToInt(c)
+		}
+	}
+
+	query := "SELECT * FROM (" + groupedSQL + ") " + orderClause + fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
+	rows, err := store.Query(r.Context(), query, params...)
+	if err != nil {
+		if isMissingTableError(err) {
+			return []map[string]any{}, total, nil
+		}
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	result := []map[string]any{}
+	for rows.Next() {
+		var service, level, body, traceID, spanID, firstSeen, lastSeen, count any
+		if scanErr := rows.Scan(&service, &level, &body, &traceID, &spanID, &firstSeen, &lastSeen, &count); scanErr != nil {
+			continue
+		}
+		result = append(result, map[string]any{
+			"ts":         anyToString(lastSeen),
+			"last_seen":  anyToString(lastSeen),
+			"first_seen": anyToString(firstSeen),
+			"count":      anyToInt(count),
+			"err_type":   anyToString(level),
+			"service":    anyToString(service),
+			"message":    anyToString(body),
+			"raw_body":   anyToString(body),
+			"trace_id":   anyToString(traceID),
+			"span_id":    anyToString(spanID),
+			"resolved":   false,
+		})
+	}
+	return result, total, nil
+}
+
 func (s *Server) queryTraces(r *http.Request, where string, params []any, orderClause string, limit, offset int) ([]map[string]any, int, error) {
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
@@ -657,6 +748,20 @@ func countTraceIDs(traceID string) int {
 }
 
 func queryCount(r *http.Request, store extensionpoints.ClickHouseStore, tableName, where string, params []any) (int, error) {
+	if strings.TrimSpace(where) == "" {
+		if tableName == "otel_logs" || tableName == "otel_traces" || tableName == "hyperdx_sessions" {
+			rows, err := store.Query(r.Context(), "SELECT COALESCE(sum(rows), 0) AS c FROM system.parts WHERE active = 1 AND database = currentDatabase() AND table = ?", tableName)
+			if err == nil {
+				defer rows.Close()
+				if rows.Next() {
+					var count any
+					if scanErr := rows.Scan(&count); scanErr == nil {
+						return anyToInt(count), nil
+					}
+				}
+			}
+		}
+	}
 	query := fmt.Sprintf("SELECT count() FROM %s %s", tableName, where)
 	rows, err := store.Query(r.Context(), query, params...)
 	if err != nil {

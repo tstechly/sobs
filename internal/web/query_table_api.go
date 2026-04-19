@@ -2,17 +2,21 @@ package web
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type queryRequest struct {
 	Question string `json:"question"`
 	SQL      string `json:"sql"`
+	Execute  *bool  `json:"execute"`
+	Chart    bool   `json:"chart"`
 }
 
 type refineChartRequest struct {
@@ -41,8 +45,45 @@ func (s *Server) apiQueryAsk(w http.ResponseWriter, r *http.Request) {
 	if q == "" {
 		q = "show recent errors"
 	}
+	traceID := fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("query|%s|%d", q, time.Now().UnixNano()))))
+	turnID := traceID[:16]
+
 	suggested := suggestSQLForQuestion(q, s.listTableNames(r.Context()))
-	writeJSON(w, http.StatusOK, map[string]any{"sql": suggested, "question": q})
+	doExecute := true
+	if req.Execute != nil {
+		doExecute = *req.Execute
+	}
+	columns := []string{}
+	rows := [][]any{}
+	execErr := ""
+	if doExecute {
+		if !isReadOnlySQL(suggested) {
+			execErr = "generated SQL is not read-only"
+		} else {
+			var err error
+			columns, rows, err = s.runSQL(r.Context(), suggested)
+			if err != nil {
+				execErr = err.Error()
+				columns = []string{}
+				rows = [][]any{}
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"trace_id":   traceID,
+		"turn_id":    turnID,
+		"sql":        suggested,
+		"question":   q,
+		"columns":    columns,
+		"rows":       rows,
+		"field_types": []any{},
+		"datasets":   []any{},
+		"retry_count": 0,
+		"chart_spec": "",
+		"error":      execErr,
+		"llm_stats":  map[string]any{},
+	})
 }
 
 func (s *Server) apiQueryRun(w http.ResponseWriter, r *http.Request) {
@@ -60,16 +101,36 @@ func (s *Server) apiQueryRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sql is required"})
 		return
 	}
+	traceID := fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("query-run|%s|%d", sqlText, time.Now().UnixNano()))))
+	turnID := traceID[:16]
 	if !isReadOnlySQL(sqlText) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only read-only SQL is allowed"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "only read-only SQL is allowed", "trace_id": traceID, "turn_id": turnID})
+		return
+	}
+	_, _, explainErr := s.runSQL(r.Context(), "EXPLAIN "+sqlText)
+	if explainErr != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "error": explainErr.Error(), "trace_id": traceID, "turn_id": turnID, "sql": sqlText, "columns": []any{}, "rows": []any{}})
 		return
 	}
 	columns, rows, err := s.runSQL(r.Context(), sqlText)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error(), "trace_id": traceID, "turn_id": turnID, "sql": sqlText, "columns": []any{}, "rows": []any{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"columns": columns, "rows": rows, "sql": sqlText})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"trace_id":   traceID,
+		"turn_id":    turnID,
+		"sql":        sqlText,
+		"columns":    columns,
+		"rows":       rows,
+		"field_types": []any{},
+		"datasets": []map[string]any{{"name": "main", "purpose": "primary dataset", "sql": sqlText, "columns": columns, "field_types": []any{}, "rows": rows, "error": ""}},
+		"retry_count": 0,
+		"chart_spec": "",
+		"error":      "",
+		"llm_stats":  map[string]any{},
+	})
 }
 
 func (s *Server) apiQueryRefineChart(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +231,17 @@ func (s *Server) apiTableExplorerTables(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.listTableNames(r.Context())})
+	tableNames := s.listTableNames(r.Context())
+	tables := make([]map[string]any, 0, len(tableNames))
+	for _, name := range tableNames {
+		columns := s.listTableColumnMeta(r.Context(), name)
+		tables = append(tables, map[string]any{
+			"name":         name,
+			"column_count": len(columns),
+			"columns":      columns,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tables": tables, "items": tableNames})
 }
 
 func (s *Server) apiTableExplorerTable(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +254,28 @@ func (s *Server) apiTableExplorerTable(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"name": name, "columns": s.listTableColumns(r.Context(), name)})
+	if sanitizeIdentifier(name) != name {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid table name"})
+		return
+	}
+	columns := s.listTableColumnMeta(r.Context(), name)
+	ddl := s.getTableDDL(r.Context(), name)
+	sampleCols, sampleRows, err := s.runSQL(r.Context(), fmt.Sprintf("SELECT * FROM %s LIMIT 20", sanitizeIdentifier(name)))
+	if err != nil {
+		sampleCols = []string{}
+		sampleRows = [][]any{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"table":   name,
+		"name":    name,
+		"columns": columns,
+		"ddl":     ddl,
+		"sample": map[string]any{
+			"columns": sampleCols,
+			"rows":    sampleRows,
+		},
+	})
 }
 
 func (s *Server) apiChartTypes(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +358,61 @@ func (s *Server) listTableColumns(ctx context.Context, table string) []string {
 		return out
 	}
 	return []string{"id", "timestamp", "value"}
+}
+
+func (s *Server) listTableColumnMeta(ctx context.Context, table string) []map[string]any {
+	if table == "" {
+		return []map[string]any{}
+	}
+	store, err := s.storeFactory.Open(ctx)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer func() { _ = store.Close() }()
+	out := []map[string]any{}
+	rows, err := store.Query(ctx, "SELECT name, type, is_in_primary_key, is_in_sorting_key, is_in_partition_key, default_kind, comment FROM system.columns WHERE database = currentDatabase() AND table = ? ORDER BY position", table)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name, typ, inPK, inSort, inPart, defaultKind, comment any
+		if scanErr := rows.Scan(&name, &typ, &inPK, &inSort, &inPart, &defaultKind, &comment); scanErr != nil {
+			continue
+		}
+		typeText := anyToString(typ)
+		out = append(out, map[string]any{
+			"name":             anyToString(name),
+			"type":             typeText,
+			"is_nullable":      strings.Contains(strings.ToLower(typeText), "nullable"),
+			"is_primary_key":   anyToInt(inPK) > 0,
+			"is_sorting_key":   anyToInt(inSort) > 0,
+			"is_partition_key": anyToInt(inPart) > 0,
+			"default_kind":     anyToString(defaultKind),
+			"comment":          anyToString(comment),
+		})
+	}
+	return out
+}
+
+func (s *Server) getTableDDL(ctx context.Context, table string) string {
+	store, err := s.storeFactory.Open(ctx)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.Query(ctx, "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = ? LIMIT 1", table)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var ddl any
+		if scanErr := rows.Scan(&ddl); scanErr == nil {
+			return anyToString(ddl)
+		}
+	}
+	return ""
 }
 
 func (s *Server) runSQL(ctx context.Context, sqlText string) ([]string, [][]any, error) {
