@@ -22,7 +22,7 @@ func (s *Server) pageLogsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderErr != nil || s.renderer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "logs"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -99,7 +99,7 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderErr != nil || s.renderer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "errors"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -185,7 +185,7 @@ func (s *Server) pageTracesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderErr != nil || s.renderer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "traces"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 

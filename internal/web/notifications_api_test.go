@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -134,5 +135,25 @@ func TestNotificationsListEndpoints(t *testing.T) {
 	srv.Handler().ServeHTTP(listSubsRec, listSubsReq)
 	if listSubsRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", listSubsRec.Code)
+	}
+}
+
+func TestSettingsNotificationsCreateAcceptsFormPayloads(t *testing.T) {
+	srv := newTestServer()
+
+	channelReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", strings.NewReader("endpoint=https%3A%2F%2Fexample.com%2Fform-push"))
+	channelReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	channelRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(channelRec, channelReq)
+	if channelRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", channelRec.Code)
+	}
+
+	ruleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules", strings.NewReader("name=form-rule"))
+	ruleReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	ruleRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(ruleRec, ruleReq)
+	if ruleRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", ruleRec.Code)
 	}
 }

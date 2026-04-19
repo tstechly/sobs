@@ -20,7 +20,7 @@ func (s *Server) metricsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 

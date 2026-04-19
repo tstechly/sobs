@@ -151,16 +151,15 @@ func (s *Server) settingsMCPPage(w http.ResponseWriter, r *http.Request) {
 	keys := s.mcpService.ListKeysContext(r.Context())
 	enabled := s.mcpService.EnabledContext(r.Context())
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings-mcp", "enabled": enabled, "keys": keys})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	body, err := s.renderer.Render("settings_mcp.html", pongo2.Context{"mcp_keys": keys, "mcp_enabled": enabled, "now_iso": time.Now().UTC().Format(time.RFC3339), "title": "settings-mcp", "message": "Go runtime active."})
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings-mcp", "enabled": enabled, "keys": keys})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
 }
-

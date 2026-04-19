@@ -2,10 +2,12 @@ package web
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/abartrim/sobs/internal/features/dashboards"
+	"github.com/flosch/pongo2/v6"
 )
 
 type dashboardCreateRequest struct {
@@ -31,7 +33,7 @@ func (s *Server) dashboardsRoot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"items": s.dashboardService.List()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		dashboards := s.dashboardService.List()
@@ -44,17 +46,29 @@ func (s *Server) dashboardsRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "custom_dashboards.html", ctx)
 	case http.MethodPost:
-		var req dashboardCreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		name, description, decodeErr, asJSON := decodeDashboardCreate(r)
+		if decodeErr != nil {
+			if asJSON {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			} else {
+				http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+			}
 			return
 		}
-		d, err := s.dashboardService.Create(req.Name, req.Description)
+		d, err := s.dashboardService.Create(name, description)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			if asJSON {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			} else {
+				http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+			}
 			return
 		}
-		writeJSON(w, http.StatusCreated, d)
+		if asJSON {
+			writeJSON(w, http.StatusCreated, d)
+			return
+		}
+		http.Redirect(w, r, "/dashboards/"+d.ID, http.StatusSeeOther)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -65,7 +79,18 @@ func (s *Server) dashboardsNew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"form": "new-dashboard"})
+	if s.renderer == nil || s.renderErr != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
+	ctx := map[string]any{
+		"title":                 "Custom Dashboards",
+		"mobile_breakpoint_max": "575.98px",
+		"request":               map[string]any{"endpoint": "dashboards"},
+		"dashboards":            s.dashboardService.List(),
+		"show_new_form":         true,
+	}
+	s.renderTemplate(w, "custom_dashboards.html", ctx)
 }
 
 func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +107,30 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		d, ok := s.dashboardService.Get(dashboardID)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		if s.renderer == nil || s.renderErr != nil {
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, d)
+		d, ok := s.dashboardService.Get(dashboardID)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		charts := s.listDashboardCharts(r, dashboardID)
+		templates := s.dashboardTemplateContext()
+		ctx := pongo2.Context{
+			"title":                 d.Name,
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": "dashboards"},
+			"dashboard": map[string]any{
+				"id":          d.ID,
+				"name":        d.Name,
+				"description": d.Description,
+			},
+			"charts":    charts,
+			"templates": templates,
+		}
+		s.renderTemplate(w, "custom_dashboard_view.html", ctx)
 		return
 	}
 
@@ -97,10 +140,18 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !s.dashboardService.Delete(dashboardID) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			} else {
+				http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+			}
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		if wantsJSONResponse(r) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		} else {
+			http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+		}
 		return
 	}
 
@@ -109,17 +160,29 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req chartCreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		req, err := decodeChartCreateRequest(r)
+		if err != nil {
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			} else {
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			}
 			return
 		}
 		c, err := s.dashboardService.AddChart(dashboardID, req.Title, req.Type, req.Spec)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			} else {
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			}
 			return
 		}
-		writeJSON(w, http.StatusCreated, c)
+		if wantsJSONResponse(r) {
+			writeJSON(w, http.StatusCreated, c)
+		} else {
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+		}
 		return
 	}
 
@@ -128,17 +191,29 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req chartCreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		req, err := decodeChartCreateRequest(r)
+		if err != nil {
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			} else {
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			}
 			return
 		}
 		c, ok := s.dashboardService.EditChart(dashboardID, parts[2], req.Title, req.Type, req.Spec)
 		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			} else {
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			}
 			return
 		}
-		writeJSON(w, http.StatusOK, c)
+		if wantsJSONResponse(r) {
+			writeJSON(w, http.StatusOK, c)
+		} else {
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+		}
 		return
 	}
 
@@ -149,10 +224,18 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 		}
 		c, ok := s.dashboardService.CloneChart(dashboardID, parts[2])
 		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			} else {
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			}
 			return
 		}
-		writeJSON(w, http.StatusCreated, c)
+		if wantsJSONResponse(r) {
+			writeJSON(w, http.StatusCreated, c)
+		} else {
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+		}
 		return
 	}
 
@@ -162,10 +245,18 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !s.dashboardService.DeleteChart(dashboardID, parts[2]) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			if wantsJSONResponse(r) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			} else {
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			}
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		if wantsJSONResponse(r) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		} else {
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+		}
 		return
 	}
 
@@ -215,4 +306,174 @@ func (s *Server) apiDashboardsChartSubroutes(w http.ResponseWriter, r *http.Requ
 	}
 
 	http.NotFound(w, r)
+}
+
+func decodeDashboardCreate(r *http.Request) (name string, description string, err error, asJSON bool) {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "multipart/form-data") {
+		if parseErr := r.ParseForm(); parseErr != nil {
+			return "", "", parseErr, false
+		}
+		return strings.TrimSpace(r.Form.Get("name")), strings.TrimSpace(r.Form.Get("description")), nil, false
+	}
+
+	if strings.Contains(contentType, "application/json") || wantsJSONResponse(r) {
+		asJSON = true
+		var req dashboardCreateRequest
+		if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil {
+			if decodeErr == io.EOF {
+				return "", "", decodeErr, true
+			}
+			return "", "", decodeErr, true
+		}
+		return strings.TrimSpace(req.Name), strings.TrimSpace(req.Description), nil, true
+	}
+	if parseErr := r.ParseForm(); parseErr != nil {
+		return "", "", parseErr, false
+	}
+	return strings.TrimSpace(r.Form.Get("name")), strings.TrimSpace(r.Form.Get("description")), nil, false
+}
+
+func decodeChartCreateRequest(r *http.Request) (chartCreateRequest, error) {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "multipart/form-data") {
+		if err := r.ParseForm(); err != nil {
+			return chartCreateRequest{}, err
+		}
+
+		title := strings.TrimSpace(r.Form.Get("title"))
+		query := strings.TrimSpace(r.Form.Get("query"))
+		templateID := strings.TrimSpace(r.Form.Get("template_id"))
+		specJSON := strings.TrimSpace(r.Form.Get("chart_spec_json"))
+
+		spec := map[string]any{}
+		if specJSON != "" {
+			if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+				return chartCreateRequest{}, err
+			}
+		}
+		if query != "" {
+			spec["query"] = query
+		}
+		if templateID != "" {
+			spec["template_id"] = templateID
+		}
+		chartType := strings.TrimSpace(anyToString(spec["template_id"]))
+		if chartType == "" {
+			chartType = templateID
+		}
+		if chartType == "" {
+			chartType = "line"
+		}
+
+		return chartCreateRequest{Title: title, Type: chartType, Spec: spec}, nil
+	}
+
+	if strings.Contains(contentType, "application/json") || wantsJSONResponse(r) {
+		var req chartCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return chartCreateRequest{}, err
+		}
+		if req.Spec == nil {
+			req.Spec = map[string]any{}
+		}
+		return req, nil
+	}
+	return chartCreateRequest{}, io.EOF
+}
+
+func wantsJSONResponse(r *http.Request) bool {
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+	if strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "multipart/form-data") {
+		return false
+	}
+	if strings.Contains(contentType, "application/json") || strings.Contains(accept, "application/json") {
+		return true
+	}
+	if strings.Contains(accept, "text/html") {
+		return false
+	}
+	return true
+}
+
+func (s *Server) listDashboardCharts(r *http.Request, dashboardID string) []map[string]any {
+	store, err := s.storeFactory.Open(r.Context())
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer store.Close()
+
+	rows, err := store.Query(r.Context(), "SELECT Id, Title, ChartType, Query, OptionsJson, Position FROM sobs_chart_configs FINAL WHERE IsDeleted = 0 AND DashboardId = ? ORDER BY Position, Id", dashboardID)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer rows.Close()
+
+	charts := []map[string]any{}
+	for rows.Next() {
+		var id, title, chartType, query, optionsJSON any
+		var position any
+		if scanErr := rows.Scan(&id, &title, &chartType, &query, &optionsJSON, &position); scanErr != nil {
+			continue
+		}
+
+		rawOptions := anyToString(optionsJSON)
+		parsed := map[string]any{}
+		if rawOptions != "" {
+			_ = json.Unmarshal([]byte(rawOptions), &parsed)
+		}
+		chartSpec := map[string]any{}
+		if nested, ok := parsed["chart_spec"].(map[string]any); ok {
+			chartSpec = nested
+		} else {
+			chartSpec = map[string]any{
+				"template_id": anyToString(chartType),
+				"query":       anyToString(query),
+			}
+		}
+
+		charts = append(charts, map[string]any{
+			"id":           anyToString(id),
+			"title":        anyToString(title),
+			"chart_type":   anyToString(chartType),
+			"query":        anyToString(query),
+			"options_json": rawOptions,
+			"position":     anyToInt(position),
+			"chart_spec":   chartSpec,
+		})
+	}
+	return charts
+}
+
+func (s *Server) dashboardTemplateContext() []map[string]any {
+	raw := s.dashboardService.SpecTemplates()
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		id := strings.TrimSpace(anyToString(item["id"]))
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(anyToString(item["name"]))
+		if name == "" {
+			name = strings.TrimSpace(anyToString(item["label"]))
+		}
+		if name == "" {
+			name = id
+		}
+		out = append(out, map[string]any{
+			"id":          id,
+			"name":        name,
+			"description": strings.TrimSpace(anyToString(item["description"])),
+			"icon":        strings.TrimSpace(anyToString(item["icon"])),
+			"query_shape": strings.TrimSpace(anyToString(item["query_shape"])),
+			"sample_sql":  strings.TrimSpace(anyToString(item["sample_sql"])),
+			"drilldown":   item["drilldown"],
+			"default_spec": map[string]any{
+				"template_id": id,
+				"query":       "",
+			},
+		})
+	}
+	return out
 }

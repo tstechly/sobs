@@ -25,23 +25,23 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"dm_settings": s.dataManagementService.GetSettings()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		st := s.dataManagementService.GetSettings()
 		dmSettings := map[string]string{
-			"data_management.backup_enabled":        boolToSetting(st.BackupEnabled),
-			"data_management.s3_bucket":             st.S3Bucket,
-			"data_management.ttl_logs_days":         strconv.Itoa(st.TTLLogsDays),
-			"data_management.ttl_traces_days":       strconv.Itoa(st.TTLTracesDays),
-			"data_management.ttl_metrics_hours":     strconv.Itoa(st.TTLMetricsHours),
-			"data_management.ttl_sessions_days":     strconv.Itoa(st.TTLSessionsDays),
+			"data_management.backup_enabled":              boolToSetting(st.BackupEnabled),
+			"data_management.s3_bucket":                   st.S3Bucket,
+			"data_management.ttl_logs_days":               strconv.Itoa(st.TTLLogsDays),
+			"data_management.ttl_traces_days":             strconv.Itoa(st.TTLTracesDays),
+			"data_management.ttl_metrics_hours":           strconv.Itoa(st.TTLMetricsHours),
+			"data_management.ttl_sessions_days":           strconv.Itoa(st.TTLSessionsDays),
 			"data_management.ttl_backup_coupling_enabled": "0",
-			"data_management.s3_region":                  "",
-			"data_management.s3_path_prefix":             "",
-			"data_management.s3_access_key_id":           "",
-			"data_management.s3_encrypt_backup":          "0",
-			"data_management.backup_schedule_full":       "",
+			"data_management.s3_region":                   "",
+			"data_management.s3_path_prefix":              "",
+			"data_management.s3_access_key_id":            "",
+			"data_management.s3_encrypt_backup":           "0",
+			"data_management.backup_schedule_full":        "",
 			"data_management.backup_schedule_incremental": "",
 		}
 		ctx := map[string]any{
@@ -50,7 +50,7 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 			"request":               map[string]any{"endpoint": "settings/data-management"},
 			"dm_settings":           dmSettings,
 			"dm_secret_present": map[string]bool{
-				"s3_secret_access_key":      false,
+				"s3_secret_access_key":       false,
 				"backup_encryption_password": false,
 			},
 			"flash_msg":  "",

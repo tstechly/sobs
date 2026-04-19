@@ -12,12 +12,12 @@ func (s *Server) tableExplorerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "table-explorer"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	body, err := s.renderer.Render("table_explorer.html", pongo2.Context{"title": "table-explorer", "message": "Go runtime active."})
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "table-explorer"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -31,12 +31,12 @@ func (s *Server) tableExplorerHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "table-explorer-help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	body, err := s.renderer.Render("table_explorer_help.html", pongo2.Context{"title": "table-explorer-help", "message": "Go runtime active."})
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "table-explorer-help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

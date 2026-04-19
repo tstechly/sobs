@@ -13,7 +13,7 @@ func (s *Server) settingsKubernetes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"k8s_settings": s.kubernetesService.GetSettings()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		settings := s.kubernetesService.GetSettings()
@@ -56,7 +56,7 @@ func (s *Server) kubernetesPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	ctx := map[string]any{

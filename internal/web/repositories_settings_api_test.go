@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -98,6 +99,64 @@ func TestSettingsRepositoriesLifecycle(t *testing.T) {
 	srv.Handler().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", deleteRec.Code)
+	}
+}
+
+func TestSettingsRepositoriesFormPayloads(t *testing.T) {
+	srv := newTestServer()
+
+	createForm := url.Values{"name": {"repo-form"}, "url": {"https://github.com/acme/repo-form"}}
+	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories", strings.NewReader(createForm.Encode()))
+	createReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createRec.Code)
+	}
+
+	var created map[string]any
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal repo create response: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if id == "" {
+		t.Fatal("expected repository id")
+	}
+
+	updateForm := url.Values{"name": {"repo-form-updated"}, "url": {"https://github.com/acme/repo-form-updated"}}
+	updateReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories/"+id, strings.NewReader(updateForm.Encode()))
+	updateReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	updateRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", updateRec.Code)
+	}
+
+	realtimeForm := url.Values{"enabled": {"1"}}
+	realtimeReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories/"+id+"/realtime-mode", strings.NewReader(realtimeForm.Encode()))
+	realtimeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	realtimeRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(realtimeRec, realtimeReq)
+	if realtimeRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", realtimeRec.Code)
+	}
+
+	releaseForm := url.Values{"release": {"2.0.0"}}
+	releaseReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories/"+id+"/releases", strings.NewReader(releaseForm.Encode()))
+	releaseReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	releaseRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(releaseRec, releaseReq)
+	if releaseRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", releaseRec.Code)
+	}
+
+	validateForm := url.Values{"token": {"ghp_123456789012345"}}
+	validateReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories/github-token/validate", strings.NewReader(validateForm.Encode()))
+	validateReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	validateRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(validateRec, validateReq)
+	if validateRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", validateRec.Code)
 	}
 }
 

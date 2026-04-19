@@ -22,7 +22,7 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"rules": s.metricsService.ListRules()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		rawRules := s.metricsService.ListRules()
@@ -31,18 +31,18 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 			rules = append(rules, metricRuleForTemplate(rule))
 		}
 		ctx := map[string]any{
-			"title":                 "Metrics Rules",
-			"mobile_breakpoint_max": "575.98px",
-			"request":               map[string]any{"endpoint": "metrics/rules"},
-			"rules":                 rules,
-			"services":              []any{},
-			"signals":               []any{},
-			"sources":               []any{},
-			"auto_summary":          nil,
-			"auto_preview":          []map[string]any{},
+			"title":                  "Metrics Rules",
+			"mobile_breakpoint_max":  "575.98px",
+			"request":                map[string]any{"endpoint": "metrics/rules"},
+			"rules":                  rules,
+			"services":               []any{},
+			"signals":                []any{},
+			"sources":                []any{},
+			"auto_summary":           nil,
+			"auto_preview":           []map[string]any{},
 			"auto_dashboard_summary": nil,
 			"auto_dashboard_preview": []map[string]any{},
-			"auto_open_panel":       "",
+			"auto_open_panel":        "",
 			"source_label": func(source any) string {
 				return strings.TrimSpace(toString(source))
 			},
@@ -96,23 +96,23 @@ func metricRuleForTemplate(rule metrics.Rule) map[string]any {
 	}
 
 	return map[string]any{
-		"id":                          rule.ID,
-		"name":                        rule.Name,
-		"rule_type":                   "threshold",
-		"source":                      source,
-		"signal":                      signal,
-		"service":                     "",
-		"attr_fp":                     "",
-		"comparator":                  comparator,
-		"warning_threshold":           warning,
-		"critical_threshold":          critical,
-		"secondary_source":            "",
-		"secondary_signal":            "",
-		"secondary_comparator":        "",
-		"secondary_warning_threshold": "",
+		"id":                           rule.ID,
+		"name":                         rule.Name,
+		"rule_type":                    "threshold",
+		"source":                       source,
+		"signal":                       signal,
+		"service":                      "",
+		"attr_fp":                      "",
+		"comparator":                   comparator,
+		"warning_threshold":            warning,
+		"critical_threshold":           critical,
+		"secondary_source":             "",
+		"secondary_signal":             "",
+		"secondary_comparator":         "",
+		"secondary_warning_threshold":  "",
 		"secondary_critical_threshold": "",
-		"seasonal_buckets_json":       "",
-		"min_sample_count":            1,
+		"seasonal_buckets_json":        "",
+		"min_sample_count":             1,
 	}
 }
 
@@ -160,7 +160,7 @@ func (s *Server) metricsAnomalyPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, s.metricsService.AnomalySnapshot())
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	ctx := map[string]any{

@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,7 +38,7 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"items": s.repositoryService.List()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 
@@ -64,17 +63,17 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 				expiryState = "healthy"
 			}
 			app := map[string]any{
-				"id":                   repo.ID,
-				"name":                 repo.Name,
-				"slug":                 slug,
-				"repo_url":             repo.URL,
-				"repo_owner":           owner,
-				"repo_name":            name,
-				"release_count":        len(repo.Releases),
-				"latest_versions":      trimTo(repo.Releases, 3),
-				"enabled":              true,
+				"id":                    repo.ID,
+				"name":                  repo.Name,
+				"slug":                  slug,
+				"repo_url":              repo.URL,
+				"repo_owner":            owner,
+				"repo_name":             name,
+				"release_count":         len(repo.Releases),
+				"latest_versions":       trimTo(repo.Releases, 3),
+				"enabled":               true,
 				"repo_token_configured": false,
-				"ci_push_plain":        "",
+				"ci_push_plain":         "",
 				"ci_push_status": map[string]any{
 					"realtime_enabled": repo.Realtime,
 					"configured":       strings.HasPrefix(strings.TrimSpace(repo.CIIngestKeyHash), "scrypt:v1:") || strings.TrimSpace(repo.CIIngestKey) != "",
@@ -89,14 +88,14 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ctx := map[string]any{
-			"title":                    "GitHub Repositories",
-			"mobile_breakpoint_max":    "575.98px",
-			"request":                  map[string]any{"endpoint": "settings/repositories"},
-			"apps":                     apps,
-			"realtime_seed":            realtimeSeed,
-			"github_token_configured":  strings.TrimSpace(githubToken) != "",
-			"default_agent_repo":       defaultAgentRepo,
-			"github_token_expiry_status": expiryStatus,
+			"title":                            "GitHub Repositories",
+			"mobile_breakpoint_max":            "575.98px",
+			"request":                          map[string]any{"endpoint": "settings/repositories"},
+			"apps":                             apps,
+			"realtime_seed":                    realtimeSeed,
+			"github_token_configured":          strings.TrimSpace(githubToken) != "",
+			"default_agent_repo":               defaultAgentRepo,
+			"github_token_expiry_status":       expiryStatus,
 			"github_token_expiry_warning_days": 14,
 			"github_token_validation_status": map[string]any{
 				"status":            pickSetting(aiSettings, "ai.github_token_validation_status", "github_token_validation_status"),
@@ -108,12 +107,12 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_repositories.html", ctx)
 	case http.MethodPost:
-		var req createRepositoryRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			return
 		}
-		repo, err := s.repositoryService.Create(strings.TrimSpace(req.Name), strings.TrimSpace(req.URL))
+		repo, err := s.repositoryService.Create(strings.TrimSpace(vals["name"]), strings.TrimSpace(vals["url"]))
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -157,12 +156,12 @@ func (s *Server) settingsRepositoriesValidateToken(w http.ResponseWriter, r *htt
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req validateTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+	vals, err := decodeStringMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"valid": repositories.ValidateGitHubToken(req.Token)})
+	writeJSON(w, http.StatusOK, map[string]any{"valid": repositories.ValidateGitHubToken(vals["token"])})
 }
 
 func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -183,12 +182,12 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req updateRepositoryRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			return
 		}
-		repo, ok := s.repositoryService.Update(id, strings.TrimSpace(req.Name), strings.TrimSpace(req.URL))
+		repo, ok := s.repositoryService.Update(id, strings.TrimSpace(vals["name"]), strings.TrimSpace(vals["url"]))
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
@@ -215,12 +214,11 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req realtimeModeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-			return
+		enabled := false
+		if vals, err := decodeStringMap(r); err == nil {
+			enabled = parseBool(vals["enabled"])
 		}
-		repo, ok := s.repositoryService.SetRealtime(id, req.Enabled)
+		repo, ok := s.repositoryService.SetRealtime(id, enabled)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
@@ -262,12 +260,12 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req releaseRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			return
 		}
-		repo, ok := s.repositoryService.AddRelease(id, strings.TrimSpace(req.Release))
+		repo, ok := s.repositoryService.AddRelease(id, strings.TrimSpace(vals["release"]))
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return

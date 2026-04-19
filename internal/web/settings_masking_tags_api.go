@@ -19,7 +19,7 @@ func (s *Server) settingsMaskingPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"rules": s.maskingService.ListRules()})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -199,7 +199,7 @@ func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"rules": s.tagService.ListRules()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 

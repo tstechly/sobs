@@ -18,7 +18,7 @@ func (s *Server) settingsAI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"settings": s.settingsService.AI()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 
@@ -28,12 +28,12 @@ func (s *Server) settingsAI(w http.ResponseWriter, r *http.Request) {
 		savedPricing, sources, confirmed := aiPricingForTemplate(templateSettings)
 
 		ctx := map[string]any{
-			"title":                       "AI Configuration",
-			"mobile_breakpoint_max":       "575.98px",
-			"request":                     map[string]any{"endpoint": "settings/ai"},
-			"settings":                    templateSettings,
-			"github_token_expires_date":   expiresDate,
-			"github_token_expiry_status":  expiryStatus,
+			"title":                      "AI Configuration",
+			"mobile_breakpoint_max":      "575.98px",
+			"request":                    map[string]any{"endpoint": "settings/ai"},
+			"settings":                   templateSettings,
+			"github_token_expires_date":  expiresDate,
+			"github_token_expiry_status": expiryStatus,
 			"github_token_validation_status": map[string]any{
 				"status":            pickSetting(templateSettings, "ai.github_token_validation_status", "github_token_validation_status"),
 				"last_validated_at": pickSetting(templateSettings, "ai.github_token_last_validated_at", "github_token_last_validated_at"),
@@ -65,7 +65,7 @@ func (s *Server) settingsEnrichment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"settings": s.settingsService.Enrichment()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		vals := s.settingsService.Enrichment()
@@ -77,15 +77,15 @@ func (s *Server) settingsEnrichment(w http.ResponseWriter, r *http.Request) {
 			maxReleases = 500
 		}
 		ctx := map[string]any{
-			"title":                            "Enrichment Settings",
-			"mobile_breakpoint_max":            "575.98px",
-			"request":                          map[string]any{"endpoint": "settings/enrichment"},
-			"geo_enabled":                      parseBool(vals["geo_enabled"]),
-			"cve_enabled":                      parseBool(vals["cve_enabled"]),
-			"cve_last_scan":                    strings.TrimSpace(vals["cve_last_scan"]),
-			"github_backfill_min_releases":     1,
+			"title":                              "Enrichment Settings",
+			"mobile_breakpoint_max":              "575.98px",
+			"request":                            map[string]any{"endpoint": "settings/enrichment"},
+			"geo_enabled":                        parseBool(vals["geo_enabled"]),
+			"cve_enabled":                        parseBool(vals["cve_enabled"]),
+			"cve_last_scan":                      strings.TrimSpace(vals["cve_last_scan"]),
+			"github_backfill_min_releases":       1,
 			"github_backfill_max_releases_limit": 500,
-			"github_backfill_max_releases":     maxReleases,
+			"github_backfill_max_releases":       maxReleases,
 		}
 		s.renderTemplate(w, "settings_enrichment.html", ctx)
 	case http.MethodPost:
@@ -112,7 +112,7 @@ func (s *Server) settingsAgents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.renderer == nil || s.renderErr != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"rules": s.agentService.ListRules()})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		rules := s.agentService.ListRules()

@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -15,12 +14,12 @@ func (s *Server) settingsNotificationsChannelsCreate(w http.ResponseWriter, r *h
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req subscribeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+	vals, err := decodeStringMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	sub, err := s.notificationService.Subscribe(strings.TrimSpace(req.Endpoint))
+	sub, err := s.notificationService.Subscribe(strings.TrimSpace(vals["endpoint"]))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -33,12 +32,12 @@ func (s *Server) settingsNotificationsRulesCreate(w http.ResponseWriter, r *http
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req createNotificationRuleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+	vals, err := decodeStringMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	rule, err := s.notificationService.CreateRule(strings.TrimSpace(req.Name))
+	rule, err := s.notificationService.CreateRule(strings.TrimSpace(vals["name"]))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

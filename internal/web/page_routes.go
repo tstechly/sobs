@@ -64,9 +64,11 @@ func (s *Server) summaryPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderErr != nil || s.renderer == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "summary"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
+
+	stats, recentErrors, recentLogs, rumSummary, aiSummary := s.summaryData(r)
 
 	enrichmentSettings := s.settingsService.Enrichment()
 	cveEnabled := parseBool(pickSetting(enrichmentSettings, "cve_enabled", "enrichment.cve_enabled"))
@@ -106,22 +108,142 @@ func (s *Server) summaryPage(w http.ResponseWriter, r *http.Request) {
 		"title":                 "Summary",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "summary"},
-		"stats": map[string]any{
-			"logs":     0,
-			"errors":   0,
-			"spans":    0,
-			"rum":      0,
-			"ai":       0,
-			"services": []any{},
-		},
-		"signal_health": []any{},
-		"recent_errors": []any{},
-		"recent_logs":   []any{},
-		"rum_summary":   []any{},
-		"ai_summary":    []any{},
-		"cve_overview":  cveOverview,
+		"stats":                 stats,
+		"signal_health":         []any{},
+		"recent_errors":         recentErrors,
+		"recent_logs":           recentLogs,
+		"rum_summary":           rumSummary,
+		"ai_summary":            aiSummary,
+		"cve_overview":          cveOverview,
 	}
 	s.renderTemplate(w, "summary.html", ctx)
+}
+
+func (s *Server) summaryData(r *http.Request) (map[string]any, []map[string]any, []map[string]any, []any, []any) {
+	stats := map[string]any{
+		"logs":     0,
+		"errors":   0,
+		"spans":    0,
+		"rum":      0,
+		"ai":       0,
+		"services": []any{},
+	}
+	recentErrors := []map[string]any{}
+	recentLogs := []map[string]any{}
+	rumSummary := []any{}
+	aiSummary := []any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err != nil {
+		return stats, recentErrors, recentLogs, rumSummary, aiSummary
+	}
+	defer store.Close()
+
+	if count, err := queryCount(r, store, "otel_logs", "", nil); err == nil {
+		stats["logs"] = count
+	}
+	if count, err := queryCount(r, store, "otel_traces", "", nil); err == nil {
+		stats["spans"] = count
+	}
+	if count, err := queryCount(r, store, "hyperdx_sessions", "", nil); err == nil {
+		stats["rum"] = count
+	}
+
+	if rows, err := store.Query(r.Context(), "SELECT count() FROM otel_logs WHERE upper(SeverityText) IN ('ERROR','FATAL')"); err == nil {
+		defer rows.Close()
+		if rows.Next() {
+			var c any
+			if scanErr := rows.Scan(&c); scanErr == nil {
+				stats["errors"] = anyToInt(c)
+			}
+		}
+	}
+
+	if rows, err := store.Query(r.Context(), "SELECT count() FROM otel_traces WHERE SpanAttributes['gen_ai.request.model'] != '' OR SpanAttributes['gen_ai.usage.input_tokens'] != '' OR SpanAttributes['gen_ai.usage.output_tokens'] != ''"); err == nil {
+		defer rows.Close()
+		if rows.Next() {
+			var c any
+			if scanErr := rows.Scan(&c); scanErr == nil {
+				stats["ai"] = anyToInt(c)
+			}
+		}
+	}
+
+	services := []any{}
+	if rows, err := store.Query(r.Context(), "SELECT ServiceName FROM (SELECT DISTINCT ServiceName FROM otel_logs WHERE ServiceName != '' UNION DISTINCT SELECT DISTINCT ServiceName FROM otel_traces WHERE ServiceName != '' UNION DISTINCT SELECT DISTINCT ServiceName FROM hyperdx_sessions WHERE ServiceName != '') ORDER BY ServiceName"); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var svc any
+			if scanErr := rows.Scan(&svc); scanErr == nil {
+				if v := anyToString(svc); v != "" {
+					services = append(services, v)
+				}
+			}
+		}
+	}
+	stats["services"] = services
+
+	if rows, err := store.Query(r.Context(), "SELECT Timestamp, ServiceName, Body, TraceId FROM otel_logs WHERE upper(SeverityText) IN ('ERROR','FATAL') ORDER BY Timestamp DESC LIMIT 5"); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ts, svc, body, traceID any
+			if scanErr := rows.Scan(&ts, &svc, &body, &traceID); scanErr != nil {
+				continue
+			}
+			t := anyToString(ts)
+			tr := anyToString(traceID)
+			if tr == "" {
+				tr = t + "|" + anyToString(svc)
+			}
+			recentErrors = append(recentErrors, map[string]any{
+				"id":       tr,
+				"ts":       t,
+				"service":  anyToString(svc),
+				"err_type": "ERROR",
+				"message":  anyToString(body),
+			})
+		}
+	}
+
+	if rows, err := store.Query(r.Context(), "SELECT Timestamp, SeverityText, ServiceName, Body FROM otel_logs ORDER BY Timestamp DESC LIMIT 10"); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ts, level, svc, body any
+			if scanErr := rows.Scan(&ts, &level, &svc, &body); scanErr != nil {
+				continue
+			}
+			recentLogs = append(recentLogs, map[string]any{
+				"ts":      anyToString(ts),
+				"level":   anyToString(level),
+				"service": anyToString(svc),
+				"body":    anyToString(body),
+			})
+		}
+	}
+
+	if rows, err := store.Query(r.Context(), "SELECT EventName, count() AS cnt FROM hyperdx_sessions GROUP BY EventName ORDER BY cnt DESC"); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name, cnt any
+			if scanErr := rows.Scan(&name, &cnt); scanErr != nil {
+				continue
+			}
+			rumSummary = append(rumSummary, []any{anyToString(name), anyToInt(cnt)})
+		}
+	}
+
+	if rows, err := store.Query(r.Context(), "SELECT SpanAttributes['gen_ai.request.model'] AS model, count() AS cnt, SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) AS ti, SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) AS to_ FROM otel_traces WHERE SpanAttributes['gen_ai.request.model'] != '' OR SpanAttributes['gen_ai.usage.input_tokens'] != '' OR SpanAttributes['gen_ai.usage.output_tokens'] != '' GROUP BY model ORDER BY cnt DESC"); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var model, cnt, ti, to any
+			if scanErr := rows.Scan(&model, &cnt, &ti, &to); scanErr != nil {
+				continue
+			}
+			aiSummary = append(aiSummary, []any{anyToString(model), anyToInt(cnt), anyToInt(ti), anyToInt(to)})
+		}
+	}
+
+	return stats, recentErrors, recentLogs, rumSummary, aiSummary
 }
 func (s *Server) summaryHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/summary/help" {
@@ -133,7 +255,7 @@ func (s *Server) summaryHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "summary/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "summary_help.html", pongo2.Context{"title": "Summary Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "summary/help"}})
@@ -148,7 +270,7 @@ func (s *Server) logsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "logs/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "logs_help.html", pongo2.Context{"title": "Logs Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "logs/help"}})
@@ -163,7 +285,7 @@ func (s *Server) errorsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "errors/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "errors_help.html", pongo2.Context{"title": "Errors Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "errors/help"}})
@@ -178,7 +300,7 @@ func (s *Server) tracesHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "traces/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "traces_help.html", pongo2.Context{"title": "Traces Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "traces/help"}})
@@ -193,7 +315,7 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "incident"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -227,24 +349,24 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := pongo2.Context{
-		"title":                 "Incident",
-		"mobile_breakpoint_max": "575.98px",
-		"request":               map[string]any{"endpoint": "incident"},
-		"_ref":                  ref,
-		"trace_id":              traceID,
-		"error_id":              errorID,
-		"rum_session":           rumSession,
-		"rum_ts":                rumTS,
-		"from_ts":               fromTS,
-		"to_ts":                 toTS,
-		"service":               service,
-		"window_minutes":        windowMinutes,
-		"error_msg":             "",
-		"primary_error":         nil,
-		"primary_trace":         nil,
-		"primary_rum":           nil,
-		"existing_work_item":    nil,
-		"related_errors":        []any{},
+		"title":                    "Incident",
+		"mobile_breakpoint_max":    "575.98px",
+		"request":                  map[string]any{"endpoint": "incident"},
+		"_ref":                     ref,
+		"trace_id":                 traceID,
+		"error_id":                 errorID,
+		"rum_session":              rumSession,
+		"rum_ts":                   rumTS,
+		"from_ts":                  fromTS,
+		"to_ts":                    toTS,
+		"service":                  service,
+		"window_minutes":           windowMinutes,
+		"error_msg":                "",
+		"primary_error":            nil,
+		"primary_trace":            nil,
+		"primary_rum":              nil,
+		"existing_work_item":       nil,
+		"related_errors":           []any{},
 		"related_errors_truncated": false,
 		"related_log_count":        0,
 		"related_span_count":       0,
@@ -276,7 +398,7 @@ func (s *Server) incidentHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "incident/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "incident_help.html", pongo2.Context{"title": "Incident Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "incident/help"}})
@@ -291,7 +413,7 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "rum"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -325,7 +447,7 @@ func (s *Server) rumHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "rum/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "rum_help.html", pongo2.Context{"title": "RUM Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "rum/help"}})
@@ -340,7 +462,7 @@ func (s *Server) webTrafficPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "web-traffic"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -348,7 +470,7 @@ func (s *Server) webTrafficPage(w http.ResponseWriter, r *http.Request) {
 	ctx := pongo2.Context{
 		"title":                 "Web Traffic",
 		"mobile_breakpoint_max": "575.98px",
-		"request":               map[string]any{"endpoint": "web-traffic", "args": map[string]any{"from_ts": strings.TrimSpace(r.URL.Query().Get("from_ts"),), "to_ts": strings.TrimSpace(r.URL.Query().Get("to_ts"),)}},
+		"request":               map[string]any{"endpoint": "web-traffic", "args": map[string]any{"from_ts": strings.TrimSpace(r.URL.Query().Get("from_ts")), "to_ts": strings.TrimSpace(r.URL.Query().Get("to_ts"))}},
 		"from_ts":               strings.TrimSpace(r.URL.Query().Get("from_ts")),
 		"to_ts":                 strings.TrimSpace(r.URL.Query().Get("to_ts")),
 		"total":                 0,
@@ -369,7 +491,7 @@ func (s *Server) webTrafficHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "web-traffic/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "web_traffic_help.html", pongo2.Context{"title": "Web Traffic Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "web-traffic/help"}})
@@ -384,7 +506,7 @@ func (s *Server) workItemsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "work-items"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -415,7 +537,7 @@ func (s *Server) workItemsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "work-items/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "work_items_help.html", pongo2.Context{"title": "Work Items Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "work-items/help"}})
@@ -430,7 +552,7 @@ func (s *Server) aiPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "ai"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -456,42 +578,42 @@ func (s *Server) aiPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := pongo2.Context{
-		"title":                    "AI",
-		"mobile_breakpoint_max":    "575.98px",
-		"request":                  map[string]any{"endpoint": "ai"},
-		"view_mode":                viewMode,
-		"service":                  strings.TrimSpace(q.Get("service")),
-		"model":                    strings.TrimSpace(q.Get("model")),
-		"operation":                strings.TrimSpace(q.Get("operation")),
-		"span_name":                strings.TrimSpace(q.Get("span_name")),
-		"row_type":                 strings.TrimSpace(q.Get("row_type")),
-		"sql_where":                strings.TrimSpace(q.Get("sql")),
-		"from_ts":                  strings.TrimSpace(q.Get("from_ts")),
-		"to_ts":                    strings.TrimSpace(q.Get("to_ts")),
-		"sort_by":                  strings.TrimSpace(q.Get("sort_by")),
-		"sort_dir":                 strings.TrimSpace(q.Get("sort_dir")),
-		"limit":                    limit,
-		"offset":                   offset,
-		"total":                    0,
-		"next_offset":              offset + limit,
-		"services":                 []any{},
-		"models":                   []any{},
-		"operations":               []any{},
-		"span_names":               []any{},
-		"selected_services":        []any{},
-		"selected_models":          []any{},
-		"selected_operations":      []any{},
-		"selected_row_types":       []any{},
-		"selected_span_names":      []any{},
-		"ai_items":                 []any{},
-		"trace_groups":             []any{},
-		"total_calls":              0,
-		"total_tokens_in":          0,
-		"total_tokens_out":         0,
-		"total_errors":             0,
-		"error_msg":                "",
-		"ai_pricing_json":          "{}",
-		"ai_pricing_sources_json":  "[]",
+		"title":                   "AI",
+		"mobile_breakpoint_max":   "575.98px",
+		"request":                 map[string]any{"endpoint": "ai"},
+		"view_mode":               viewMode,
+		"service":                 strings.TrimSpace(q.Get("service")),
+		"model":                   strings.TrimSpace(q.Get("model")),
+		"operation":               strings.TrimSpace(q.Get("operation")),
+		"span_name":               strings.TrimSpace(q.Get("span_name")),
+		"row_type":                strings.TrimSpace(q.Get("row_type")),
+		"sql_where":               strings.TrimSpace(q.Get("sql")),
+		"from_ts":                 strings.TrimSpace(q.Get("from_ts")),
+		"to_ts":                   strings.TrimSpace(q.Get("to_ts")),
+		"sort_by":                 strings.TrimSpace(q.Get("sort_by")),
+		"sort_dir":                strings.TrimSpace(q.Get("sort_dir")),
+		"limit":                   limit,
+		"offset":                  offset,
+		"total":                   0,
+		"next_offset":             offset + limit,
+		"services":                []any{},
+		"models":                  []any{},
+		"operations":              []any{},
+		"span_names":              []any{},
+		"selected_services":       []any{},
+		"selected_models":         []any{},
+		"selected_operations":     []any{},
+		"selected_row_types":      []any{},
+		"selected_span_names":     []any{},
+		"ai_items":                []any{},
+		"trace_groups":            []any{},
+		"total_calls":             0,
+		"total_tokens_in":         0,
+		"total_tokens_out":        0,
+		"total_errors":            0,
+		"error_msg":               "",
+		"ai_pricing_json":         "{}",
+		"ai_pricing_sources_json": "[]",
 	}
 	s.renderTemplate(w, "ai.html", ctx)
 }
@@ -505,7 +627,7 @@ func (s *Server) aiHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "ai/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "ai_help.html", pongo2.Context{"title": "AI Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "ai/help"}})
@@ -520,7 +642,7 @@ func (s *Server) reportsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "reports"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -554,7 +676,7 @@ func (s *Server) reportsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "reports/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "reports_help.html", pongo2.Context{"title": "Reports Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "reports/help"}})
@@ -569,7 +691,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -608,7 +730,7 @@ func (s *Server) settingsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_help.html", pongo2.Context{"title": "Settings Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help"}})
@@ -623,7 +745,7 @@ func (s *Server) settingsAIHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/ai"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_ai_help.html", pongo2.Context{"title": "Settings AI Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/ai"}})
@@ -638,7 +760,7 @@ func (s *Server) settingsAgentsHelpPage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/agents"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_agents_help.html", pongo2.Context{"title": "Settings Agents Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/agents"}})
@@ -653,7 +775,7 @@ func (s *Server) settingsDataManagementHelpPage(w http.ResponseWriter, r *http.R
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/data-management"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "data_management_help.html", pongo2.Context{"title": "Data Management Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/data-management"}})
@@ -668,7 +790,7 @@ func (s *Server) settingsEnrichmentHelpPage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/enrichment"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_enrichment_help.html", pongo2.Context{"title": "Settings Enrichment Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/enrichment"}})
@@ -683,7 +805,7 @@ func (s *Server) settingsKubernetesHelpPage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/kubernetes"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "kubernetes_help.html", pongo2.Context{"title": "Kubernetes Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/kubernetes"}})
@@ -698,7 +820,7 @@ func (s *Server) settingsMaskingHelpPage(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/masking"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "masking_help.html", pongo2.Context{"title": "Masking Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/masking"}})
@@ -713,7 +835,7 @@ func (s *Server) settingsNotificationsHelpPage(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/notifications"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_notifications_help.html", pongo2.Context{"title": "Notifications Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/notifications"}})
@@ -728,7 +850,7 @@ func (s *Server) settingsRepositoriesHelpPage(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/repositories"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_repositories_help.html", pongo2.Context{"title": "Repositories Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/repositories"}})
@@ -743,7 +865,7 @@ func (s *Server) settingsTagsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/help/tags"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "settings_tags_help.html", pongo2.Context{"title": "Tags Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/tags"}})
@@ -758,7 +880,7 @@ func (s *Server) settingsNotificationsPage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "settings/notifications"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -834,7 +956,7 @@ func (s *Server) queryPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "query"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
@@ -862,7 +984,7 @@ func (s *Server) queryHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "query/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "query_help.html", pongo2.Context{"title": "Query Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "query/help"}})
@@ -877,7 +999,7 @@ func (s *Server) metricsHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "metrics/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "metrics_help.html", pongo2.Context{"title": "Metrics Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help"}})
@@ -892,7 +1014,7 @@ func (s *Server) metricsRulesHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "metrics/help/rules"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "metrics_rules_help.html", pongo2.Context{"title": "Metrics Rules Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/rules"}})
@@ -907,7 +1029,7 @@ func (s *Server) metricsRulesAutoHelpPage(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "metrics/help/rules/auto"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "auto_metrics_rules_help.html", pongo2.Context{"title": "Auto Metrics Rules Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/rules/auto"}})
@@ -922,7 +1044,7 @@ func (s *Server) metricsAnomalyHelpPage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "metrics/help/anomaly"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "metrics_anomaly_help.html", pongo2.Context{"title": "Metrics Anomaly Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/anomaly"}})
@@ -937,7 +1059,7 @@ func (s *Server) setupPlaybooksHelpPage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "setup/help/playbooks"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "setup_playbooks_help.html", pongo2.Context{"title": "Setup Playbooks Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "setup/help/playbooks"}})
@@ -952,7 +1074,7 @@ func (s *Server) chartEditorHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "dashboards/help/chart-editor"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "chart_editor_help.html", pongo2.Context{"title": "Chart Editor Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "dashboards/help/chart-editor"}})
@@ -967,7 +1089,7 @@ func (s *Server) kubernetesHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "kubernetes/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "kubernetes_help.html", pongo2.Context{"title": "Kubernetes Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "kubernetes/help"}})
@@ -982,7 +1104,7 @@ func (s *Server) cveHelpPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "cve/help"})
+		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 	s.renderTemplate(w, "cve_help.html", pongo2.Context{"title": "CVE Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "cve/help"}})

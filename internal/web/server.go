@@ -21,8 +21,8 @@ import (
 	"github.com/abartrim/sobs/internal/features/metrics"
 	"github.com/abartrim/sobs/internal/features/notifications"
 	"github.com/abartrim/sobs/internal/features/onboarding"
-	"github.com/abartrim/sobs/internal/features/repositories"
 	"github.com/abartrim/sobs/internal/features/reports"
+	"github.com/abartrim/sobs/internal/features/repositories"
 	"github.com/abartrim/sobs/internal/features/rum"
 	"github.com/abartrim/sobs/internal/features/settings"
 	"github.com/abartrim/sobs/internal/features/tags"
@@ -34,29 +34,29 @@ import (
 )
 
 type Server struct {
-	cfg                 config.Config
-	storeFactory        extensionpoints.StoreFactory
-	renderer            *templates.Renderer
-	renderErr           error
-	otlpHTTP            *otlpreceiver.HTTPServer
-	appService          *apps.Service
-	workItemService     *workitems.Service
-	aiService           *ai.Service
-	agentService        *agents.Service
-	rumService          *rum.Service
-	enrichmentService   *enrichment.Service
-	kubernetesService   *kubernetes.Service
+	cfg                   config.Config
+	storeFactory          extensionpoints.StoreFactory
+	renderer              *templates.Renderer
+	renderErr             error
+	otlpHTTP              *otlpreceiver.HTTPServer
+	appService            *apps.Service
+	workItemService       *workitems.Service
+	aiService             *ai.Service
+	agentService          *agents.Service
+	rumService            *rum.Service
+	enrichmentService     *enrichment.Service
+	kubernetesService     *kubernetes.Service
 	dataManagementService *datamanagement.Service
-	onboardingService   *onboarding.Service
-	maskingService      *masking.Service
-	mcpService          *mcp.Service
-	metricsService      *metrics.Service
-	tagService          *tags.Service
-	notificationService *notifications.Service
-	repositoryService   *repositories.Service
-	settingsService     *settings.Service
-	dashboardService    *dashboards.Service
-	reportService       *reports.Service
+	onboardingService     *onboarding.Service
+	maskingService        *masking.Service
+	mcpService            *mcp.Service
+	metricsService        *metrics.Service
+	tagService            *tags.Service
+	notificationService   *notifications.Service
+	repositoryService     *repositories.Service
+	settingsService       *settings.Service
+	dashboardService      *dashboards.Service
+	reportService         *reports.Service
 }
 
 func NewServer(cfg config.Config, storeFactory extensionpoints.StoreFactory) *Server {
@@ -88,29 +88,29 @@ func NewServer(cfg config.Config, storeFactory extensionpoints.StoreFactory) *Se
 	mcpService := mcp.NewStoreService(storeFactory)
 	otlpHTTP := otlpreceiver.NewHTTPServerWithPipeline(otlpreceiver.NewStorePipeline(storeFactory))
 	return &Server{
-		cfg:                 cfg,
-		storeFactory:        storeFactory,
-		renderer:            renderer,
-		renderErr:           err,
-		otlpHTTP:            otlpHTTP,
-		appService:          appService,
-		workItemService:     workItemService,
-		aiService:           aiService,
-		agentService:        agentService,
-		rumService:          rumService,
-		enrichmentService:   enrichmentService,
-		kubernetesService:   kubernetesService,
+		cfg:                   cfg,
+		storeFactory:          storeFactory,
+		renderer:              renderer,
+		renderErr:             err,
+		otlpHTTP:              otlpHTTP,
+		appService:            appService,
+		workItemService:       workItemService,
+		aiService:             aiService,
+		agentService:          agentService,
+		rumService:            rumService,
+		enrichmentService:     enrichmentService,
+		kubernetesService:     kubernetesService,
 		dataManagementService: dataManagementService,
-		onboardingService:   onboardingService,
-		maskingService:      maskingService,
-		mcpService:          mcpService,
-		metricsService:      metricsService,
-		tagService:          tagService,
-		notificationService: notificationService,
-		repositoryService:   repositoryService,
-		settingsService:     settingsService,
-		dashboardService:    dashboardService,
-		reportService:       reportService,
+		onboardingService:     onboardingService,
+		maskingService:        maskingService,
+		mcpService:            mcpService,
+		metricsService:        metricsService,
+		tagService:            tagService,
+		notificationService:   notificationService,
+		repositoryService:     repositoryService,
+		settingsService:       settingsService,
+		dashboardService:      dashboardService,
+		reportService:         reportService,
 	}
 }
 
@@ -317,39 +317,9 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if s.renderErr != nil || s.renderer == nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
-	body, err := s.renderer.Render("summary.html", pongo2.Context{
-		"title":                 "Summary",
-		"mobile_breakpoint_max": "575.98px",
-		"request":               map[string]any{"endpoint": "summary"},
-		"stats": map[string]any{
-			"logs":     0,
-			"errors":   0,
-			"spans":    0,
-			"rum":      0,
-			"ai":       0,
-			"services": []any{},
-		},
-		"signal_health": []any{},
-		"recent_errors": []any{},
-		"recent_logs":   []any{},
-		"rum_summary":   []any{},
-		"ai_summary":    []any{},
-		"cve_overview": map[string]any{
-			"enabled": false,
-			"total":   0,
-		},
-	})
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(body))
+	clone := r.Clone(r.Context())
+	clone.URL.Path = "/summary"
+	s.summaryPage(w, clone)
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
