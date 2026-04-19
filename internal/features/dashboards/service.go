@@ -70,6 +70,21 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 		if err == nil {
 			_, err = store.Exec(ctx, "CREATE TABLE IF NOT EXISTS sobs_chart_configs (Id String, DashboardId String, Title String, ChartType String, Query String, OptionsJson String, Position UInt16 DEFAULT 0, IsDeleted UInt8 DEFAULT 0, Version UInt64 DEFAULT 0) ENGINE = ReplacingMergeTree(Version) ORDER BY (DashboardId, Id)")
 		}
+		if err == nil {
+			rows, queryErr := store.Query(ctx, "SELECT count() FROM sobs_dashboards FINAL WHERE IsDeleted = 0")
+			if queryErr == nil {
+				defer func() { _ = rows.Close() }()
+				var count uint64
+				if rows.Next() {
+					_ = rows.Scan(&count)
+				}
+				if count == 0 {
+					_, err = store.Exec(ctx, "INSERT INTO sobs_dashboards (Id, Name, Description, IsDeleted, Version) VALUES (?, ?, ?, ?, ?)", "1", "Default Dashboard", "Seed dashboard", 0, persist.Version())
+				}
+			} else {
+				err = queryErr
+			}
+		}
 		s.schemaErr = err
 	})
 	return s.schemaErr

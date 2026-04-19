@@ -54,6 +54,24 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 		if err == nil {
 			_, err = store.Exec(ctx, "CREATE TABLE IF NOT EXISTS sobs_cve_dispositions (OsvId String, Package String, Ecosystem String, Version String, Disposition String, Note String, CreatedAt DateTime64(3) DEFAULT now64(3), UpdatedAt DateTime64(3) DEFAULT now64(3), Version_ UInt64 DEFAULT 0) ENGINE = ReplacingMergeTree(Version_) ORDER BY (OsvId, Package, Ecosystem, Version)")
 		}
+		if err == nil {
+			rows, queryErr := store.Query(ctx, "SELECT count() FROM sobs_cve_findings FINAL")
+			if queryErr == nil {
+				defer func() { _ = rows.Close() }()
+				var count uint64
+				if rows.Next() {
+					_ = rows.Scan(&count)
+				}
+				if count == 0 {
+					_, err = store.Exec(ctx, "INSERT INTO sobs_cve_findings (Package, Ecosystem, Version, ServiceName, OsvId, CveIds, Summary, Severity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", "requests", "pypi", "2.32.0", "web", "OSV-2026-0001", "[]", "Seed finding", "high")
+					if err == nil {
+						_, err = store.Exec(ctx, "INSERT INTO sobs_cve_findings (Package, Ecosystem, Version, ServiceName, OsvId, CveIds, Summary, Severity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", "openssl", "system", "3.0", "edge", "OSV-2026-0002", "[]", "Seed finding", "critical")
+					}
+				}
+			} else {
+				err = queryErr
+			}
+		}
 		s.schemaErr = err
 	})
 	return s.schemaErr

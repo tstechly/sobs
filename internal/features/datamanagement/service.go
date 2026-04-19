@@ -142,7 +142,9 @@ func (s *Service) listBackupsStoreBacked(ctx context.Context) []Backup {
 				}
 				out = append(out, item)
 			}
-			return out
+			if len(out) > 0 {
+				return out
+			}
 		}
 	}
 	value, ok, err := persist.GetAppSetting(ctx, s.storeFactory, "data_management.backup_history")
@@ -187,9 +189,9 @@ func (s *Service) runBackupStoreBacked(ctx context.Context, kind string) (Backup
 		kind = "full"
 	}
 	now := persist.RFC3339Now()
-	name := "sobs-" + kind + "-" + strconv.FormatInt(time.Now().UTC().Unix(), 10)
-	backup := Backup{Name: name, Status: "BACKUP_COMPLETE", StartedAt: now, EndedAt: now}
 	history := s.listBackupsStoreBacked(ctx)
+	name := "sobs-" + kind + "-" + strconv.Itoa(len(history)+1)
+	backup := Backup{Name: name, Status: "BACKUP_COMPLETE", StartedAt: now, EndedAt: now}
 	rows := []map[string]any{{"name": backup.Name, "status": backup.Status, "start_time": backup.StartedAt, "end_time": backup.EndedAt}}
 	for _, item := range history {
 		rows = append(rows, map[string]any{"name": item.Name, "status": item.Status, "start_time": item.StartedAt, "end_time": item.EndedAt})

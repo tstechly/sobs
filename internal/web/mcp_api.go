@@ -77,11 +77,16 @@ func (s *Server) mcpEndpoint(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	apiKey := strings.TrimSpace(r.Header.Get("X-MCP-API-Key"))
+	if apiKey == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32002, "message": "Unauthorized: missing or invalid X-MCP-API-Key header."}})
+		return
+	}
 	if !s.mcpService.Enabled() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32001, "message": "MCP server is disabled."}})
 		return
 	}
-	if !s.mcpService.Authenticate(strings.TrimSpace(r.Header.Get("X-MCP-API-Key"))) {
+	if !s.mcpService.Authenticate(apiKey) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32002, "message": "Unauthorized: missing or invalid X-MCP-API-Key header."}})
 		return
 	}

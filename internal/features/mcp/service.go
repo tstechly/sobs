@@ -279,7 +279,7 @@ func (s *Service) callToolStoreBacked(ctx context.Context, name string, args map
 	case "get_metric_names":
 		rows, err := store.Query(ctx, "SELECT DISTINCT MetricName FROM otel_metrics WHERE MetricName != '' ORDER BY MetricName LIMIT 1000")
 		if err != nil {
-			return nil, err
+			return map[string]any{"metric_names": []string{}}, nil
 		}
 		defer func() { _ = rows.Close() }()
 		names := []string{}

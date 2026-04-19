@@ -142,13 +142,24 @@ func (s *Service) createRepoStoreBacked(ctx context.Context, name, slug, repoURL
 	if err := s.ensureSchema(ctx); err != nil {
 		return Repo{}, err
 	}
-	id := persist.NewID()
-	now := persist.RFC3339Now()
+	id := "1"
 	store, err := persist.Open(ctx, s.storeFactory)
 	if err != nil {
 		return Repo{}, err
 	}
 	defer func() { _ = store.Close() }()
+	nextRaw, ok, nextErr := persist.GetAppSetting(ctx, s.storeFactory, "onboarding.next_app_id")
+	if nextErr == nil {
+		nextID := 1
+		if ok {
+			if parsed, parseErr := strconv.Atoi(strings.TrimSpace(nextRaw)); parseErr == nil && parsed > 0 {
+				nextID = parsed
+			}
+		}
+		id = strconv.Itoa(nextID)
+		_ = persist.SetAppSetting(ctx, s.storeFactory, "onboarding.next_app_id", strconv.Itoa(nextID+1))
+	}
+	now := persist.RFC3339Now()
 	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, strings.TrimSpace(name), slug, owner, repoURL, "default", 1, persist.JSONString(map[string]any{"repo_owner": owner, "repo_name": repo}), 0, persist.Version(), now, now)
 	if err != nil {
 		return Repo{}, err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -60,50 +61,32 @@ type Server struct {
 
 func NewServer(cfg config.Config, authProvider extensionpoints.AuthProvider, storeFactory extensionpoints.StoreFactory) *Server {
 	renderer, err := templates.NewRenderer(cfg.TemplateRoot)
-	useStoreBacked := true
 	if _, ok := storeFactory.(*storepkg.NoopStoreFactory); ok {
-		useStoreBacked = false
+		if tmpPath, tmpErr := os.MkdirTemp("", "sobs-chdb-"); tmpErr == nil {
+			storeFactory = storepkg.NewChdbStoreFactory(tmpPath)
+		} else {
+			storeFactory = storepkg.NewChdbStoreFactory("")
+		}
 	}
-	appService := apps.NewService()
-	workItemService := workitems.NewService()
-	aiService := ai.NewService()
-	agentService := agents.NewService()
-	rumService := rum.NewService()
-	enrichmentService := enrichment.NewService()
-	kubernetesService := kubernetes.NewService()
-	metricsService := metrics.NewService()
-	tagService := tags.NewService()
-	notificationService := notifications.NewService()
-	repositoryService := repositories.NewService()
-	settingsService := settings.NewService()
-	dashboardService := dashboards.NewService()
-	reportService := reports.NewService()
-	dataManagementService := datamanagement.NewService()
-	onboardingService := onboarding.NewService()
-	maskingService := masking.NewService()
-	mcpService := mcp.NewService()
-	otlpHTTP := otlpreceiver.NewHTTPServer()
-	if useStoreBacked {
-		appService = apps.NewStoreService(storeFactory)
-		workItemService = workitems.NewStoreService(storeFactory)
-		aiService = ai.NewStoreService(storeFactory)
-		agentService = agents.NewStoreService(storeFactory)
-		rumService = rum.NewFileService("data/rum_assets")
-		enrichmentService = enrichment.NewStoreService(storeFactory)
-		kubernetesService = kubernetes.NewStoreService(storeFactory)
-		metricsService = metrics.NewStoreService(storeFactory)
-		tagService = tags.NewStoreService(storeFactory)
-		notificationService = notifications.NewStoreService(storeFactory)
-		repositoryService = repositories.NewStoreService(storeFactory)
-		settingsService = settings.NewStoreService(storeFactory)
-		dashboardService = dashboards.NewStoreService(storeFactory)
-		reportService = reports.NewStoreService(storeFactory)
-		dataManagementService = datamanagement.NewStoreService(storeFactory)
-		onboardingService = onboarding.NewStoreService(storeFactory)
-		maskingService = masking.NewStoreService(storeFactory)
-		mcpService = mcp.NewStoreService(storeFactory)
-		otlpHTTP = otlpreceiver.NewHTTPServerWithPipeline(otlpreceiver.NewStorePipeline(storeFactory))
-	}
+	appService := apps.NewStoreService(storeFactory)
+	workItemService := workitems.NewStoreService(storeFactory)
+	aiService := ai.NewStoreService(storeFactory)
+	agentService := agents.NewStoreService(storeFactory)
+	rumService := rum.NewFileService("data/rum_assets")
+	enrichmentService := enrichment.NewStoreService(storeFactory)
+	kubernetesService := kubernetes.NewStoreService(storeFactory)
+	metricsService := metrics.NewStoreService(storeFactory)
+	tagService := tags.NewStoreService(storeFactory)
+	notificationService := notifications.NewStoreService(storeFactory)
+	repositoryService := repositories.NewStoreService(storeFactory)
+	settingsService := settings.NewStoreService(storeFactory)
+	dashboardService := dashboards.NewStoreService(storeFactory)
+	reportService := reports.NewStoreService(storeFactory)
+	dataManagementService := datamanagement.NewStoreService(storeFactory)
+	onboardingService := onboarding.NewStoreService(storeFactory)
+	maskingService := masking.NewStoreService(storeFactory)
+	mcpService := mcp.NewStoreService(storeFactory)
+	otlpHTTP := otlpreceiver.NewHTTPServerWithPipeline(otlpreceiver.NewStorePipeline(storeFactory))
 	return &Server{
 		cfg:                 cfg,
 		authProvider:        authProvider,
