@@ -8,11 +8,26 @@ import (
 func (s *Server) settingsKubernetes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Path != "/settings/kubernetes" {
+			http.NotFound(w, r)
+			return
+		}
 		if s.renderer == nil || s.renderErr != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"k8s_settings": s.kubernetesService.GetSettings()})
 			return
 		}
-		s.pageTemplateHandler("/settings/kubernetes", "settings_kubernetes.html")(w, r)
+		settings := s.kubernetesService.GetSettings()
+		ctx := map[string]any{
+			"title":                 "Kubernetes Settings",
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": "settings/kubernetes"},
+			"flash_msg":             "",
+			"flash_type":            "info",
+			"k8s_settings": map[string]string{
+				"kubernetes.enabled": boolToSetting(settings.Enabled),
+			},
+		}
+		s.renderTemplate(w, "settings_kubernetes.html", ctx)
 	case http.MethodPost:
 		vals, err := decodeStringMap(r)
 		if err != nil {
@@ -28,6 +43,10 @@ func (s *Server) settingsKubernetes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) kubernetesPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/kubernetes" {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -40,7 +59,12 @@ func (s *Server) kubernetesPage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	s.pageTemplateHandler("/kubernetes", "kubernetes.html")(w, r)
+	ctx := map[string]any{
+		"title":                 "Kubernetes Health",
+		"mobile_breakpoint_max": "575.98px",
+		"request":               map[string]any{"endpoint": "kubernetes"},
+	}
+	s.renderTemplate(w, "kubernetes.html", ctx)
 }
 
 func (s *Server) apiKubernetesStatus(w http.ResponseWriter, r *http.Request) {

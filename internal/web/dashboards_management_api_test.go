@@ -11,6 +11,13 @@ import (
 func TestDashboardsCRUDAndChartActions(t *testing.T) {
 	srv := newTestServer()
 
+	listReq := httptest.NewRequest(http.MethodGet, "http://example.com/dashboards", nil)
+	listRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", listRec.Code)
+	}
+
 	createDashReq := httptest.NewRequest(http.MethodPost, "http://example.com/dashboards", bytes.NewReader([]byte(`{"name":"Ops"}`)))
 	createDashRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(createDashRec, createDashReq)

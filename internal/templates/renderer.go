@@ -259,6 +259,27 @@ func NewRenderer(templateRoot string) (*Renderer, error) {
 		return value.FromString(fmt.Sprintf("%.1f %s", n, units[idx])), nil
 	})
 
+	// Metrics label helpers used by metrics templates.
+	env.AddFunction("source_label", func(_ *minijinja.State, args []value.Value, _ map[string]value.Value) (value.Value, error) {
+		if len(args) == 0 {
+			return value.FromString(""), nil
+		}
+		s, _ := args[0].AsString()
+		return value.FromString(strings.TrimSpace(s)), nil
+	})
+
+	env.AddFunction("signal_label", func(_ *minijinja.State, args []value.Value, _ map[string]value.Value) (value.Value, error) {
+		if len(args) < 2 {
+			return value.FromString(""), nil
+		}
+		s, _ := args[1].AsString()
+		return value.FromString(strings.TrimSpace(s)), nil
+	})
+
+	env.AddFunction("signal_description", func(_ *minijinja.State, _ []value.Value, _ map[string]value.Value) (value.Value, error) {
+		return value.FromString(""), nil
+	})
+
 	// Python-style mapping helpers used by legacy templates and macros.
 	env.AddFunction("map_get", func(_ *minijinja.State, args []value.Value, _ map[string]value.Value) (value.Value, error) {
 		if len(args) < 2 {
@@ -509,16 +530,49 @@ func routeForEndpoint(endpoint string) string {
 		"view_rum":                 "/rum",
 		"view_ai":                  "/ai",
 		"view_query":               "/query",
+		"api_query_ask":            "/api/query/ask",
+		"api_query_run":            "/api/query/run",
+		"api_query_refine_chart":   "/api/query/refine-chart",
+		"api_query_add_to_dashboard": "/api/query/add-to-dashboard",
 		"view_metrics":             "/metrics",
+		"api_chart_types":          "/api/chart-types",
+		"view_kubernetes":          "/kubernetes",
+		"view_table_explorer":      "/table-explorer",
+		"api_table_explorer_tables": "/api/table-explorer/tables",
+		"api_table_explorer_table": "/api/table-explorer/table/",
 		"view_reports":             "/reports",
+		"list_reports":             "/reports",
+		"api_list_reports":         "/api/reports",
+		"api_create_report":        "/api/reports",
+		"api_export_reports":       "/api/reports/export",
+		"api_import_reports":       "/api/reports/import",
+		"delete_report":            "/reports",
 		"list_dashboards":          "/dashboards",
+		"add_chart":                "/dashboards",
+		"edit_chart":               "/dashboards",
+		"remove_chart":             "/dashboards",
+		"clone_chart":              "/dashboards",
+		"import_chart":             "/api/dashboards/",
+		"export_chart":             "/api/dashboards/",
+		"render_chart":             "/api/dashboards/render",
+		"api_dashboards_list":      "/api/dashboards/list",
+		"view_custom_dashboard":    "/dashboards",
+		"create_dashboard":         "/dashboards",
+		"delete_dashboard":         "/dashboards",
 		"new_dashboard_form":       "/dashboards/new",
+		"ai_build_chart_spec":      "/api/dashboards/spec/ai-build",
+		"compile_chart_spec_api":   "/api/dashboards/spec/compile",
+		"dry_run_chart_spec_api":   "/api/dashboards/spec/dry-run",
+		"render_chart_spec_api":    "/api/dashboards/spec/render",
+		"validate_chart_spec_api":  "/api/dashboards/spec/validate",
+		"chart_spec_options_api":   "/api/dashboards/spec/options",
 		"view_incident":            "/incident",
 		"view_web_traffic":         "/web-traffic",
 		"view_work_items":          "/work-items",
 		"view_settings":            "/settings",
 		"view_notifications":       "/settings/notifications",
 		"view_ai_settings":         "/settings/ai",
+		"export_ai_training":       "/api/ai/export",
 		"view_settings_repositories": "/settings/repositories",
 		"view_settings_ai":         "/settings/ai",
 		"view_dm_settings":         "/settings/data-management",
@@ -587,6 +641,34 @@ func routeForEndpoint(endpoint string) string {
 		"api_web_traffic_timezones": "/api/web-traffic/timezones",
 		"api_web_traffic_languages": "/api/web-traffic/languages",
 		"api_web_traffic_devices": "/api/web-traffic/devices",
+		"api_kubernetes_status":   "/api/kubernetes/status",
+		"api_dm_backup_list":      "/api/data-management/backup/list",
+		"api_dm_backup_run":       "/api/data-management/backup/run",
+		"api_dm_restore":          "/api/data-management/restore",
+		"api_onboarding_list_repos": "/api/onboarding/list-repos",
+		"api_onboarding_inspect_repo": "/api/onboarding/inspect-repo",
+		"api_onboarding_import_repo": "/api/onboarding/import-repo",
+		"api_onboarding_create_repo": "/api/onboarding/create-repo",
+		"api_onboarding_create_issues": "/api/onboarding/create-issues",
+		"api_setup_wizard_steps":  "/api/setup-wizard/steps",
+		"api_raw_span":            "/api/traces/span/",
+		"tail_stream":             "/tail",
+		"trigger_agent_run":       "/api/agent/runs",
+		"raise_issue_from_user_observation": "/api/issues/raise",
+		"create_agent_rule":       "/settings/agents",
+		"delete_agent_rule":       "/settings/agents",
+		"dismiss_agent_run":       "/api/agent/runs/",
+		"resolve_error":           "/errors",
+		"service_worker_js":       "/service-worker.js",
+		"test_notification_channel": "/api/notifications/check",
+		"check_notifications":     "/api/notifications/check",
+		"generate_vapid_key":      "/api/notifications/vapid-keygen",
+		"delete_vapid_keys":       "/api/notifications/vapid-keys",
+		"get_vapid_public_key":    "/api/notifications/vapid-public-key",
+		"static":                  "/static",
+		"mcp.mcp_api_set_enabled": "/api/mcp/enabled",
+		"mcp.mcp_api_create_key":  "/api/mcp/keys",
+		"mcp.mcp_api_list_keys":   "/api/mcp/keys",
 		"api_enrichment_libraries": "/api/enrichment/libraries",
 		"api_enrichment_github_repo_health": "/api/enrichment/github/repo-health",
 		"api_cve_scan":            "/api/enrichment/cve/scan",

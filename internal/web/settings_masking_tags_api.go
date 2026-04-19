@@ -3,12 +3,17 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/abartrim/sobs/internal/features/tags"
 )
 
 func (s *Server) settingsMaskingPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/settings/masking" {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -17,7 +22,40 @@ func (s *Server) settingsMaskingPage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"rules": s.maskingService.ListRules()})
 		return
 	}
-	s.pageTemplateHandler("/settings/masking", "settings_masking.html")(w, r)
+
+	rules := s.maskingService.ListRules()
+	customKeys := toStringSliceAny(rules["keys"])
+	customPatterns := toStringSliceAny(rules["patterns"])
+	sort.Strings(customKeys)
+	sort.Strings(customPatterns)
+
+	// Keep defaults empty until masking service exposes canonical defaults.
+	defaultKeys := []string{}
+	defaultPatterns := []string{}
+
+	outputMode := strings.TrimSpace(anyString(rules["output_mode"]))
+	if outputMode == "" {
+		outputMode = "mask"
+	}
+	sqlOutput := strings.TrimSpace(anyString(rules["sql_output"]))
+	if sqlOutput == "" {
+		sqlOutput = "masked"
+	}
+
+	ctx := map[string]any{
+		"title":                      "Output Masking",
+		"mobile_breakpoint_max":      "575.98px",
+		"request":                    map[string]any{"endpoint": "settings/masking"},
+		"custom_keys":                customKeys,
+		"custom_patterns":            customPatterns,
+		"default_keys":               defaultKeys,
+		"default_patterns":           defaultPatterns,
+		"effective_key_count":        len(customKeys) + len(defaultKeys),
+		"effective_pattern_count":    len(customPatterns) + len(defaultPatterns),
+		"output_masking_enabled":     isMaskingOutputEnabled(outputMode),
+		"sql_output_masking_enabled": isMaskingOutputEnabled(sqlOutput),
+	}
+	s.renderTemplate(w, "settings_masking.html", ctx)
 }
 
 func (s *Server) settingsMaskingKeysCreate(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +136,15 @@ func (s *Server) settingsMaskingOutput(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	s.maskingService.SetOutputMode(vals["output_mode"])
+	mode := strings.TrimSpace(vals["output_mode"])
+	if mode == "" {
+		if parseBool(vals["enabled"]) {
+			mode = "mask"
+		} else {
+			mode = "off"
+		}
+	}
+	s.maskingService.SetOutputMode(mode)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -112,7 +158,15 @@ func (s *Server) settingsMaskingSQLOutput(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	s.maskingService.SetSQLOutput(vals["sql_output"])
+	mode := strings.TrimSpace(vals["sql_output"])
+	if mode == "" {
+		if parseBool(vals["enabled"]) {
+			mode = "masked"
+		} else {
+			mode = "raw"
+		}
+	}
+	s.maskingService.SetSQLOutput(mode)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -140,11 +194,52 @@ func (s *Server) apiSettingsMaskingRules(w http.ResponseWriter, r *http.Request)
 func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Path != "/settings/tags" {
+			http.NotFound(w, r)
+			return
+		}
 		if s.renderer == nil || s.renderErr != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"rules": s.tagService.ListRules()})
 			return
 		}
-		s.pageTemplateHandler("/settings/tags", "settings_tags.html")(w, r)
+
+		rules := s.tagService.ListRules()
+		var editRule any
+		editID := strings.TrimSpace(r.URL.Query().Get("edit_rule"))
+		if editID != "" {
+			for _, rule := range rules {
+				if rule.ID == editID {
+					editRule = rule
+					break
+				}
+			}
+		}
+
+		services := []string{}
+		if listed, err := s.listServicesFromLogs(r); err == nil {
+			services = listed
+		}
+
+		ctx := map[string]any{
+			"title":                 "Tag Rules",
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": "settings/tags"},
+			"rules":                 rules,
+			"edit_rule":             editRule,
+			"record_types":          []string{"all", "log", "trace", "error", "ai", "rum"},
+			"match_fields":          []string{"severity", "service_name", "body", "trace_id", "span_id", "attribute"},
+			"match_operators": []map[string]string{
+				{"value": "eq", "label": "eq"},
+				{"value": "contains", "label": "contains"},
+				{"value": "regex", "label": "regex"},
+				{"value": "startswith", "label": "startswith"},
+				{"value": "endswith", "label": "endswith"},
+			},
+			"services":     services,
+			"auto_summary": nil,
+			"auto_preview": nil,
+		}
+		s.renderTemplate(w, "settings_tags.html", ctx)
 	case http.MethodPost:
 		var input tags.RuleInput
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -159,6 +254,20 @@ func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, rule)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func anyString(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func isMaskingOutputEnabled(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "mask", "masked", "on", "true", "1", "enabled":
+		return true
+	default:
+		return false
 	}
 }
 

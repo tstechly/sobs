@@ -26,11 +26,23 @@ type chartImportRequest struct {
 func (s *Server) dashboardsRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Path != "/dashboards" {
+			http.NotFound(w, r)
+			return
+		}
 		if s.renderer == nil || s.renderErr != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"items": s.dashboardService.List()})
 			return
 		}
-		s.pageTemplateHandler("/dashboards", "custom_dashboards.html")(w, r)
+		dashboards := s.dashboardService.List()
+		ctx := map[string]any{
+			"title":                 "Custom Dashboards",
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": "dashboards"},
+			"dashboards":            dashboards,
+			"show_new_form":         false,
+		}
+		s.renderTemplate(w, "custom_dashboards.html", ctx)
 	case http.MethodPost:
 		var req dashboardCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

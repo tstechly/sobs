@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -19,11 +20,63 @@ type dmRestoreRequest struct {
 func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Path != "/settings/data-management" {
+			http.NotFound(w, r)
+			return
+		}
 		if s.renderer == nil || s.renderErr != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"dm_settings": s.dataManagementService.GetSettings()})
 			return
 		}
-		s.pageTemplateHandler("/settings/data-management", "settings_data_management.html")(w, r)
+		st := s.dataManagementService.GetSettings()
+		dmSettings := map[string]string{
+			"data_management.backup_enabled":        boolToSetting(st.BackupEnabled),
+			"data_management.s3_bucket":             st.S3Bucket,
+			"data_management.ttl_logs_days":         strconv.Itoa(st.TTLLogsDays),
+			"data_management.ttl_traces_days":       strconv.Itoa(st.TTLTracesDays),
+			"data_management.ttl_metrics_hours":     strconv.Itoa(st.TTLMetricsHours),
+			"data_management.ttl_sessions_days":     strconv.Itoa(st.TTLSessionsDays),
+			"data_management.ttl_backup_coupling_enabled": "0",
+			"data_management.s3_region":                  "",
+			"data_management.s3_path_prefix":             "",
+			"data_management.s3_access_key_id":           "",
+			"data_management.s3_encrypt_backup":          "0",
+			"data_management.backup_schedule_full":       "",
+			"data_management.backup_schedule_incremental": "",
+		}
+		ctx := map[string]any{
+			"title":                 "Data Management Settings",
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": "settings/data-management"},
+			"dm_settings":           dmSettings,
+			"dm_secret_present": map[string]bool{
+				"s3_secret_access_key":      false,
+				"backup_encryption_password": false,
+			},
+			"flash_msg":  "",
+			"flash_type": "info",
+			"db_stats": map[string]any{
+				"compressed_bytes":   0,
+				"uncompressed_bytes": 0,
+				"compression_ratio":  nil,
+				"total_rows":         nil,
+				"active_queries":     nil,
+				"tables":             []map[string]any{},
+			},
+			"fmt_bytes": func(v any) string {
+				switch n := v.(type) {
+				case int:
+					return fmt.Sprintf("%d B", n)
+				case int64:
+					return fmt.Sprintf("%d B", n)
+				case float64:
+					return fmt.Sprintf("%.0f B", n)
+				default:
+					return "0 B"
+				}
+			},
+		}
+		s.renderTemplate(w, "settings_data_management.html", ctx)
 	case http.MethodPost:
 		vals, err := decodeStringMap(r)
 		if err != nil {
@@ -42,6 +95,13 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func boolToSetting(enabled bool) string {
+	if enabled {
+		return "1"
+	}
+	return "0"
 }
 
 func (s *Server) apiDataManagementBackupList(w http.ResponseWriter, r *http.Request) {

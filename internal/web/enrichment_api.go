@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -11,6 +12,10 @@ type cveDispositionRequest struct {
 }
 
 func (s *Server) enrichmentCVEPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/enrichment/cve" {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -19,7 +24,98 @@ func (s *Server) enrichmentCVEPage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"findings": s.enrichmentService.ListFindings()})
 		return
 	}
-	s.pageTemplateHandler("/enrichment/cve", "cve.html")(w, r)
+
+	enrichmentSettings := s.settingsService.Enrichment()
+	cveEnabled := parseBool(pickSetting(enrichmentSettings, "cve_enabled", "enrichment.cve_enabled"))
+	if _, ok := enrichmentSettings["cve_enabled"]; !ok {
+		if _, ok := enrichmentSettings["enrichment.cve_enabled"]; !ok {
+			cveEnabled = true
+		}
+	}
+	maxReleases := 50
+	if raw := strings.TrimSpace(pickSetting(enrichmentSettings, "github_backfill_max_releases", "enrichment.github_backfill_max_releases")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			maxReleases = parsed
+		}
+	}
+
+	severityFilter := strings.TrimSpace(r.URL.Query().Get("severity"))
+	ecosystemFilter := strings.TrimSpace(r.URL.Query().Get("ecosystem"))
+	packageFilter := strings.TrimSpace(r.URL.Query().Get("package"))
+	showAll := parseBool(strings.TrimSpace(r.URL.Query().Get("show_all")))
+	selectedSeverities := []string{}
+	selectedEcosystems := []string{}
+	if severityFilter != "" {
+		selectedSeverities = []string{severityFilter}
+	}
+	if ecosystemFilter != "" {
+		selectedEcosystems = []string{ecosystemFilter}
+	}
+
+	rawFindings := s.enrichmentService.ListFindings()
+	cveFindings := make([]map[string]any, 0, len(rawFindings))
+	severitySet := map[string]bool{}
+	ecosystemSet := map[string]bool{}
+	for _, finding := range rawFindings {
+		severity := strings.TrimSpace(finding.Severity)
+		if severity == "" {
+			severity = "UNKNOWN"
+		}
+		severitySet[severity] = true
+		cveFindings = append(cveFindings, map[string]any{
+			"osv_id":              finding.OSVID,
+			"package":             finding.Package,
+			"severity":            severity,
+			"disposition":         finding.Disposition,
+			"disposition_expired": false,
+			"disposition_note":    "",
+			"published":           finding.UpdatedAt,
+			"ecosystem":           "unknown",
+			"version":             "",
+			"service":             "",
+			"cve_ids":             []string{},
+			"summary":             "",
+		})
+		ecosystemSet["unknown"] = true
+	}
+	severities := []string{}
+	for _, s := range []string{"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"} {
+		if severitySet[s] {
+			severities = append(severities, s)
+		}
+	}
+	if len(severities) == 0 {
+		severities = []string{"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"}
+	}
+	ecosystems := []string{}
+	for key := range ecosystemSet {
+		ecosystems = append(ecosystems, key)
+	}
+	if len(ecosystems) == 0 {
+		ecosystems = []string{"unknown"}
+	}
+
+	ctx := map[string]any{
+		"title":                      "CVE Findings",
+		"mobile_breakpoint_max":      "575.98px",
+		"request":                    map[string]any{"endpoint": "enrichment/cve"},
+		"cve_enabled":                cveEnabled,
+		"cve_findings":               cveFindings,
+		"cve_last_scan":              "",
+		"cve_last_backfill_cap":      maxReleases,
+		"cve_last_backfill_attempted": 0,
+		"cve_last_backfill_inserted":  0,
+		"github_backfill_max_releases": maxReleases,
+		"severity_filter":            severityFilter,
+		"ecosystem_filter":           ecosystemFilter,
+		"package_filter":             packageFilter,
+		"show_all":                   showAll,
+		"selected_severities":        selectedSeverities,
+		"selected_ecosystems":        selectedEcosystems,
+		"severities":                 severities,
+		"ecosystems":                 ecosystems,
+	}
+	s.renderTemplate(w, "cve.html", ctx)
 }
 
 func (s *Server) apiWebTrafficGeo(w http.ResponseWriter, r *http.Request) {

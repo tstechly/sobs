@@ -31,6 +31,13 @@ func TestKubernetesEndpoints(t *testing.T) {
 
 func TestDataManagementEndpoints(t *testing.T) {
 	srv := newTestServer()
+	viewReq := httptest.NewRequest(http.MethodGet, "http://example.com/settings/data-management", nil)
+	viewRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(viewRec, viewReq)
+	if viewRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", viewRec.Code)
+	}
+
 	saveReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/data-management", bytes.NewReader([]byte(`{"backup_enabled":"true","s3_bucket":"b","ttl_logs_days":"7","ttl_traces_days":"7","ttl_metrics_hours":"24","ttl_sessions_days":"7"}`)))
 	saveRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(saveRec, saveReq)
