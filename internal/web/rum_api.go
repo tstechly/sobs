@@ -8,10 +8,13 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var rumAssetIDRegex = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 type createRUMAssetRequest struct {
 	Content string `json:"content"`
@@ -81,8 +84,8 @@ func (s *Server) v1RUMAssetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/rum/assets/")
-	if id == "" || strings.Contains(id, "/") {
-		http.NotFound(w, r)
+	if !rumAssetIDRegex.MatchString(id) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asset id"})
 		return
 	}
 	meta, body, ok := s.rumService.GetUploadedAsset(id)

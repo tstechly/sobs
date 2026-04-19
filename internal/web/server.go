@@ -359,21 +359,12 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	id, err := s.authProvider.Authenticate(r.Context(), r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := s.authProvider.Authorize(r.Context(), id, "session:read"); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	token := sessionTokenFromRequest(r, s.cfg.SessionCookieName)
 	if token == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"session": token, "subject": id.Subject})
+	_ = json.NewEncoder(w).Encode(map[string]string{"session": token, "subject": ""})
 }
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {

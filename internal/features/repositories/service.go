@@ -3,26 +3,34 @@ package repositories
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 
-	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/features/persist"
+	"golang.org/x/crypto/blake2b"
+	"golang.org/x/crypto/scrypt"
 )
 
 type Repository struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	URL         string   `json:"url"`
-	Realtime    bool     `json:"realtime"`
-	CIIngestKey string   `json:"ci_ingest_key"`
-	Releases    []string `json:"releases"`
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	URL             string   `json:"url"`
+	Realtime        bool     `json:"realtime"`
+	CIIngestKey     string   `json:"-"`
+	CIIngestKeyHash string   `json:"-"`
+	Releases        []string `json:"releases"`
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       string   `json:"updated_at"`
 }
+
+const ciPushHashPrefix = "scrypt:v1:"
 
 type Service struct {
 	storeFactory extensionpoints.StoreFactory
@@ -71,6 +79,7 @@ func (s *Service) listStoreBacked(ctx context.Context) []Repository {
 		return nil
 	}
 	defer func() { _ = store.Close() }()
+
 	releasesByApp := map[string][]string{}
 	releaseRows, err := store.Query(ctx, "SELECT AppId, ReleaseVersion FROM sobs_app_releases FINAL WHERE IsDeleted = 0 ORDER BY ReleasedAt DESC")
 	if err == nil {
@@ -83,11 +92,13 @@ func (s *Service) listStoreBacked(ctx context.Context) []Repository {
 			releasesByApp[appID] = append(releasesByApp[appID], version)
 		}
 	}
+
 	rows, err := store.Query(ctx, "SELECT Id, Name, RepoUrl, MetadataJson, CreatedAt, UpdatedAt FROM sobs_apps FINAL WHERE IsDeleted = 0 ORDER BY Name")
 	if err != nil {
 		return nil
 	}
 	defer func() { _ = rows.Close() }()
+
 	out := []Repository{}
 	for rows.Next() {
 		var item Repository
@@ -97,7 +108,8 @@ func (s *Service) listStoreBacked(ctx context.Context) []Repository {
 		}
 		meta := persist.ParseJSONMap(metadataJSON)
 		item.Realtime = asBool(meta["realtime"])
-		item.CIIngestKey, _ = meta["ci_ingest_key"].(string)
+		item.CIIngestKeyHash = strings.TrimSpace(asString(meta["ci_ingest_key_hash"]))
+		item.CIIngestKey = strings.TrimSpace(asString(meta["ci_ingest_key"]))
 		item.Releases = releasesByApp[item.ID]
 		out = append(out, item)
 	}
@@ -117,8 +129,7 @@ func (s *Service) createStoreBacked(ctx context.Context, name, url string) (Repo
 	}
 	id := persist.NewID()
 	now := persist.RFC3339Now()
-	ciKey := newSecret()
-	metadata := persist.JSONString(map[string]any{"realtime": false, "ci_ingest_key": ciKey})
+	metadata := persist.JSONString(map[string]any{"realtime": false, "ci_ingest_key_hash": ""})
 	store, err := persist.Open(ctx, s.storeFactory)
 	if err != nil {
 		return Repository{}, err
@@ -128,7 +139,7 @@ func (s *Service) createStoreBacked(ctx context.Context, name, url string) (Repo
 	if err != nil {
 		return Repository{}, err
 	}
-	return Repository{ID: id, Name: strings.TrimSpace(name), URL: strings.TrimSpace(url), Realtime: false, CIIngestKey: ciKey, Releases: []string{}, CreatedAt: now, UpdatedAt: now}, nil
+	return Repository{ID: id, Name: strings.TrimSpace(name), URL: strings.TrimSpace(url), Realtime: false, CIIngestKeyHash: "", Releases: []string{}, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Service) Update(id, name, url string) (Repository, bool) {
@@ -152,7 +163,7 @@ func (s *Service) updateStoreBacked(ctx context.Context, id, name, url string) (
 		return Repository{}, false
 	}
 	defer func() { _ = store.Close() }()
-	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, repo.Name, row.slug, row.ownerTeam, repo.URL, row.defaultEnvironment, row.enabled, persist.JSONString(map[string]any{"realtime": repo.Realtime, "ci_ingest_key": repo.CIIngestKey}), 0, persist.Version(), repo.CreatedAt, repo.UpdatedAt)
+	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, repo.Name, row.slug, row.ownerTeam, repo.URL, row.defaultEnvironment, row.enabled, persist.JSONString(map[string]any{"realtime": repo.Realtime, "ci_ingest_key_hash": repo.CIIngestKeyHash}), 0, persist.Version(), repo.CreatedAt, repo.UpdatedAt)
 	if err != nil {
 		return Repository{}, false
 	}
@@ -174,7 +185,7 @@ func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
 		return false
 	}
 	defer func() { _ = store.Close() }()
-	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, repo.Name, row.slug, row.ownerTeam, repo.URL, row.defaultEnvironment, row.enabled, persist.JSONString(map[string]any{"realtime": repo.Realtime, "ci_ingest_key": repo.CIIngestKey}), 1, persist.Version(), repo.CreatedAt, persist.RFC3339Now())
+	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, repo.Name, row.slug, row.ownerTeam, repo.URL, row.defaultEnvironment, row.enabled, persist.JSONString(map[string]any{"realtime": repo.Realtime, "ci_ingest_key_hash": repo.CIIngestKeyHash}), 1, persist.Version(), repo.CreatedAt, persist.RFC3339Now())
 	return err == nil
 }
 
@@ -185,16 +196,22 @@ func (s *Service) SetRealtime(id string, enabled bool) (Repository, bool) {
 	return repo, ok
 }
 
-func (s *Service) RotateCIIngestKey(id string) (Repository, bool) {
+func (s *Service) RotateCIIngestKey(id string) (Repository, string, bool) {
+	plain := newCIIngestKey()
 	repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
-		repo.CIIngestKey = newSecret()
+		repo.CIIngestKeyHash = hashAPIKey(plain)
+		repo.CIIngestKey = ""
 	})
-	return repo, ok
+	if !ok {
+		return Repository{}, "", false
+	}
+	return repo, plain, true
 }
 
 func (s *Service) RevokeCIIngestKey(id string) (Repository, bool) {
 	repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
 		repo.CIIngestKey = ""
+		repo.CIIngestKeyHash = ""
 	})
 	return repo, ok
 }
@@ -258,7 +275,8 @@ func (s *Service) loadStoreBacked(ctx context.Context, id string) (Repository, s
 	repo.ID = id
 	meta := persist.ParseJSONMap(metadataJSON)
 	repo.Realtime = asBool(meta["realtime"])
-	repo.CIIngestKey, _ = meta["ci_ingest_key"].(string)
+	repo.CIIngestKeyHash = strings.TrimSpace(asString(meta["ci_ingest_key_hash"]))
+	repo.CIIngestKey = strings.TrimSpace(asString(meta["ci_ingest_key"]))
 	repo.Releases = s.listReleasesForApp(ctx, id)
 	return repo, row, true
 }
@@ -275,7 +293,7 @@ func (s *Service) updateMetadataStoreBacked(ctx context.Context, id string, muta
 		return Repository{}, false
 	}
 	defer func() { _ = store.Close() }()
-	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, repo.Name, row.slug, row.ownerTeam, repo.URL, row.defaultEnvironment, row.enabled, persist.JSONString(map[string]any{"realtime": repo.Realtime, "ci_ingest_key": repo.CIIngestKey}), 0, persist.Version(), repo.CreatedAt, repo.UpdatedAt)
+	_, err = store.Exec(ctx, "INSERT INTO sobs_apps (Id, Name, Slug, OwnerTeam, RepoUrl, DefaultEnvironment, Enabled, MetadataJson, IsDeleted, Version, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, parseDateTime64BestEffort(?), parseDateTime64BestEffort(?))", id, repo.Name, row.slug, row.ownerTeam, repo.URL, row.defaultEnvironment, row.enabled, persist.JSONString(map[string]any{"realtime": repo.Realtime, "ci_ingest_key_hash": repo.CIIngestKeyHash}), 0, persist.Version(), repo.CreatedAt, repo.UpdatedAt)
 	if err != nil {
 		return Repository{}, false
 	}
@@ -316,12 +334,60 @@ func asBool(value any) bool {
 	}
 }
 
+func asString(value any) string {
+	if v, ok := value.(string); ok {
+		return v
+	}
+	return ""
+}
+
+func ciPushHashKey() []byte {
+	secret := strings.TrimSpace(os.Getenv("SOBS_SECRET_KEY"))
+	if secret == "" {
+		secret = "sobs-dev-secret-key"
+	}
+	key := blake2b.Sum256([]byte(secret + "|sobs-ci-hash-v1"))
+	return key[:]
+}
+
+func hashAPIKey(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	digest, err := scrypt.Key([]byte(raw), ciPushHashKey(), 1024, 8, 1, 32)
+	if err != nil {
+		return ""
+	}
+	return ciPushHashPrefix + hex.EncodeToString(digest)
+}
+
+func VerifyCIIngestKey(candidate string, storedHash string, legacyPlain string) bool {
+	candidate = strings.TrimSpace(candidate)
+	storedHash = strings.TrimSpace(storedHash)
+	legacyPlain = strings.TrimSpace(legacyPlain)
+	if candidate == "" {
+		return false
+	}
+	if strings.HasPrefix(storedHash, ciPushHashPrefix) {
+		candidateHash := hashAPIKey(candidate)
+		if candidateHash == "" {
+			return false
+		}
+		return subtle.ConstantTimeCompare([]byte(candidateHash), []byte(storedHash)) == 1
+	}
+	if legacyPlain != "" {
+		return subtle.ConstantTimeCompare([]byte(candidate), []byte(legacyPlain)) == 1
+	}
+	return false
+}
+
 func ValidateGitHubToken(token string) bool {
 	return len(strings.TrimSpace(token)) >= 12
 }
 
-func newSecret() string {
-	b := make([]byte, 16)
+func newCIIngestKey() string {
+	b := make([]byte, 24)
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	return "sobs_ci_" + base64.RawURLEncoding.EncodeToString(b)
 }

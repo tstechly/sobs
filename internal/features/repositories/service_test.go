@@ -11,12 +11,15 @@ func TestRepositoryLifecycle(t *testing.T) {
 	if _, ok := svc.SetRealtime(r.ID, true); !ok {
 		t.Fatal("expected realtime set")
 	}
-	rot, ok := svc.RotateCIIngestKey(r.ID)
-	if !ok || rot.CIIngestKey == "" {
+	rot, plain, ok := svc.RotateCIIngestKey(r.ID)
+	if !ok || plain == "" {
 		t.Fatal("expected rotated key")
 	}
+	if rot.CIIngestKeyHash == "" {
+		t.Fatal("expected hashed key stored")
+	}
 	rev, ok := svc.RevokeCIIngestKey(r.ID)
-	if !ok || rev.CIIngestKey != "" {
+	if !ok || rev.CIIngestKeyHash != "" {
 		t.Fatal("expected revoked key")
 	}
 	if _, ok := svc.AddRelease(r.ID, "1.0.0"); !ok {

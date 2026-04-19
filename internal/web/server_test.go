@@ -30,6 +30,28 @@ func TestSessionEndpointUsesConfiguredCookieName(t *testing.T) {
 	}
 }
 
+func TestSessionEndpointRequiresUIAuthInBasicMode(t *testing.T) {
+	t.Setenv("SOBS_BASIC_AUTH_USERNAME", "user")
+	t.Setenv("SOBS_BASIC_AUTH_PASSWORD", "pass")
+	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
+
+	cfg := config.Default()
+	cfg.EnforceAPIAuth = false
+	cfg.SessionCookieName = "session"
+	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+
+	r := httptest.NewRequest("GET", "http://example.com/auth/session", nil)
+	r.Header.Set("Origin", "http://example.com")
+	r.AddCookie(&http.Cookie{Name: "session", Value: "tok123"})
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", w.Code)
+	}
+}
+
 func TestSessionEndpointIgnoresForwardedHeadersWhenNotTrusted(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false

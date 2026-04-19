@@ -59,7 +59,7 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 			}
 			expiryMessage := "No CI ingest key configured"
 			expiryState := "unknown"
-			if strings.TrimSpace(repo.CIIngestKey) != "" {
+			if strings.HasPrefix(strings.TrimSpace(repo.CIIngestKeyHash), "scrypt:v1:") || strings.TrimSpace(repo.CIIngestKey) != "" {
 				expiryMessage = "CI ingest key configured"
 				expiryState = "healthy"
 			}
@@ -77,7 +77,7 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 				"ci_push_plain":        "",
 				"ci_push_status": map[string]any{
 					"realtime_enabled": repo.Realtime,
-					"configured":       strings.TrimSpace(repo.CIIngestKey) != "",
+					"configured":       strings.HasPrefix(strings.TrimSpace(repo.CIIngestKeyHash), "scrypt:v1:") || strings.TrimSpace(repo.CIIngestKey) != "",
 					"expiry": map[string]any{
 						"state":   expiryState,
 						"message": expiryMessage,
@@ -234,12 +234,12 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		repo, ok := s.repositoryService.RotateCIIngestKey(id)
+		repo, keyPlain, ok := s.repositoryService.RotateCIIngestKey(id)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, repo)
+		writeJSON(w, http.StatusOK, map[string]any{"repository": repo, "ci_ingest_key": keyPlain})
 		return
 	}
 

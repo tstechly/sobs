@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,9 @@ func TestSettingsRepositoriesLifecycle(t *testing.T) {
 	var repo map[string]any
 	if err := json.Unmarshal(createRec.Body.Bytes(), &repo); err != nil {
 		t.Fatalf("unmarshal repo: %v", err)
+	}
+	if _, ok := repo["ci_ingest_key"]; ok {
+		t.Fatal("did not expect ci_ingest_key in create response")
 	}
 	id, _ := repo["id"].(string)
 	if id == "" {
@@ -53,6 +57,13 @@ func TestSettingsRepositoriesLifecycle(t *testing.T) {
 	if rotateRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rotateRec.Code)
 	}
+	var rotateBody map[string]any
+	if err := json.Unmarshal(rotateRec.Body.Bytes(), &rotateBody); err != nil {
+		t.Fatalf("unmarshal rotate response: %v", err)
+	}
+	if strings.TrimSpace(asStringAny(rotateBody["ci_ingest_key"])) == "" {
+		t.Fatal("expected one-time ci_ingest_key in rotate response")
+	}
 
 	revokeReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories/"+id+"/ci-ingest-key/revoke", nil)
 	revokeRec := httptest.NewRecorder()
@@ -66,6 +77,13 @@ func TestSettingsRepositoriesLifecycle(t *testing.T) {
 	srv.Handler().ServeHTTP(updateRec, updateReq)
 	if updateRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", updateRec.Code)
+	}
+	var updateBody map[string]any
+	if err := json.Unmarshal(updateRec.Body.Bytes(), &updateBody); err != nil {
+		t.Fatalf("unmarshal update response: %v", err)
+	}
+	if _, ok := updateBody["ci_ingest_key"]; ok {
+		t.Fatal("did not expect ci_ingest_key in update response")
 	}
 
 	releaseReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/repositories/"+id+"/releases", bytes.NewReader([]byte(`{"release":"1.0.0"}`)))
@@ -81,4 +99,11 @@ func TestSettingsRepositoriesLifecycle(t *testing.T) {
 	if deleteRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", deleteRec.Code)
 	}
+}
+
+func asStringAny(value any) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
 }

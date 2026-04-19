@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/abartrim/sobs/internal/features/repositories"
 )
 
 var externalAuthClient = &http.Client{Timeout: 5 * time.Second}
@@ -115,11 +117,11 @@ func (s *Server) managedV1KeyStatus(path string, provided string) (configured bo
 		if strings.TrimSpace(repo.ID) != appID {
 			continue
 		}
-		managedKey := strings.TrimSpace(repo.CIIngestKey)
-		if managedKey == "" {
+		configured := strings.HasPrefix(strings.TrimSpace(repo.CIIngestKeyHash), "scrypt:v1:") || strings.TrimSpace(repo.CIIngestKey) != ""
+		if !configured {
 			return false, false
 		}
-		return true, subtle.ConstantTimeCompare([]byte(provided), []byte(managedKey)) == 1
+		return true, repositories.VerifyCIIngestKey(provided, repo.CIIngestKeyHash, repo.CIIngestKey)
 	}
 	return false, false
 }
@@ -162,7 +164,7 @@ func requiresUIAuth(path string) bool {
 	if strings.HasPrefix(path, "/static/") || path == "/service-worker.js" {
 		return false
 	}
-	if strings.HasPrefix(path, "/mcp") || path == "/auth/session" {
+	if strings.HasPrefix(path, "/mcp") {
 		return false
 	}
 	if strings.HasPrefix(path, "/v1/rum/assets/") {
