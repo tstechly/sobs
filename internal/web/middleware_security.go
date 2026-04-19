@@ -13,7 +13,7 @@ var externalAuthClient = &http.Client{Timeout: 5 * time.Second}
 
 func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !allowV1APIKey(r) {
+		if !s.allowV1APIKey(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -69,19 +69,59 @@ func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 	})
 }
 
-func allowV1APIKey(r *http.Request) bool {
+func (s *Server) allowV1APIKey(r *http.Request) bool {
 	if !requiresV1APIKey(r.URL.Path, r.Method) {
 		return true
 	}
-	expected := strings.TrimSpace(os.Getenv("SOBS_API_KEY"))
-	if expected == "" {
-		return true
-	}
 	provided := strings.TrimSpace(r.Header.Get("X-API-Key"))
-	if provided == "" {
-		return false
+	expected := strings.TrimSpace(os.Getenv("SOBS_API_KEY"))
+	staticOK := expected != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+	managedConfigured, managedOK := s.managedV1KeyStatus(r.URL.Path, provided)
+
+	if expected != "" {
+		return staticOK || managedOK
 	}
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+	if managedConfigured {
+		return managedOK
+	}
+	return true
+}
+
+func (s *Server) managedV1KeyStatus(path string, provided string) (configured bool, ok bool) {
+	appID := ""
+	if strings.HasPrefix(path, "/v1/apps/") {
+		rest := strings.TrimPrefix(path, "/v1/apps/")
+		parts := strings.Split(rest, "/")
+		if len(parts) > 0 {
+			appID = strings.TrimSpace(parts[0])
+		}
+	}
+	if appID == "" && strings.HasPrefix(path, "/v1/releases/") {
+		rest := strings.TrimPrefix(path, "/v1/releases/")
+		parts := strings.Split(rest, "/")
+		if len(parts) > 0 {
+			releaseID := strings.TrimSpace(parts[0])
+			if releaseID != "" {
+				if rel, found := s.appService.GetRelease(releaseID); found {
+					appID = strings.TrimSpace(rel.AppID)
+				}
+			}
+		}
+	}
+	if appID == "" {
+		return false, false
+	}
+	for _, repo := range s.repositoryService.List() {
+		if strings.TrimSpace(repo.ID) != appID {
+			continue
+		}
+		managedKey := strings.TrimSpace(repo.CIIngestKey)
+		if managedKey == "" {
+			return false, false
+		}
+		return true, subtle.ConstantTimeCompare([]byte(provided), []byte(managedKey)) == 1
+	}
+	return false, false
 }
 
 func requiresV1APIKey(path string, method string) bool {

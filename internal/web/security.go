@@ -26,16 +26,35 @@ func hostAndSchemeFromRequest(r *http.Request, trustedProxyMode bool) (string, s
 }
 
 func sameOriginRequest(r *http.Request, trustedProxyMode bool) bool {
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" || u.Scheme == "" {
+	host, scheme := hostAndSchemeFromRequest(r, trustedProxyMode)
+	expectedHost := strings.TrimSpace(host)
+	expectedScheme := strings.TrimSpace(scheme)
+	if expectedHost == "" || expectedScheme == "" {
 		return false
 	}
-	host, scheme := hostAndSchemeFromRequest(r, trustedProxyMode)
-	return strings.EqualFold(u.Host, host) && strings.EqualFold(u.Scheme, scheme)
+	expectedOrigin := strings.ToLower(expectedScheme + "://" + expectedHost)
+
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin != "" {
+		u, err := url.Parse(origin)
+		if err == nil && u.Host != "" && u.Scheme != "" {
+			if strings.EqualFold(strings.ToLower(u.Scheme+"://"+u.Host), expectedOrigin) {
+				return true
+			}
+		}
+	}
+
+	referer := strings.TrimSpace(r.Header.Get("Referer"))
+	if referer != "" {
+		u, err := url.Parse(referer)
+		if err == nil && u.Host != "" && u.Scheme != "" {
+			if strings.EqualFold(strings.ToLower(u.Scheme+"://"+u.Host), expectedOrigin) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func sessionTokenFromRequest(r *http.Request, sessionCookieName string) string {

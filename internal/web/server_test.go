@@ -19,6 +19,7 @@ func TestSessionEndpointUsesConfiguredCookieName(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "http://example.com/auth/session", nil)
 	r.Header.Set("Authorization", "Bearer test")
+	r.Header.Set("Origin", "http://example.com")
 	r.AddCookie(&http.Cookie{Name: "custom_session", Value: "tok123"})
 	w := httptest.NewRecorder()
 
