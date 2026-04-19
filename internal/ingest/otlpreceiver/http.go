@@ -23,6 +23,8 @@ type OpaqueJSONConsumer interface {
 	ConsumeOpaqueJSON(ctx context.Context, path string, payload map[string]any) error
 }
 
+// NewHTTPServer is retained for test convenience; production code should use
+// NewHTTPServerWithPipeline to supply a real pipeline.
 func NewHTTPServer() *HTTPServer {
 	return NewHTTPServerWithPipeline(NewNoopPipeline())
 }

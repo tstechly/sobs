@@ -28,7 +28,7 @@ func main() {
 	}
 	httpServer := web.NewServer(cfg, authProvider, storeFactory)
 
-	receiver := otlpreceiver.NewReceiver(otlpreceiver.NewNoopPipeline())
+	receiver := otlpreceiver.NewReceiver(otlpreceiver.NewStorePipeline(storeFactory))
 	grpcServer := grpc.NewServer()
 	coltracepb.RegisterTraceServiceServer(grpcServer, otlpreceiver.NewTraceService(receiver))
 	colmetricpb.RegisterMetricsServiceServer(grpcServer, otlpreceiver.NewMetricsService(receiver))

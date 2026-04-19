@@ -64,18 +64,28 @@ func TestStorePipelinePersistsPerSignalTables(t *testing.T) {
 
 	joined := strings.Join(store.execs, "\n")
 	for _, expected := range []string{
-		"CREATE TABLE IF NOT EXISTS sobs_ingest_traces",
-		"CREATE TABLE IF NOT EXISTS sobs_ingest_metrics",
-		"CREATE TABLE IF NOT EXISTS sobs_ingest_logs",
+		"CREATE TABLE IF NOT EXISTS otel_logs",
+		"CREATE TABLE IF NOT EXISTS otel_traces",
+		"CREATE TABLE IF NOT EXISTS otel_metrics_gauge",
+		"CREATE TABLE IF NOT EXISTS otel_metrics_sum",
+		"CREATE TABLE IF NOT EXISTS otel_metrics_histogram",
 		"CREATE TABLE IF NOT EXISTS sobs_ingest_opaque",
-		"INSERT INTO sobs_ingest_traces",
-		"INSERT INTO sobs_ingest_metrics",
-		"INSERT INTO sobs_ingest_logs",
 		"INSERT INTO sobs_ingest_opaque",
-		"INSERT INTO sobs_ingest_events",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected query containing %q, got:\n%s", expected, joined)
+		}
+	}
+	// Empty requests should produce no data INSERTs (nothing to insert).
+	for _, unexpected := range []string{
+		"INSERT INTO otel_logs",
+		"INSERT INTO otel_traces",
+		"INSERT INTO otel_metrics_gauge",
+		"INSERT INTO otel_metrics_sum",
+		"INSERT INTO otel_metrics_histogram",
+	} {
+		if strings.Contains(joined, unexpected) {
+			t.Fatalf("unexpected INSERT for empty request: %q", unexpected)
 		}
 	}
 }
