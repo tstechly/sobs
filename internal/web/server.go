@@ -212,6 +212,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/metrics/rules/", s.metricsRulesSubroutes)
 	mux.HandleFunc("/metrics/anomaly", s.metricsAnomalyPage)
 	mux.HandleFunc("/api/metrics/anomaly", s.apiMetricsAnomaly)
+	mux.HandleFunc("/api/metrics/summary", s.apiMetricsSummary)
+	mux.HandleFunc("/api/metrics/timeseries", s.apiMetricsTimeseries)
 	mux.HandleFunc("/api/logs/field-hints", s.apiLogsFieldHints)
 	mux.HandleFunc("/api/ai/field-hints", s.apiAIFieldHints)
 	mux.HandleFunc("/api/logs/validate-filter", s.apiLogsValidateFilter)

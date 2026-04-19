@@ -5,18 +5,6 @@ import (
 	"strings"
 )
 
-func (s *Server) metricsPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.renderer == nil || s.renderErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-		return
-	}
-	s.pageTemplateHandler("/metrics", "metrics.html")(w, r)
-}
-
 func (s *Server) errorsResolve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
