@@ -25,14 +25,14 @@ func TestKeyLifecycleAndAuthentication(t *testing.T) {
 	}
 }
 
-func TestExpiredKeyRejectedAndRateLimited(t *testing.T) {
+func TestExpiryMetadataIgnoredAndRateLimited(t *testing.T) {
 	svc := NewService()
 	_, raw, err := svc.CreateKey("expired", time.Now().UTC().Add(-time.Minute).Format(time.RFC3339))
 	if err != nil {
 		t.Fatalf("create expired key: %v", err)
 	}
-	if svc.Authenticate(raw) {
-		t.Fatal("expected expired key to fail authentication")
+	if !svc.Authenticate(raw) {
+		t.Fatal("expected authentication to ignore expires_at metadata like Python does")
 	}
 	for i := 0; i < 60; i++ {
 		if !svc.AllowRequest("127.0.0.1") {

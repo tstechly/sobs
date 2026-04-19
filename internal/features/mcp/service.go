@@ -3,11 +3,11 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,12 +15,17 @@ import (
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
+	"github.com/abartrim/sobs/internal/features/persist"
+	"golang.org/x/crypto/blake2b"
+	"golang.org/x/crypto/scrypt"
 )
 
 const (
 	apiKeyMax          = 20
 	rateLimitRequests  = 60
 	rateLimitWindowSec = 60
+	mcpAPIKeysSetting  = "mcp.api_keys"
+	mcpEnabledSetting  = "mcp.enabled"
 )
 
 type Key struct {
@@ -28,13 +33,11 @@ type Key struct {
 	Label     string `json:"label"`
 	CreatedAt string `json:"created_at"`
 	ExpiresAt string `json:"expires_at,omitempty"`
-	Hash      string `json:"-"`
+	Hash      string `json:"key_hash,omitempty"`
 }
 
 type Service struct {
 	mu         sync.Mutex
-	enabled    bool
-	keys       []Key
 	toolSpecs  []map[string]any
 	rateWindow map[string][]time.Time
 	storeFactory extensionpoints.StoreFactory
@@ -46,7 +49,6 @@ func NewService() *Service {
 
 func newBaseService() *Service {
 	return &Service{
-		enabled: true,
 		toolSpecs: []map[string]any{
 			toolSpec("list_services", "List all distinct service names that have sent telemetry to SOBS."),
 			toolSpec("query_otel_logs", "Query the otel_logs table with simple filters."),
@@ -57,7 +59,6 @@ func newBaseService() *Service {
 			toolSpec("get_anomaly_rules", "List configured anomaly detection rules."),
 			toolSpec("get_recent_errors", "List recent error events and spans."),
 		},
-		keys:       []Key{},
 		rateWindow: map[string][]time.Time{},
 	}
 }
@@ -106,48 +107,32 @@ func (s *Service) AllowRequest(ip string) bool {
 }
 
 func (s *Service) Enabled() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.enabled
+	return s.EnabledContext(context.Background())
 }
 
 func (s *Service) SetEnabled(enabled bool) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.enabled = enabled
-	return s.enabled
+	return s.SetEnabledContext(context.Background(), enabled)
 }
 
 func (s *Service) ListKeys() []Key {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Key, len(s.keys))
-	for i, key := range s.keys {
-		out[i] = safeKey(key)
-	}
-	return out
+	return s.ListKeysContext(context.Background())
 }
 
 func (s *Service) ListKeysWithHash() []Key {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Key, len(s.keys))
-	copy(out, s.keys)
-	return out
+	return s.listKeysWithHash(context.Background())
 }
 
 func (s *Service) ReplaceKeys(keys []Key) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next := make([]Key, len(keys))
-	copy(next, keys)
-	s.keys = next
+	_ = s.saveKeys(context.Background(), keys)
 }
 
 func (s *Service) CreateKey(label string, expiresAt string) (Key, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.keys) >= apiKeyMax {
+	return s.CreateKeyContext(context.Background(), label, expiresAt)
+	}
+
+func (s *Service) CreateKeyContext(ctx context.Context, label string, expiresAt string) (Key, string, error) {
+	keys := s.listKeysWithHash(ctx)
+	if len(keys) >= apiKeyMax {
 		return Key{}, "", fmt.Errorf("maximum of %d keys reached", apiKeyMax)
 	}
 	label = strings.TrimSpace(label)
@@ -163,90 +148,93 @@ func (s *Service) CreateKey(label string, expiresAt string) (Key, string, error)
 		ExpiresAt: strings.TrimSpace(expiresAt),
 		Hash:      hashKey(rawKey),
 	}
-	s.keys = append(s.keys, key)
+	keys = append(keys, key)
+	if err := s.saveKeys(ctx, keys); err != nil {
+		return Key{}, "", err
+	}
 	return safeKey(key), rawKey, nil
 }
 
 func (s *Service) DeleteKey(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, key := range s.keys {
+	return s.DeleteKeyContext(context.Background(), id)
+	}
+
+func (s *Service) DeleteKeyContext(ctx context.Context, id string) bool {
+	keys := s.listKeysWithHash(ctx)
+	for i, key := range keys {
 		if key.ID != id {
 			continue
 		}
-		s.keys = append(s.keys[:i], s.keys[i+1:]...)
-		return true
+		keys = append(keys[:i], keys[i+1:]...)
+		return s.saveKeys(ctx, keys) == nil
 	}
 	return false
 }
 
 func (s *Service) Authenticate(rawKey string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.AuthenticateContext(context.Background(), rawKey)
+	}
+
+func (s *Service) AuthenticateContext(ctx context.Context, rawKey string) bool {
 	if strings.TrimSpace(rawKey) == "" {
 		return false
 	}
 	hash := hashKey(strings.TrimSpace(rawKey))
-	now := time.Now().UTC()
-	for _, key := range s.keys {
+	for _, key := range s.listKeysWithHash(ctx) {
 		if key.Hash != hash {
 			continue
 		}
-		if key.ExpiresAt == "" {
-			return true
-		}
-		expiresAt, err := time.Parse(time.RFC3339, key.ExpiresAt)
-		if err != nil || expiresAt.After(now) {
-			return true
-		}
-		return false
+		return true
 	}
 	return false
 }
 
 func (s *Service) CallTool(name string, args map[string]any) (map[string]any, error) {
-	if s.storeFactory != nil {
-		return s.callToolStoreBacked(context.Background(), name, args)
+	return s.callToolStoreBacked(context.Background(), name, args)
+}
+
+func (s *Service) EnabledContext(ctx context.Context) bool {
+	value, ok, err := persist.GetAppSetting(ctx, s.storeFactory, mcpEnabledSetting)
+	if err != nil || !ok {
+		return true
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	supported := map[string]func(map[string]any) map[string]any{
-		"list_services": func(_ map[string]any) map[string]any {
-			return map[string]any{"services": []string{}}
-		},
-		"query_otel_logs": func(args map[string]any) map[string]any {
-			return map[string]any{"rows": []map[string]any{}, "filters": cloneMap(args)}
-		},
-		"query_otel_traces": func(args map[string]any) map[string]any {
-			return map[string]any{"rows": []map[string]any{}, "filters": cloneMap(args)}
-		},
-		"query_metrics": func(args map[string]any) map[string]any {
-			return map[string]any{"rows": []map[string]any{}, "filters": cloneMap(args)}
-		},
-		"query_metrics_raw": func(args map[string]any) map[string]any {
-			return map[string]any{"rows": []map[string]any{}, "filters": cloneMap(args)}
-		},
-		"get_metric_names": func(_ map[string]any) map[string]any {
-			return map[string]any{"metric_names": []string{}}
-		},
-		"get_anomaly_rules": func(_ map[string]any) map[string]any {
-			return map[string]any{"rules": []map[string]any{}}
-		},
-		"get_recent_errors": func(args map[string]any) map[string]any {
-			limit := args["limit"]
-			return map[string]any{"errors": []map[string]any{}, "limit": limit}
-		},
+	return strings.TrimSpace(value) == "1"
+}
+
+func (s *Service) SetEnabledContext(ctx context.Context, enabled bool) bool {
+	value := "0"
+	if enabled {
+		value = "1"
 	}
-	handler, ok := supported[name]
-	if !ok {
-		available := make([]string, 0, len(supported))
-		for tool := range supported {
-			available = append(available, tool)
-		}
-		sort.Strings(available)
-		return nil, fmt.Errorf("unknown tool: %s (available: %v)", name, available)
+	if err := persist.SetAppSetting(ctx, s.storeFactory, mcpEnabledSetting, value); err != nil {
+		return s.EnabledContext(ctx)
 	}
-	return handler(args), nil
+	return enabled
+}
+
+func (s *Service) ListKeysContext(ctx context.Context) []Key {
+	keys := s.listKeysWithHash(ctx)
+	out := make([]Key, len(keys))
+	for i, key := range keys {
+		out[i] = safeKey(key)
+	}
+	return out
+}
+
+func (s *Service) listKeysWithHash(ctx context.Context) []Key {
+	raw, ok, err := persist.GetAppSetting(ctx, s.storeFactory, mcpAPIKeysSetting)
+	if err != nil || !ok || strings.TrimSpace(raw) == "" {
+		return []Key{}
+	}
+	var keys []Key
+	if err := json.Unmarshal([]byte(raw), &keys); err != nil {
+		return []Key{}
+	}
+	return keys
+}
+
+func (s *Service) saveKeys(ctx context.Context, keys []Key) error {
+	return persist.SetAppSetting(ctx, s.storeFactory, mcpAPIKeysSetting, persist.JSONString(keys))
 }
 
 func (s *Service) callToolStoreBacked(ctx context.Context, name string, args map[string]any) (map[string]any, error) {
@@ -461,8 +449,22 @@ func collectRows(rows extensionpoints.RowIterator, columns []string) ([]map[stri
 }
 
 func hashKey(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
+	salt := mcpMACKey()
+	derived, err := scrypt.Key([]byte(raw), salt, 1024, 8, 1, 32)
+	if err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(derived)
+}
+
+func mcpMACKey() []byte {
+	secret := os.Getenv("SOBS_SECRET_KEY")
+	if strings.TrimSpace(secret) == "" {
+		secret = "sobs-dev-secret-key"
+	}
+	person := []byte("sobs-mcp-v1\x00\x00\x00\x00\x00")
+	sum := blake2b.Sum256(append([]byte{}, append([]byte(secret), person...)...))
+	return sum[:]
 }
 
 func safeKey(key Key) Key {
@@ -484,17 +486,6 @@ func randomHex(size int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(buf)
-}
-
-func cloneMap(input map[string]any) map[string]any {
-	if input == nil {
-		return map[string]any{}
-	}
-	out := make(map[string]any, len(input))
-	for key, value := range input {
-		out[key] = value
-	}
-	return out
 }
 
 var ErrUnauthorized = errors.New("unauthorized")
