@@ -93,7 +93,40 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) incidentHelpPage(w http.ResponseWriter, r *http.Request) {
 	s.renderStaticTemplatePage(w, r, "/incident/help", "incident_help.html", "incident/help", "Incident Help")
 }
-func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) { s.renderStaticTemplatePage(w, r, "/rum", "rum.html", "rum", "RUM") }
+func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/rum" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.renderer == nil || s.renderErr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "rum"})
+		return
+	}
+
+	services := []string{}
+	if listed, err := s.listServicesFromLogs(r); err == nil {
+		services = listed
+	}
+
+	ctx := pongo2.Context{
+		"title":                 "RUM",
+		"mobile_breakpoint_max": "575.98px",
+		"request":               map[string]any{"endpoint": "rum"},
+		"services":              services,
+		"selected_service":      strings.TrimSpace(r.URL.Query().Get("service")),
+		"from_ts":               strings.TrimSpace(r.URL.Query().Get("from_ts")),
+		"to_ts":                 strings.TrimSpace(r.URL.Query().Get("to_ts")),
+		"q":                     strings.TrimSpace(r.URL.Query().Get("q")),
+		"rows":                  []any{},
+		"total":                 0,
+		"error_msg":             "",
+	}
+	s.renderTemplate(w, "rum.html", ctx)
+}
 func (s *Server) rumHelpPage(w http.ResponseWriter, r *http.Request) {
 	s.renderStaticTemplatePage(w, r, "/rum/help", "rum_help.html", "rum/help", "RUM Help")
 }
@@ -153,7 +186,34 @@ func (s *Server) settingsTagsHelpPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settingsNotificationsPage(w http.ResponseWriter, r *http.Request) {
 	s.renderStaticTemplatePage(w, r, "/settings/notifications", "settings_notifications.html", "settings/notifications", "Settings Notifications")
 }
-func (s *Server) queryPage(w http.ResponseWriter, r *http.Request) { s.renderStaticTemplatePage(w, r, "/query", "query.html", "query", "Query") }
+func (s *Server) queryPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/query" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.renderer == nil || s.renderErr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": "query"})
+		return
+	}
+
+	tables := s.listTableNames(r.Context())
+	defaultSQL := suggestSQLForQuestion("show recent errors", tables)
+
+	ctx := pongo2.Context{
+		"title":                 "Query",
+		"mobile_breakpoint_max": "575.98px",
+		"request":               map[string]any{"endpoint": "query"},
+		"tables":                tables,
+		"default_sql":           defaultSQL,
+		"question":              "",
+		"error_msg":             "",
+	}
+	s.renderTemplate(w, "query.html", ctx)
+}
 func (s *Server) queryHelpPage(w http.ResponseWriter, r *http.Request) {
 	s.renderStaticTemplatePage(w, r, "/query/help", "query_help.html", "query/help", "Query Help")
 }
