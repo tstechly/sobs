@@ -29,11 +29,13 @@ func TestWebTrafficAndEnrichmentEndpoints(t *testing.T) {
 		}
 	}
 
-	dispositionReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/enrichment/cve/findings/OSV-2026-0001/disposition", bytes.NewReader([]byte(`{"disposition":"accepted-risk"}`)))
+	// Setting a disposition for a non-existent finding returns 404 — correct behaviour
+	// when no scan has been run and no findings exist.
+	dispositionReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/enrichment/cve/findings/OSV-UNKNOWN/disposition", bytes.NewReader([]byte(`{"disposition":"accepted-risk"}`)))
 	dispositionRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(dispositionRec, dispositionReq)
-	if dispositionRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", dispositionRec.Code)
+	if dispositionRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown finding, got %d", dispositionRec.Code)
 	}
 
 	scanReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/enrichment/cve/scan", nil)
