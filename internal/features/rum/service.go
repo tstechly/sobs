@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 )
 
 type Asset struct {
@@ -26,7 +28,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{assets: make(map[string]Asset), nextID: 1}
+	return NewFileService(defaultstore.NewDir("sobs-rum-assets-"))
 }
 
 func NewFileService(assetDir string) *Service {

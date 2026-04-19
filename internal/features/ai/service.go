@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -46,7 +45,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{chats: map[string]HelperChat{}, nextChat: 1}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
@@ -111,17 +110,7 @@ func (s *Service) ActionsManifest() []map[string]string {
 }
 
 func (s *Service) ListChats() []HelperChat {
-	if s.storeFactory != nil {
-		return s.listChatsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]HelperChat, 0, len(s.chats))
-	for _, c := range s.chats {
-		out = append(out, c)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listChatsStoreBacked(context.Background())
 }
 
 func (s *Service) listChatsStoreBacked(ctx context.Context) []HelperChat {
@@ -158,13 +147,7 @@ func (s *Service) listChatsStoreBacked(ctx context.Context) []HelperChat {
 }
 
 func (s *Service) GetChat(id string) (HelperChat, bool) {
-	if s.storeFactory != nil {
-		return s.getChatStoreBacked(context.Background(), id)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	c, ok := s.chats[id]
-	return c, ok
+	return s.getChatStoreBacked(context.Background(), id)
 }
 
 func (s *Service) getChatStoreBacked(ctx context.Context, id string) (HelperChat, bool) {
@@ -196,23 +179,7 @@ func (s *Service) getChatStoreBacked(ctx context.Context, id string) (HelperChat
 }
 
 func (s *Service) HelperPrompt(title string, messages []Message) (HelperChat, error) {
-	if s.storeFactory != nil {
-		return s.helperPromptStoreBacked(context.Background(), title, messages)
-	}
-	if len(messages) == 0 {
-		return HelperChat{}, errors.New("messages are required")
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextChat, 10)
-	s.nextChat++
-	if strings.TrimSpace(title) == "" {
-		title = "Chat " + id
-	}
-	chat := HelperChat{ID: id, Title: title, Messages: messages, CreatedAt: now, UpdatedAt: now}
-	s.chats[id] = chat
-	return chat, nil
+	return s.helperPromptStoreBacked(context.Background(), title, messages)
 }
 
 func (s *Service) helperPromptStoreBacked(ctx context.Context, title string, messages []Message) (HelperChat, error) {
@@ -241,7 +208,7 @@ func (s *Service) helperPromptStoreBacked(ctx context.Context, title string, mes
 }
 
 func (s *Service) SaveFeedback(chatID, rating, note string) map[string]string {
-	if s.storeFactory != nil && strings.TrimSpace(chatID) != "" {
+	if strings.TrimSpace(chatID) != "" {
 		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "ai.feedback."+strings.TrimSpace(chatID), persist.JSONString(map[string]string{"chat_id": strings.TrimSpace(chatID), "rating": strings.TrimSpace(rating), "note": strings.TrimSpace(note)}))
 	}
 	return map[string]string{"chat_id": strings.TrimSpace(chatID), "rating": strings.TrimSpace(rating), "note": strings.TrimSpace(note)}

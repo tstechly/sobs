@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -20,7 +21,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{settings: Settings{Enabled: true, DefaultNamespace: "default"}}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
@@ -28,62 +29,33 @@ func NewStoreService(factory extensionpoints.StoreFactory) *Service {
 }
 
 func (s *Service) GetSettings() Settings {
-	if s.storeFactory != nil {
-		return Settings{
-			Enabled:          kubernetesSettingBool(context.Background(), s.storeFactory, "kubernetes.enabled", true),
-			DefaultNamespace: kubernetesSettingString(context.Background(), s.storeFactory, "kubernetes.default_namespace", "default"),
-		}
+	return Settings{
+		Enabled:          kubernetesSettingBool(context.Background(), s.storeFactory, "kubernetes.enabled", true),
+		DefaultNamespace: kubernetesSettingString(context.Background(), s.storeFactory, "kubernetes.default_namespace", "default"),
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.settings
 }
 
 func (s *Service) SaveSettings(enabled bool, namespace string) Settings {
-	if s.storeFactory != nil {
-		if namespace == "" {
-			namespace = "default"
-		}
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "kubernetes.enabled", kubernetesBoolString(enabled))
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "kubernetes.default_namespace", namespace)
-		return Settings{Enabled: enabled, DefaultNamespace: namespace}
+	if namespace == "" {
+		namespace = "default"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.settings.Enabled = enabled
-	if namespace != "" {
-		s.settings.DefaultNamespace = namespace
-	}
-	return s.settings
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, "kubernetes.enabled", kubernetesBoolString(enabled))
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, "kubernetes.default_namespace", namespace)
+	return Settings{Enabled: enabled, DefaultNamespace: namespace}
 }
 
 func (s *Service) Status() map[string]any {
-	if s.storeFactory != nil {
-		settings := s.GetSettings()
-		if !settings.Enabled {
-			return map[string]any{"ok": false, "error": "Kubernetes health view is disabled."}
-		}
-		return map[string]any{
-			"ok": true,
-			"summary": map[string]any{"pods_total": 0, "deployments_total": 0, "nodes_total": 0, "namespaces_total": 1},
-			"pods": []map[string]any{},
-			"deployments": []map[string]any{},
-			"nodes": []map[string]any{},
-			"namespaces": []map[string]any{{"name": settings.DefaultNamespace, "status": "Configured"}},
-		}
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if !s.settings.Enabled {
+	settings := s.GetSettings()
+	if !settings.Enabled {
 		return map[string]any{"ok": false, "error": "Kubernetes health view is disabled."}
 	}
 	return map[string]any{
 		"ok": true,
-		"summary": map[string]any{"pods_total": 5, "deployments_total": 3, "nodes_total": 2, "namespaces_total": 2},
-		"pods": []map[string]any{{"name": "api-0", "namespace": s.settings.DefaultNamespace, "status": "Running"}},
-		"deployments": []map[string]any{{"name": "api", "namespace": s.settings.DefaultNamespace, "ready": "1/1"}},
-		"nodes": []map[string]any{{"name": "node-1", "status": "Ready"}},
-		"namespaces": []map[string]any{{"name": s.settings.DefaultNamespace, "status": "Active"}},
+		"summary": map[string]any{"pods_total": 0, "deployments_total": 0, "nodes_total": 0, "namespaces_total": 1},
+		"pods": []map[string]any{},
+		"deployments": []map[string]any{},
+		"nodes": []map[string]any{},
+		"namespaces": []map[string]any{{"name": settings.DefaultNamespace, "status": "Configured"}},
 	}
 }
 

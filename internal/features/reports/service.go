@@ -3,11 +3,10 @@ package reports
 import (
 	"context"
 	"errors"
-	"sort"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -30,7 +29,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{reports: make(map[string]Report), nextID: 1}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
@@ -55,17 +54,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) List() []Report {
-	if s.storeFactory != nil {
-		return s.listStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Report, 0, len(s.reports))
-	for _, r := range s.reports {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listStoreBacked(context.Background())
 }
 
 func (s *Service) listStoreBacked(ctx context.Context) []Report {
@@ -100,20 +89,7 @@ func (s *Service) listStoreBacked(ctx context.Context) []Report {
 }
 
 func (s *Service) Create(name, query string) (Report, error) {
-	if s.storeFactory != nil {
-		return s.createStoreBacked(context.Background(), name, query)
-	}
-	if name == "" {
-		return Report{}, errors.New("name is required")
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	r := Report{ID: id, Name: name, Query: query, CreatedAt: now, UpdatedAt: now}
-	s.reports[id] = r
-	return r, nil
+	return s.createStoreBacked(context.Background(), name, query)
 }
 
 func (s *Service) createStoreBacked(ctx context.Context, name string, query string) (Report, error) {
@@ -138,16 +114,7 @@ func (s *Service) createStoreBacked(ctx context.Context, name string, query stri
 }
 
 func (s *Service) Delete(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.reports[id]; !ok {
-		return false
-	}
-	delete(s.reports, id)
-	return true
+	return s.deleteStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
@@ -179,24 +146,7 @@ func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
 }
 
 func (s *Service) ReplaceAll(in []Report) {
-	if s.storeFactory != nil {
-		s.replaceAllStoreBacked(context.Background(), in)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.reports = make(map[string]Report, len(in))
-	var maxID int64
-	for _, r := range in {
-		s.reports[r.ID] = r
-		if n, err := strconv.ParseInt(r.ID, 10, 64); err == nil && n > maxID {
-			maxID = n
-		}
-	}
-	s.nextID = maxID + 1
-	if s.nextID < 1 {
-		s.nextID = 1
-	}
+	s.replaceAllStoreBacked(context.Background(), in)
 }
 
 func (s *Service) replaceAllStoreBacked(ctx context.Context, in []Report) {

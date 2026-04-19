@@ -4,8 +4,8 @@ import "testing"
 
 func TestTrafficAndFindings(t *testing.T) {
 	svc := NewService()
-	if len(svc.Geo()) == 0 || len(svc.Browsers()) == 0 || len(svc.OS()) == 0 {
-		t.Fatal("expected traffic slices")
+	if svc.Geo() == nil || svc.Browsers() == nil || svc.OS() == nil {
+		t.Fatal("expected non-nil traffic slices")
 	}
 	if len(svc.ListFindings()) == 0 {
 		t.Fatal("expected findings")

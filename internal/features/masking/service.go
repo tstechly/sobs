@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -27,12 +28,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{
-		keys:       map[string]struct{}{},
-		patterns:   map[string]struct{}{},
-		outputMode: "mask",
-		sqlOutput:  "masked",
-	}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {

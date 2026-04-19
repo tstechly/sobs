@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 )
 
@@ -40,6 +41,10 @@ type Service struct {
 }
 
 func NewService() *Service {
+	return NewStoreService(defaultstore.NewFactory())
+}
+
+func newBaseService() *Service {
 	return &Service{
 		enabled: true,
 		toolSpecs: []map[string]any{
@@ -58,7 +63,7 @@ func NewService() *Service {
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
-	svc := NewService()
+	svc := newBaseService()
 	svc.storeFactory = factory
 	return svc
 }

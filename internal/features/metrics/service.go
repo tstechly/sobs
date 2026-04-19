@@ -3,12 +3,12 @@ package metrics
 import (
 	"context"
 	"errors"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -31,7 +31,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{rules: map[string]Rule{}, nextID: 1}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
@@ -56,17 +56,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) ListRules() []Rule {
-	if s.storeFactory != nil {
-		return s.listRulesStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Rule, 0, len(s.rules))
-	for _, r := range s.rules {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listRulesStoreBacked(context.Background())
 }
 
 func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
@@ -97,19 +87,7 @@ func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
 }
 
 func (s *Service) CreateRule(name, query, threshold string) (Rule, error) {
-	if s.storeFactory != nil {
-		return s.createRuleStoreBacked(context.Background(), name, query, threshold)
-	}
-	if strings.TrimSpace(name) == "" {
-		return Rule{}, errors.New("name is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	r := Rule{ID: id, Name: strings.TrimSpace(name), Query: strings.TrimSpace(query), Threshold: strings.TrimSpace(threshold), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.rules[id] = r
-	return r, nil
+	return s.createRuleStoreBacked(context.Background(), name, query, threshold)
 }
 
 func (s *Service) createRuleStoreBacked(ctx context.Context, name, query, threshold string) (Rule, error) {
@@ -151,16 +129,7 @@ func (s *Service) createRuleStoreBacked(ctx context.Context, name, query, thresh
 }
 
 func (s *Service) DeleteRule(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteRuleStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.rules[id]; !ok {
-		return false
-	}
-	delete(s.rules, id)
-	return true
+	return s.deleteRuleStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteRuleStoreBacked(ctx context.Context, id string) bool {
@@ -210,10 +179,7 @@ func (s *Service) AutoDashboardRules() []Rule {
 }
 
 func (s *Service) AnomalySnapshot() map[string]any {
-	if s.storeFactory != nil {
-		return s.anomalySnapshotStoreBacked(context.Background())
-	}
-	return map[string]any{"ok": true, "anomalies": []map[string]any{{"metric": "p95_latency_ms", "current": 1200, "baseline": 450, "severity": "high"}}}
+	return s.anomalySnapshotStoreBacked(context.Background())
 }
 
 func (s *Service) anomalySnapshotStoreBacked(ctx context.Context) map[string]any {

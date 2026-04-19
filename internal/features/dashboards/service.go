@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -46,9 +47,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	s := &Service{items: make(map[string]Dashboard), chartsByDash: make(map[string]map[string]Chart), nextID: 1, nextChartID: 1}
-	s.seed()
-	return s
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {

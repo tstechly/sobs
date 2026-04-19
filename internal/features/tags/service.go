@@ -3,12 +3,11 @@ package tags
 import (
 	"context"
 	"errors"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -33,7 +32,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{rules: map[string]Rule{}, recordTags: map[string]map[string]string{}, nextID: 1}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
@@ -61,17 +60,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) ListRules() []Rule {
-	if s.storeFactory != nil {
-		return s.listRulesStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Rule, 0, len(s.rules))
-	for _, r := range s.rules {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listRulesStoreBacked(context.Background())
 }
 
 func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
@@ -102,22 +91,7 @@ func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
 }
 
 func (s *Service) CreateRule(name, condition, tagKey, tagValue string) (Rule, error) {
-	if s.storeFactory != nil {
-		return s.createRuleStoreBacked(context.Background(), name, condition, tagKey, tagValue)
-	}
-	if strings.TrimSpace(name) == "" {
-		return Rule{}, errors.New("name is required")
-	}
-	if strings.TrimSpace(tagKey) == "" {
-		return Rule{}, errors.New("tag_key is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	r := Rule{ID: id, Name: strings.TrimSpace(name), Condition: strings.TrimSpace(condition), TagKey: strings.TrimSpace(tagKey), TagValue: strings.TrimSpace(tagValue), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.rules[id] = r
-	return r, nil
+	return s.createRuleStoreBacked(context.Background(), name, condition, tagKey, tagValue)
 }
 
 func (s *Service) createRuleStoreBacked(ctx context.Context, name, condition, tagKey, tagValue string) (Rule, error) {
@@ -146,16 +120,7 @@ func (s *Service) createRuleStoreBacked(ctx context.Context, name, condition, ta
 }
 
 func (s *Service) DeleteRule(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteRuleStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.rules[id]; !ok {
-		return false
-	}
-	delete(s.rules, id)
-	return true
+	return s.deleteRuleStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteRuleStoreBacked(ctx context.Context, id string) bool {
@@ -213,18 +178,7 @@ func (s *Service) recordKey(recordType, recordID string) string {
 }
 
 func (s *Service) GetRecordTags(recordType, recordID string) map[string]string {
-	if s.storeFactory != nil {
-		return s.getRecordTagsStoreBacked(context.Background(), recordType, recordID)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	key := s.recordKey(recordType, recordID)
-	in := s.recordTags[key]
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
+	return s.getRecordTagsStoreBacked(context.Background(), recordType, recordID)
 }
 
 func (s *Service) getRecordTagsStoreBacked(ctx context.Context, recordType, recordID string) map[string]string {
@@ -254,21 +208,7 @@ func (s *Service) getRecordTagsStoreBacked(ctx context.Context, recordType, reco
 }
 
 func (s *Service) SetRecordTag(recordType, recordID, tagKey, tagValue string) bool {
-	if s.storeFactory != nil {
-		return s.setRecordTagStoreBacked(context.Background(), recordType, recordID, tagKey, tagValue)
-	}
-	tk := strings.TrimSpace(tagKey)
-	if tk == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := s.recordKey(recordType, recordID)
-	if _, ok := s.recordTags[key]; !ok {
-		s.recordTags[key] = map[string]string{}
-	}
-	s.recordTags[key][tk] = strings.TrimSpace(tagValue)
-	return true
+	return s.setRecordTagStoreBacked(context.Background(), recordType, recordID, tagKey, tagValue)
 }
 
 func (s *Service) setRecordTagStoreBacked(ctx context.Context, recordType, recordID, tagKey, tagValue string) bool {
@@ -289,24 +229,7 @@ func (s *Service) setRecordTagStoreBacked(ctx context.Context, recordType, recor
 }
 
 func (s *Service) DeleteRecordTag(recordType, recordID, tagKey string) bool {
-	if s.storeFactory != nil {
-		return s.deleteRecordTagStoreBacked(context.Background(), recordType, recordID, tagKey)
-	}
-	tk := strings.TrimSpace(tagKey)
-	if tk == "" {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := s.recordKey(recordType, recordID)
-	if _, ok := s.recordTags[key]; !ok {
-		return false
-	}
-	if _, ok := s.recordTags[key][tk]; !ok {
-		return false
-	}
-	delete(s.recordTags[key], tk)
-	return true
+	return s.deleteRecordTagStoreBacked(context.Background(), recordType, recordID, tagKey)
 }
 
 func (s *Service) deleteRecordTagStoreBacked(ctx context.Context, recordType, recordID, tagKey string) bool {

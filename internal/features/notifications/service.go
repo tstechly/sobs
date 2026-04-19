@@ -5,11 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"sort"
-	"strconv"
 	"sync"
-	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -41,7 +39,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	return &Service{items: make(map[string]Subscription), rules: make(map[string]Rule), nextRule: 1}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
@@ -69,18 +67,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) Subscribe(endpoint string) (Subscription, error) {
-	if s.storeFactory != nil {
-		return s.subscribeStoreBacked(context.Background(), endpoint)
-	}
-	if endpoint == "" {
-		return Subscription{}, errors.New("endpoint is required")
-	}
-	id := makeID()
-	sub := Subscription{ID: id, Endpoint: endpoint, Enabled: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.items[id] = sub
-	return sub, nil
+	return s.subscribeStoreBacked(context.Background(), endpoint)
 }
 
 func (s *Service) subscribeStoreBacked(ctx context.Context, endpoint string) (Subscription, error) {
@@ -112,76 +99,41 @@ func makeID() string {
 }
 
 func (s *Service) VAPIDPublicKey() string {
-	if s.storeFactory != nil {
-		if raw, ok, err := persist.GetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.public"); err == nil && ok {
-			return raw
-		}
-		return ""
+	if raw, ok, err := persist.GetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.public"); err == nil && ok {
+		return raw
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.vapidPub
+	return ""
 }
 
 func (s *Service) GenerateVAPIDKeys() (string, string) {
 	pub := makeID() + makeID()
 	priv := makeID() + makeID()
-	if s.storeFactory != nil {
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.public", pub)
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.private", priv)
-		return pub, priv
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.vapidPub = pub
-	s.vapidPriv = priv
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.public", pub)
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.private", priv)
 	return pub, priv
 }
 
 func (s *Service) DeleteVAPIDKeys() {
-	if s.storeFactory != nil {
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.public", "")
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.private", "")
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.vapidPub = ""
-	s.vapidPriv = ""
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.public", "")
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, "notifications.vapid.private", "")
 }
 
 func (s *Service) HasSubscription(id string) bool {
-	if s.storeFactory != nil {
-		store, err := persist.Open(context.Background(), s.storeFactory)
-		if err != nil {
-			return false
-		}
-		defer func() { _ = store.Close() }()
-		rows, err := store.Query(context.Background(), "SELECT 1 FROM sobs_notification_channels FINAL WHERE IsDeleted = 0 AND Id = ? LIMIT 1", id)
-		if err != nil {
-			return false
-		}
-		defer func() { _ = rows.Close() }()
-		return rows.Next()
+	store, err := persist.Open(context.Background(), s.storeFactory)
+	if err != nil {
+		return false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.items[id]
-	return ok
+	defer func() { _ = store.Close() }()
+	rows, err := store.Query(context.Background(), "SELECT 1 FROM sobs_notification_channels FINAL WHERE IsDeleted = 0 AND Id = ? LIMIT 1", id)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = rows.Close() }()
+	return rows.Next()
 }
 
 func (s *Service) ListSubscriptions() []Subscription {
-	if s.storeFactory != nil {
-		return s.listSubscriptionsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Subscription, 0, len(s.items))
-	for _, item := range s.items {
-		out = append(out, item)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listSubscriptionsStoreBacked(context.Background())
 }
 
 func (s *Service) listSubscriptionsStoreBacked(ctx context.Context) []Subscription {
@@ -213,18 +165,7 @@ func (s *Service) listSubscriptionsStoreBacked(ctx context.Context) []Subscripti
 }
 
 func (s *Service) ToggleSubscription(id string) (Subscription, bool) {
-	if s.storeFactory != nil {
-		return s.toggleSubscriptionStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sub, ok := s.items[id]
-	if !ok {
-		return Subscription{}, false
-	}
-	sub.Enabled = !sub.Enabled
-	s.items[id] = sub
-	return sub, true
+	return s.toggleSubscriptionStoreBacked(context.Background(), id)
 }
 
 func (s *Service) toggleSubscriptionStoreBacked(ctx context.Context, id string) (Subscription, bool) {
@@ -263,16 +204,7 @@ func (s *Service) toggleSubscriptionStoreBacked(ctx context.Context, id string) 
 }
 
 func (s *Service) DeleteSubscription(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteSubscriptionStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.items[id]; !ok {
-		return false
-	}
-	delete(s.items, id)
-	return true
+	return s.deleteSubscriptionStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteSubscriptionStoreBacked(ctx context.Context, id string) bool {
@@ -303,19 +235,7 @@ func (s *Service) deleteSubscriptionStoreBacked(ctx context.Context, id string) 
 }
 
 func (s *Service) CreateRule(name string) (Rule, error) {
-	if s.storeFactory != nil {
-		return s.createRuleStoreBacked(context.Background(), name)
-	}
-	if name == "" {
-		return Rule{}, errors.New("name is required")
-	}
-	id := strconv.FormatInt(s.nextRule, 10)
-	s.nextRule++
-	r := Rule{ID: id, Name: name, Enabled: true, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.rules[id] = r
-	return r, nil
+	return s.createRuleStoreBacked(context.Background(), name)
 }
 
 func (s *Service) createRuleStoreBacked(ctx context.Context, name string) (Rule, error) {
@@ -340,18 +260,7 @@ func (s *Service) createRuleStoreBacked(ctx context.Context, name string) (Rule,
 }
 
 func (s *Service) ToggleRule(id string) (Rule, bool) {
-	if s.storeFactory != nil {
-		return s.toggleRuleStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.rules[id]
-	if !ok {
-		return Rule{}, false
-	}
-	r.Enabled = !r.Enabled
-	s.rules[id] = r
-	return r, true
+	return s.toggleRuleStoreBacked(context.Background(), id)
 }
 
 func (s *Service) toggleRuleStoreBacked(ctx context.Context, id string) (Rule, bool) {
@@ -389,16 +298,7 @@ func (s *Service) toggleRuleStoreBacked(ctx context.Context, id string) (Rule, b
 }
 
 func (s *Service) DeleteRule(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteRuleStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.rules[id]; !ok {
-		return false
-	}
-	delete(s.rules, id)
-	return true
+	return s.deleteRuleStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteRuleStoreBacked(ctx context.Context, id string) bool {
@@ -438,17 +338,7 @@ func (s *Service) AutoGenerateRules() []Rule {
 }
 
 func (s *Service) ListRules() []Rule {
-	if s.storeFactory != nil {
-		return s.listRulesStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Rule, 0, len(s.rules))
-	for _, item := range s.rules {
-		out = append(out, item)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listRulesStoreBacked(context.Background())
 }
 
 func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {

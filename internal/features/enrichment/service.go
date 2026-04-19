@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
@@ -28,11 +29,7 @@ type Service struct {
 }
 
 func NewService() *Service {
-	now := time.Now().UTC().Format(time.RFC3339)
-	return &Service{findings: map[string]CVEFinding{
-		"OSV-2026-0001": {OSVID: "OSV-2026-0001", Package: "requests", Severity: "high", Disposition: "open", UpdatedAt: now},
-		"OSV-2026-0002": {OSVID: "OSV-2026-0002", Package: "openssl", Severity: "critical", Disposition: "open", UpdatedAt: now},
-	}}
+	return NewStoreService(defaultstore.NewFactory())
 }
 
 func NewStoreService(factory extensionpoints.StoreFactory) *Service {
