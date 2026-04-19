@@ -374,7 +374,19 @@ func (s *Server) notificationsCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	channels := s.notificationService.ListSubscriptions()
+	rules := s.notificationService.ListRules()
+	activeRules := 0
+	for _, item := range rules {
+		if item.Enabled {
+			activeRules++
+		}
+	}
+	triggered := 0
+	if len(channels) > 0 && activeRules > 0 {
+		triggered = activeRules
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true,"channels":0,"triggered":0}`))
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channels": len(channels), "rules": len(rules), "triggered": triggered})
 }

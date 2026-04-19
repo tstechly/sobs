@@ -82,11 +82,38 @@ func (s *Server) apiQueryRefineChart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	if strings.TrimSpace(req.Prompt) == "" {
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt is required"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "prompt": strings.TrimSpace(req.Prompt), "spec": req.Spec})
+	spec, ok := req.Spec.(map[string]any)
+	if !ok || spec == nil {
+		spec = map[string]any{}
+	}
+	lowerPrompt := strings.ToLower(prompt)
+	if strings.Contains(lowerPrompt, "line") {
+		spec["type"] = "line"
+	}
+	if strings.Contains(lowerPrompt, "bar") {
+		spec["type"] = "bar"
+	}
+	if strings.Contains(lowerPrompt, "area") {
+		spec["type"] = "area"
+	}
+	if strings.Contains(lowerPrompt, "table") {
+		spec["type"] = "table"
+	}
+	if strings.Contains(lowerPrompt, "stack") {
+		spec["stack"] = true
+	}
+	if strings.Contains(lowerPrompt, "sort") {
+		spec["sort"] = "desc"
+	}
+	if strings.Contains(lowerPrompt, "limit") {
+		spec["limit"] = 100
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "prompt": prompt, "spec": spec})
 }
 
 func (s *Server) apiQuerySchema(w http.ResponseWriter, r *http.Request) {

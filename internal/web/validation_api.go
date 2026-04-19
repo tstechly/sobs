@@ -1,9 +1,11 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -64,7 +66,8 @@ func (s *Server) apiLogsFieldHints(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"fields": []string{"service.name", "severity_text", "body", "trace_id", "span_id"}})
+	fields := s.schemaFieldHints("otel_logs", []string{"service.name", "severity_text", "body", "trace_id", "span_id"})
+	writeJSON(w, http.StatusOK, map[string]any{"fields": fields})
 }
 
 func (s *Server) apiAIFieldHints(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +75,30 @@ func (s *Server) apiAIFieldHints(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"fields": []string{"prompt", "model", "latency_ms", "token_count", "status"}})
+	fields := s.schemaFieldHints("otel_logs", []string{"prompt", "model", "latency_ms", "token_count", "status"})
+	writeJSON(w, http.StatusOK, map[string]any{"fields": fields})
+}
+
+func (s *Server) schemaFieldHints(table string, defaults []string) []string {
+	set := map[string]struct{}{}
+	for _, name := range s.listTableColumns(context.Background(), table) {
+		norm := strings.TrimSpace(strings.ToLower(name))
+		if norm != "" {
+			set[norm] = struct{}{}
+		}
+	}
+	for _, name := range defaults {
+		norm := strings.TrimSpace(strings.ToLower(name))
+		if norm != "" {
+			set[norm] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) apiLogsValidateFilter(w http.ResponseWriter, r *http.Request) {
