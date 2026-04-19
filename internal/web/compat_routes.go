@@ -53,16 +53,8 @@ var pageRouteTemplates = map[string]string{
 }
 
 func (s *Server) registerCompatibilityRoutes(mux *http.ServeMux) {
-	// Wire dedicated handlers for core data pages
-	mux.HandleFunc("/logs", s.pageLogsHandler)
-	mux.HandleFunc("/errors", s.pageErrorsHandler)
-	mux.HandleFunc("/traces", s.pageTracesHandler)
-
-	// Fallback to generic template handler for remaining pages
+	// Register all template-based pages with generic handler
 	for path, tpl := range pageRouteTemplates {
-		if path == "/logs" || path == "/errors" || path == "/traces" {
-			continue // Skip, already registered
-		}
 		mux.HandleFunc(path, s.pageTemplateHandler(path, tpl))
 	}
 }
