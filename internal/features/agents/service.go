@@ -3,8 +3,6 @@ package agents
 import (
 	"context"
 	"errors"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,13 +40,6 @@ type Rule struct {
 }
 
 type Service struct {
-	mu        sync.RWMutex
-	runs      map[string]Run
-	issues    map[string]Issue
-	rules     map[string]Rule
-	nextRun   int64
-	nextIssue int64
-	nextRule  int64
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -86,17 +77,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) ListRuns() []Run {
-	if s.storeFactory != nil {
-		return s.listRunsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Run, 0, len(s.runs))
-	for _, r := range s.runs {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listRunsStoreBacked(context.Background())
 }
 
 func (s *Service) listRunsStoreBacked(ctx context.Context) []Run {
@@ -125,19 +106,7 @@ func (s *Service) listRunsStoreBacked(ctx context.Context) []Run {
 }
 
 func (s *Service) CreateRun(title string) (Run, error) {
-	if s.storeFactory != nil {
-		return s.createRunStoreBacked(context.Background(), title)
-	}
-	if title == "" {
-		return Run{}, errors.New("title is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextRun, 10)
-	s.nextRun++
-	r := Run{ID: id, Title: title, Status: "open", CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.runs[id] = r
-	return r, nil
+	return s.createRunStoreBacked(context.Background(), title)
 }
 
 func (s *Service) createRunStoreBacked(ctx context.Context, title string) (Run, error) {
@@ -162,18 +131,7 @@ func (s *Service) createRunStoreBacked(ctx context.Context, title string) (Run, 
 }
 
 func (s *Service) DismissRun(id string) (Run, bool) {
-	if s.storeFactory != nil {
-		return s.dismissRunStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.runs[id]
-	if !ok {
-		return Run{}, false
-	}
-	r.Status = "dismissed"
-	s.runs[id] = r
-	return r, true
+	return s.dismissRunStoreBacked(context.Background(), id)
 }
 
 func (s *Service) dismissRunStoreBacked(ctx context.Context, id string) (Run, bool) {
@@ -206,19 +164,7 @@ func (s *Service) dismissRunStoreBacked(ctx context.Context, id string) (Run, bo
 }
 
 func (s *Service) RaiseIssue(title, body string) (Issue, error) {
-	if s.storeFactory != nil {
-		return s.raiseIssueStoreBacked(context.Background(), title, body)
-	}
-	if title == "" {
-		return Issue{}, errors.New("title is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextIssue, 10)
-	s.nextIssue++
-	iss := Issue{ID: id, Title: title, Body: body, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.issues[id] = iss
-	return iss, nil
+	return s.raiseIssueStoreBacked(context.Background(), title, body)
 }
 
 func (s *Service) raiseIssueStoreBacked(ctx context.Context, title, body string) (Issue, error) {
@@ -243,17 +189,7 @@ func (s *Service) raiseIssueStoreBacked(ctx context.Context, title, body string)
 }
 
 func (s *Service) ListRules() []Rule {
-	if s.storeFactory != nil {
-		return s.listRulesStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Rule, 0, len(s.rules))
-	for _, r := range s.rules {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listRulesStoreBacked(context.Background())
 }
 
 func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
@@ -288,45 +224,7 @@ func (s *Service) listRulesStoreBacked(ctx context.Context) []Rule {
 }
 
 func (s *Service) CreateRule(name, description, triggerType, triggerRefID, triggerState string, actions []string, rateLimitMinutes int) (Rule, error) {
-	if s.storeFactory != nil {
-		return s.createRuleStoreBacked(context.Background(), name, description, triggerType, triggerRefID, triggerState, actions, rateLimitMinutes)
-	}
-	if name == "" {
-		return Rule{}, errors.New("name is required")
-	}
-	if triggerType == "" {
-		triggerType = "manual"
-	}
-	if triggerState == "" {
-		triggerState = "any"
-	}
-	if len(actions) == 0 {
-		actions = []string{"analyze"}
-	}
-	if rateLimitMinutes < 1 {
-		rateLimitMinutes = 1
-	}
-	if rateLimitMinutes > 10080 {
-		rateLimitMinutes = 10080
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextRule, 10)
-	s.nextRule++
-	r := Rule{
-		ID:               id,
-		Name:             name,
-		Description:      description,
-		TriggerType:      triggerType,
-		TriggerRefID:     triggerRefID,
-		TriggerState:     triggerState,
-		Actions:          actions,
-		RateLimitMinutes: rateLimitMinutes,
-		Enabled:          true,
-		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
-	}
-	s.rules[id] = r
-	return r, nil
+	return s.createRuleStoreBacked(context.Background(), name, description, triggerType, triggerRefID, triggerState, actions, rateLimitMinutes)
 }
 
 func (s *Service) createRuleStoreBacked(ctx context.Context, name, description, triggerType, triggerRefID, triggerState string, actions []string, rateLimitMinutes int) (Rule, error) {
@@ -364,16 +262,7 @@ func (s *Service) createRuleStoreBacked(ctx context.Context, name, description, 
 }
 
 func (s *Service) DeleteRule(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteRuleStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.rules[id]; !ok {
-		return false
-	}
-	delete(s.rules, id)
-	return true
+	return s.deleteRuleStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteRuleStoreBacked(ctx context.Context, id string) bool {

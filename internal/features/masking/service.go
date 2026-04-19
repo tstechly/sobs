@@ -4,7 +4,6 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -19,11 +18,6 @@ const (
 )
 
 type Service struct {
-	mu         sync.RWMutex
-	keys       map[string]struct{}
-	patterns   map[string]struct{}
-	outputMode string
-	sqlOutput  string
 	storeFactory extensionpoints.StoreFactory
 }
 
@@ -36,17 +30,7 @@ func NewStoreService(factory extensionpoints.StoreFactory) *Service {
 }
 
 func (s *Service) ListRules() map[string]any {
-	if s.storeFactory != nil {
-		return s.listRulesStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return map[string]any{
-		"keys":       setToSortedSlice(s.keys),
-		"patterns":   setToSortedSlice(s.patterns),
-		"output_mode": s.outputMode,
-		"sql_output":  s.sqlOutput,
-	}
+	return s.listRulesStoreBacked(context.Background())
 }
 
 func (s *Service) listRulesStoreBacked(ctx context.Context) map[string]any {
@@ -73,15 +57,9 @@ func (s *Service) AddKey(key string) bool {
 	if k == "" {
 		return false
 	}
-	if s.storeFactory != nil {
-		keys := loadStringSetSetting(context.Background(), s.storeFactory, customKeysSetting)
-		keys[k] = struct{}{}
-		return saveStringSetSetting(context.Background(), s.storeFactory, customKeysSetting, keys) == nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.keys[k] = struct{}{}
-	return true
+	keys := loadStringSetSetting(context.Background(), s.storeFactory, customKeysSetting)
+	keys[k] = struct{}{}
+	return saveStringSetSetting(context.Background(), s.storeFactory, customKeysSetting, keys) == nil
 }
 
 func (s *Service) DeleteKey(key string) bool {
@@ -89,21 +67,12 @@ func (s *Service) DeleteKey(key string) bool {
 	if k == "" {
 		return false
 	}
-	if s.storeFactory != nil {
-		keys := loadStringSetSetting(context.Background(), s.storeFactory, customKeysSetting)
-		if _, ok := keys[k]; !ok {
-			return false
-		}
-		delete(keys, k)
-		return saveStringSetSetting(context.Background(), s.storeFactory, customKeysSetting, keys) == nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.keys[k]; !ok {
+	keys := loadStringSetSetting(context.Background(), s.storeFactory, customKeysSetting)
+	if _, ok := keys[k]; !ok {
 		return false
 	}
-	delete(s.keys, k)
-	return true
+	delete(keys, k)
+	return saveStringSetSetting(context.Background(), s.storeFactory, customKeysSetting, keys) == nil
 }
 
 func (s *Service) AddPattern(pattern string) bool {
@@ -111,15 +80,9 @@ func (s *Service) AddPattern(pattern string) bool {
 	if p == "" {
 		return false
 	}
-	if s.storeFactory != nil {
-		patterns := loadStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting)
-		patterns[p] = struct{}{}
-		return saveStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting, patterns) == nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.patterns[p] = struct{}{}
-	return true
+	patterns := loadStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting)
+	patterns[p] = struct{}{}
+	return saveStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting, patterns) == nil
 }
 
 func (s *Service) DeletePattern(pattern string) bool {
@@ -127,21 +90,12 @@ func (s *Service) DeletePattern(pattern string) bool {
 	if p == "" {
 		return false
 	}
-	if s.storeFactory != nil {
-		patterns := loadStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting)
-		if _, ok := patterns[p]; !ok {
-			return false
-		}
-		delete(patterns, p)
-		return saveStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting, patterns) == nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.patterns[p]; !ok {
+	patterns := loadStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting)
+	if _, ok := patterns[p]; !ok {
 		return false
 	}
-	delete(s.patterns, p)
-	return true
+	delete(patterns, p)
+	return saveStringSetSetting(context.Background(), s.storeFactory, customPatternsSetting, patterns) == nil
 }
 
 func (s *Service) SetOutputMode(mode string) {
@@ -149,13 +103,7 @@ func (s *Service) SetOutputMode(mode string) {
 	if m == "" {
 		m = "mask"
 	}
-	if s.storeFactory != nil {
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, outputEnabledSetting, m)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.outputMode = m
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, outputEnabledSetting, m)
 }
 
 func (s *Service) SetSQLOutput(mode string) {
@@ -163,34 +111,16 @@ func (s *Service) SetSQLOutput(mode string) {
 	if m == "" {
 		m = "masked"
 	}
-	if s.storeFactory != nil {
-		_ = persist.SetAppSetting(context.Background(), s.storeFactory, sqlOutputEnabledSetting, m)
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sqlOutput = m
+	_ = persist.SetAppSetting(context.Background(), s.storeFactory, sqlOutputEnabledSetting, m)
 }
 
 func (s *Service) Preview(input string) map[string]string {
-	if s.storeFactory != nil {
-		rules := s.listRulesStoreBacked(context.Background())
-		masked := input
-		for _, key := range toStringSlice(rules["keys"]) {
-			masked = strings.ReplaceAll(masked, key, "***")
-		}
-		for _, pattern := range toStringSlice(rules["patterns"]) {
-			masked = strings.ReplaceAll(masked, pattern, "***")
-		}
-		return map[string]string{"input": input, "output": masked}
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	rules := s.listRulesStoreBacked(context.Background())
 	masked := input
-	for key := range s.keys {
+	for _, key := range toStringSlice(rules["keys"]) {
 		masked = strings.ReplaceAll(masked, key, "***")
 	}
-	for pattern := range s.patterns {
+	for _, pattern := range toStringSlice(rules["patterns"]) {
 		masked = strings.ReplaceAll(masked, pattern, "***")
 	}
 	return map[string]string{"input": input, "output": masked}

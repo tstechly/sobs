@@ -30,11 +30,6 @@ type Issue struct {
 }
 
 type Service struct {
-	mu         sync.RWMutex
-	repos      map[string]Repo
-	issuesByRepo map[string][]Issue
-	nextAppID  int64
-	nextIssue  int
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -90,35 +85,7 @@ func slugify(name string) string {
 }
 
 func (s *Service) CreateRepo(name, slug, repoURL, owner, repo string) (Repo, error) {
-	if s.storeFactory != nil {
-		return s.createRepoStoreBacked(context.Background(), name, slug, repoURL, owner, repo)
-	}
-	if strings.TrimSpace(name) == "" {
-		return Repo{}, errors.New("App name and repository are required")
-	}
-	if strings.TrimSpace(repoURL) == "" && (strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "") {
-		return Repo{}, errors.New("App name and repository are required")
-	}
-	if owner == "" || repo == "" {
-		o, r := parseOwnerRepo(repoURL)
-		owner, repo = o, r
-	}
-	if owner == "" || repo == "" {
-		return Repo{}, errors.New("Enter a valid GitHub owner and repository name")
-	}
-	if repoURL == "" {
-		repoURL = "https://github.com/" + owner + "/" + repo
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextAppID, 10)
-	s.nextAppID++
-	if strings.TrimSpace(slug) == "" {
-		slug = slugify(name)
-	}
-	r := Repo{AppID: id, Name: name, Slug: slug, RepoURL: repoURL, Owner: owner, Repo: repo}
-	s.repos[id] = r
-	return r, nil
+	return s.createRepoStoreBacked(context.Background(), name, slug, repoURL, owner, repo)
 }
 
 func (s *Service) createRepoStoreBacked(ctx context.Context, name, slug, repoURL, owner, repo string) (Repo, error) {
@@ -181,20 +148,7 @@ func (s *Service) ImportRepo(repoURL, owner, repo string) (map[string]any, error
 }
 
 func (s *Service) ListRepos(owner string) []map[string]any {
-	if s.storeFactory != nil {
-		return s.listReposStoreBacked(context.Background(), owner)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := []map[string]any{}
-	for _, r := range s.repos {
-		if owner != "" && !strings.EqualFold(r.Owner, owner) {
-			continue
-		}
-		out = append(out, map[string]any{"name": r.Repo, "full_name": r.Owner + "/" + r.Repo, "repo_url": r.RepoURL, "private": false})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i]["name"].(string) < out[j]["name"].(string) })
-	return out
+	return s.listReposStoreBacked(context.Background(), owner)
 }
 
 func (s *Service) listReposStoreBacked(ctx context.Context, owner string) []map[string]any {
@@ -231,26 +185,7 @@ func (s *Service) listReposStoreBacked(ctx context.Context, owner string) []map[
 }
 
 func (s *Service) InspectRepo(appID, repoParam string) (map[string]any, int, string) {
-	if s.storeFactory != nil {
-		return s.inspectRepoStoreBacked(context.Background(), appID, repoParam)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	owner := ""
-	repo := ""
-	if appID != "" {
-		r, ok := s.repos[appID]
-		if !ok {
-			return nil, 404, "App not found"
-		}
-		owner, repo = r.Owner, r.Repo
-	} else {
-		owner, repo = parseOwnerRepo(repoParam)
-		if owner == "" || repo == "" {
-			return nil, 400, "app_id or repo parameter required"
-		}
-	}
-	return map[string]any{"ok": true, "owner": owner, "repo": repo, "has_github_actions": true, "sobs_ci_found": false, "sobs_otel_found": false, "copilot_available": false, "workflow_files": []string{"ci.yml"}, "error": ""}, 200, ""
+	return s.inspectRepoStoreBacked(context.Background(), appID, repoParam)
 }
 
 func (s *Service) inspectRepoStoreBacked(ctx context.Context, appID, repoParam string) (map[string]any, int, string) {
@@ -272,48 +207,7 @@ func (s *Service) inspectRepoStoreBacked(ctx context.Context, appID, repoParam s
 }
 
 func (s *Service) CreateIssues(appID, repoParam string, createCI, createOTEL bool) (map[string]any, int, string) {
-	if s.storeFactory != nil {
-		return s.createIssuesStoreBacked(context.Background(), appID, repoParam, createCI, createOTEL)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	owner := ""
-	repo := ""
-	if appID != "" {
-		r, ok := s.repos[appID]
-		if !ok {
-			return nil, 404, "App not found"
-		}
-		owner, repo = r.Owner, r.Repo
-	} else {
-		owner, repo = parseOwnerRepo(repoParam)
-	}
-	if owner == "" || repo == "" {
-		return nil, 400, "app_id or repo parameter required"
-	}
-	if !createCI && !createOTEL {
-		return nil, 400, "Select at least one issue type or enable realtime support"
-	}
-	key := owner + "/" + repo
-	issues := s.issuesByRepo[key]
-	res := map[string]any{"ok": true, "ci_issue": nil, "otel_issue": nil, "realtime": nil}
-	mkIssue := func(title string) Issue {
-		n := s.nextIssue
-		s.nextIssue++
-		return Issue{Number: n, Title: title, State: "open", URL: "https://github.com/" + key + "/issues/" + strconv.Itoa(n)}
-	}
-	if createCI {
-		iss := mkIssue("Sobs CI Metadata Setup")
-		issues = append(issues, iss)
-		res["ci_issue"] = iss
-	}
-	if createOTEL {
-		iss := mkIssue("OTEL & RUM Telemetry Audit")
-		issues = append(issues, iss)
-		res["otel_issue"] = iss
-	}
-	s.issuesByRepo[key] = issues
-	return res, 200, ""
+	return s.createIssuesStoreBacked(context.Background(), appID, repoParam, createCI, createOTEL)
 }
 
 func (s *Service) createIssuesStoreBacked(ctx context.Context, appID, repoParam string, createCI, createOTEL bool) (map[string]any, int, string) {

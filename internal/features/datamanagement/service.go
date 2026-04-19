@@ -3,11 +3,8 @@ package datamanagement
 import (
 	"context"
 	"encoding/json"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -31,10 +28,6 @@ type Backup struct {
 }
 
 type Service struct {
-	mu       sync.RWMutex
-	settings Settings
-	backups  map[string]Backup
-	nextID   int64
 	storeFactory extensionpoints.StoreFactory
 }
 
@@ -47,12 +40,7 @@ func NewStoreService(factory extensionpoints.StoreFactory) *Service {
 }
 
 func (s *Service) GetSettings() Settings {
-	if s.storeFactory != nil {
-		return s.getSettingsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.settings
+	return s.getSettingsStoreBacked(context.Background())
 }
 
 func (s *Service) getSettingsStoreBacked(ctx context.Context) Settings {
@@ -67,25 +55,7 @@ func (s *Service) getSettingsStoreBacked(ctx context.Context) Settings {
 }
 
 func (s *Service) SaveSettings(st Settings) Settings {
-	if s.storeFactory != nil {
-		return s.saveSettingsStoreBacked(context.Background(), st)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if st.TTLLogsDays <= 0 {
-		st.TTLLogsDays = 30
-	}
-	if st.TTLTracesDays <= 0 {
-		st.TTLTracesDays = 30
-	}
-	if st.TTLMetricsHours <= 0 {
-		st.TTLMetricsHours = 168
-	}
-	if st.TTLSessionsDays <= 0 {
-		st.TTLSessionsDays = 30
-	}
-	s.settings = st
-	return s.settings
+	return s.saveSettingsStoreBacked(context.Background(), st)
 }
 
 func (s *Service) saveSettingsStoreBacked(ctx context.Context, st Settings) Settings {
@@ -111,17 +81,7 @@ func (s *Service) saveSettingsStoreBacked(ctx context.Context, st Settings) Sett
 }
 
 func (s *Service) ListBackups() []Backup {
-	if s.storeFactory != nil {
-		return s.listBackupsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Backup, 0, len(s.backups))
-	for _, b := range s.backups {
-		out = append(out, b)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name > out[j].Name })
-	return out
+	return s.listBackupsStoreBacked(context.Background())
 }
 
 func (s *Service) listBackupsStoreBacked(ctx context.Context) []Backup {
@@ -160,21 +120,7 @@ func (s *Service) listBackupsStoreBacked(ctx context.Context) []Backup {
 }
 
 func (s *Service) RunBackup(kind string) (Backup, bool, string) {
-	if s.storeFactory != nil {
-		return s.runBackupStoreBacked(context.Background(), kind)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.settings.BackupEnabled {
-		return Backup{}, false, "Backup feature is disabled"
-	}
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	now := time.Now().UTC().Format(time.RFC3339)
-	name := "sobs-" + kind + "-" + id
-	b := Backup{Name: name, Status: "BACKUP_COMPLETE", StartedAt: now, EndedAt: now}
-	s.backups[name] = b
-	return b, true, "backup started"
+	return s.runBackupStoreBacked(context.Background(), kind)
 }
 
 func (s *Service) runBackupStoreBacked(ctx context.Context, kind string) (Backup, bool, string) {
@@ -198,21 +144,7 @@ func (s *Service) runBackupStoreBacked(ctx context.Context, kind string) (Backup
 }
 
 func (s *Service) Restore(name string) (bool, string) {
-	if s.storeFactory != nil {
-		return s.restoreStoreBacked(context.Background(), name)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if !s.settings.BackupEnabled {
-		return false, "Backup feature is disabled"
-	}
-	if name == "" {
-		return false, "backup_name is required"
-	}
-	if _, ok := s.backups[name]; !ok {
-		return false, "backup not found"
-	}
-	return true, "restore started"
+	return s.restoreStoreBacked(context.Background(), name)
 }
 
 func (s *Service) restoreStoreBacked(ctx context.Context, name string) (bool, string) {

@@ -7,8 +7,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
-	"sync"
 	"time"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
@@ -21,9 +19,6 @@ type Asset struct {
 }
 
 type Service struct {
-	mu     sync.RWMutex
-	assets map[string]Asset
-	nextID int64
 	assetDir string
 }
 
@@ -37,19 +32,7 @@ func NewFileService(assetDir string) *Service {
 }
 
 func (s *Service) CreateAsset(content string) (Asset, error) {
-	if s.assetDir != "" {
-		return s.createFileBackedAsset(content)
-	}
-	if content == "" {
-		return Asset{}, errors.New("content is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	a := Asset{ID: id, Content: content, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.assets[id] = a
-	return a, nil
+	return s.createFileBackedAsset(content)
 }
 
 func (s *Service) createFileBackedAsset(content string) (Asset, error) {
@@ -68,13 +51,7 @@ func (s *Service) createFileBackedAsset(content string) (Asset, error) {
 }
 
 func (s *Service) GetAsset(id string) (Asset, bool) {
-	if s.assetDir != "" {
-		return s.getFileBackedAsset(id)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	a, ok := s.assets[id]
-	return a, ok
+	return s.getFileBackedAsset(id)
 }
 
 func (s *Service) getFileBackedAsset(id string) (Asset, bool) {
@@ -90,12 +67,7 @@ func (s *Service) getFileBackedAsset(id string) (Asset, bool) {
 }
 
 func (s *Service) NewClientToken() string {
-	if s.assetDir != "" {
-		return newClientToken()
-	}
-	buf := make([]byte, 16)
-	_, _ = rand.Read(buf)
-	return hex.EncodeToString(buf)
+	return newClientToken()
 }
 
 func newClientToken() string {

@@ -3,8 +3,6 @@ package dashboards
 import (
 	"context"
 	"errors"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,11 +34,6 @@ type QueryResult struct {
 }
 
 type Service struct {
-	mu          sync.RWMutex
-	items       map[string]Dashboard
-	chartsByDash map[string]map[string]Chart
-	nextID      int64
-	nextChartID int64
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -89,26 +82,8 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 	return s.schemaErr
 }
 
-func (s *Service) seed() {
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.items["1"] = Dashboard{ID: "1", Name: "Default Dashboard", Description: "Seed dashboard", CreatedAt: now}
-	s.chartsByDash["1"] = map[string]Chart{}
-	s.nextID = 2
-	s.nextChartID = 1
-}
-
 func (s *Service) List() []Dashboard {
-	if s.storeFactory != nil {
-		return s.listStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Dashboard, 0, len(s.items))
-	for _, d := range s.items {
-		out = append(out, d)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listStoreBacked(context.Background())
 }
 
 func (s *Service) listStoreBacked(ctx context.Context) []Dashboard {
@@ -139,20 +114,7 @@ func (s *Service) listStoreBacked(ctx context.Context) []Dashboard {
 }
 
 func (s *Service) Create(name, description string) (Dashboard, error) {
-	if s.storeFactory != nil {
-		return s.createStoreBacked(context.Background(), name, description)
-	}
-	if strings.TrimSpace(name) == "" {
-		return Dashboard{}, errors.New("name is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	d := Dashboard{ID: id, Name: strings.TrimSpace(name), Description: strings.TrimSpace(description), CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.items[id] = d
-	s.chartsByDash[id] = map[string]Chart{}
-	return d, nil
+	return s.createStoreBacked(context.Background(), name, description)
 }
 
 func (s *Service) createStoreBacked(ctx context.Context, name, description string) (Dashboard, error) {
@@ -178,13 +140,7 @@ func (s *Service) createStoreBacked(ctx context.Context, name, description strin
 }
 
 func (s *Service) Get(id string) (Dashboard, bool) {
-	if s.storeFactory != nil {
-		return s.getStoreBacked(context.Background(), id)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	d, ok := s.items[id]
-	return d, ok
+	return s.getStoreBacked(context.Background(), id)
 }
 
 func (s *Service) getStoreBacked(ctx context.Context, id string) (Dashboard, bool) {
@@ -214,17 +170,7 @@ func (s *Service) getStoreBacked(ctx context.Context, id string) (Dashboard, boo
 }
 
 func (s *Service) Delete(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.items[id]; !ok {
-		return false
-	}
-	delete(s.items, id)
-	delete(s.chartsByDash, id)
-	return true
+	return s.deleteStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
@@ -253,31 +199,7 @@ func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
 }
 
 func (s *Service) AddChart(dashboardID, title, chartType string, spec map[string]any) (Chart, error) {
-	if s.storeFactory != nil {
-		return s.addChartStoreBacked(context.Background(), dashboardID, title, chartType, spec)
-	}
-	if strings.TrimSpace(title) == "" {
-		return Chart{}, errors.New("title is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.items[dashboardID]; !ok {
-		return Chart{}, errors.New("dashboard not found")
-	}
-	if _, ok := s.chartsByDash[dashboardID]; !ok {
-		s.chartsByDash[dashboardID] = map[string]Chart{}
-	}
-	id := strconv.FormatInt(s.nextChartID, 10)
-	s.nextChartID++
-	if strings.TrimSpace(chartType) == "" {
-		chartType = "line"
-	}
-	if spec == nil {
-		spec = map[string]any{}
-	}
-	c := Chart{ID: id, DashboardID: dashboardID, Title: strings.TrimSpace(title), Type: strings.TrimSpace(chartType), Spec: spec, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.chartsByDash[dashboardID][id] = c
-	return c, nil
+	return s.addChartStoreBacked(context.Background(), dashboardID, title, chartType, spec)
 }
 
 func (s *Service) addChartStoreBacked(ctx context.Context, dashboardID, title, chartType string, spec map[string]any) (Chart, error) {
@@ -310,30 +232,7 @@ func (s *Service) addChartStoreBacked(ctx context.Context, dashboardID, title, c
 }
 
 func (s *Service) EditChart(dashboardID, chartID, title, chartType string, spec map[string]any) (Chart, bool) {
-	if s.storeFactory != nil {
-		return s.editChartStoreBacked(context.Background(), dashboardID, chartID, title, chartType, spec)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	charts, ok := s.chartsByDash[dashboardID]
-	if !ok {
-		return Chart{}, false
-	}
-	c, ok := charts[chartID]
-	if !ok {
-		return Chart{}, false
-	}
-	if strings.TrimSpace(title) != "" {
-		c.Title = strings.TrimSpace(title)
-	}
-	if strings.TrimSpace(chartType) != "" {
-		c.Type = strings.TrimSpace(chartType)
-	}
-	if spec != nil {
-		c.Spec = spec
-	}
-	charts[chartID] = c
-	return c, true
+	return s.editChartStoreBacked(context.Background(), dashboardID, chartID, title, chartType, spec)
 }
 
 func (s *Service) editChartStoreBacked(ctx context.Context, dashboardID, chartID, title, chartType string, spec map[string]any) (Chart, bool) {
@@ -373,49 +272,16 @@ func (s *Service) editChartStoreBacked(ctx context.Context, dashboardID, chartID
 }
 
 func (s *Service) CloneChart(dashboardID, chartID string) (Chart, bool) {
-	if s.storeFactory != nil {
-		chart, ok := s.ExportChart(dashboardID, chartID)
-		if !ok {
-			return Chart{}, false
-		}
-		clone, err := s.addChartStoreBacked(context.Background(), dashboardID, chart.Title+" (Copy)", chart.Type, chart.Spec)
-		return clone, err == nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	charts, ok := s.chartsByDash[dashboardID]
+	chart, ok := s.ExportChart(dashboardID, chartID)
 	if !ok {
 		return Chart{}, false
 	}
-	c, ok := charts[chartID]
-	if !ok {
-		return Chart{}, false
-	}
-	id := strconv.FormatInt(s.nextChartID, 10)
-	s.nextChartID++
-	clone := c
-	clone.ID = id
-	clone.Title = c.Title + " (Copy)"
-	clone.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	charts[id] = clone
-	return clone, true
+	clone, err := s.addChartStoreBacked(context.Background(), dashboardID, chart.Title+" (Copy)", chart.Type, chart.Spec)
+	return clone, err == nil
 }
 
 func (s *Service) DeleteChart(dashboardID, chartID string) bool {
-	if s.storeFactory != nil {
-		return s.deleteChartStoreBacked(context.Background(), dashboardID, chartID)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	charts, ok := s.chartsByDash[dashboardID]
-	if !ok {
-		return false
-	}
-	if _, ok := charts[chartID]; !ok {
-		return false
-	}
-	delete(charts, chartID)
-	return true
+	return s.deleteChartStoreBacked(context.Background(), dashboardID, chartID)
 }
 
 func (s *Service) deleteChartStoreBacked(ctx context.Context, dashboardID, chartID string) bool {
@@ -441,17 +307,7 @@ func (s *Service) deleteChartStoreBacked(ctx context.Context, dashboardID, chart
 }
 
 func (s *Service) ExportChart(dashboardID, chartID string) (Chart, bool) {
-	if s.storeFactory != nil {
-		return s.exportChartStoreBacked(context.Background(), dashboardID, chartID)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	charts, ok := s.chartsByDash[dashboardID]
-	if !ok {
-		return Chart{}, false
-	}
-	c, ok := charts[chartID]
-	return c, ok
+	return s.exportChartStoreBacked(context.Background(), dashboardID, chartID)
 }
 
 func (s *Service) exportChartStoreBacked(ctx context.Context, dashboardID, chartID string) (Chart, bool) {
@@ -480,38 +336,11 @@ func (s *Service) exportChartStoreBacked(ctx context.Context, dashboardID, chart
 }
 
 func (s *Service) ImportCharts(dashboardID string, charts []Chart) int {
-	if s.storeFactory != nil {
-		count := 0
-		for _, chart := range charts {
-			if _, err := s.addChartStoreBacked(context.Background(), dashboardID, chart.Title, chart.Type, chart.Spec); err == nil {
-				count++
-			}
-		}
-		return count
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.items[dashboardID]; !ok {
-		return 0
-	}
-	if _, ok := s.chartsByDash[dashboardID]; !ok {
-		s.chartsByDash[dashboardID] = map[string]Chart{}
-	}
 	count := 0
-	for _, in := range charts {
-		id := strconv.FormatInt(s.nextChartID, 10)
-		s.nextChartID++
-		if strings.TrimSpace(in.Title) == "" {
-			in.Title = "Imported Chart"
+	for _, chart := range charts {
+		if _, err := s.addChartStoreBacked(context.Background(), dashboardID, chart.Title, chart.Type, chart.Spec); err == nil {
+			count++
 		}
-		if strings.TrimSpace(in.Type) == "" {
-			in.Type = "line"
-		}
-		in.ID = id
-		in.DashboardID = dashboardID
-		in.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.chartsByDash[dashboardID][id] = in
-		count++
 	}
 	return count
 }

@@ -3,11 +3,8 @@ package apps
 import (
 	"context"
 	"errors"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -44,14 +41,6 @@ type Artifact struct {
 }
 
 type Service struct {
-	mu            sync.RWMutex
-	apps          map[string]App
-	releasesByApp map[string][]Release
-	releaseByID   map[string]Release
-	artifactsByRelease map[string][]Artifact
-	nextAppID     int64
-	nextReleaseID int64
-	nextArtifactID int64
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -89,19 +78,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) ListApps() []App {
-	if s.storeFactory != nil {
-		return s.listAppsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]App, 0, len(s.apps))
-	for _, a := range s.apps {
-		out = append(out, a)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ID < out[j].ID
-	})
-	return out
+	return s.listAppsStoreBacked(context.Background())
 }
 
 func (s *Service) listAppsStoreBacked(ctx context.Context) []App {
@@ -130,20 +107,7 @@ func (s *Service) listAppsStoreBacked(ctx context.Context) []App {
 }
 
 func (s *Service) CreateApp(name string) (App, error) {
-	if s.storeFactory != nil {
-		return s.createAppStoreBacked(context.Background(), name)
-	}
-	if name == "" {
-		return App{}, errors.New("name is required")
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextAppID, 10)
-	s.nextAppID++
-	a := App{ID: id, Name: name, CreatedAt: now, UpdatedAt: now}
-	s.apps[id] = a
-	return a, nil
+	return s.createAppStoreBacked(context.Background(), name)
 }
 
 func (s *Service) createAppStoreBacked(ctx context.Context, name string) (App, error) {
@@ -168,13 +132,7 @@ func (s *Service) createAppStoreBacked(ctx context.Context, name string) (App, e
 }
 
 func (s *Service) GetApp(id string) (App, bool) {
-	if s.storeFactory != nil {
-		return s.getAppStoreBacked(context.Background(), id)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	a, ok := s.apps[id]
-	return a, ok
+	return s.getAppStoreBacked(context.Background(), id)
 }
 
 func (s *Service) getAppStoreBacked(ctx context.Context, id string) (App, bool) {
@@ -202,21 +160,7 @@ func (s *Service) getAppStoreBacked(ctx context.Context, id string) (App, bool) 
 }
 
 func (s *Service) PatchApp(id string, name *string) (App, error) {
-	if s.storeFactory != nil {
-		return s.patchAppStoreBacked(context.Background(), id, name)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a, ok := s.apps[id]
-	if !ok {
-		return App{}, errors.New("not found")
-	}
-	if name != nil {
-		a.Name = *name
-	}
-	a.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.apps[id] = a
-	return a, nil
+	return s.patchAppStoreBacked(context.Background(), id, name)
 }
 
 func (s *Service) patchAppStoreBacked(ctx context.Context, id string, name *string) (App, error) {
@@ -253,15 +197,7 @@ func (s *Service) patchAppStoreBacked(ctx context.Context, id string, name *stri
 }
 
 func (s *Service) ListReleases(appID string) []Release {
-	if s.storeFactory != nil {
-		return s.listReleasesStoreBacked(context.Background(), appID)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	in := s.releasesByApp[appID]
-	out := make([]Release, len(in))
-	copy(out, in)
-	return out
+	return s.listReleasesStoreBacked(context.Background(), appID)
 }
 
 func (s *Service) listReleasesStoreBacked(ctx context.Context, appID string) []Release {
@@ -290,23 +226,7 @@ func (s *Service) listReleasesStoreBacked(ctx context.Context, appID string) []R
 }
 
 func (s *Service) CreateRelease(appID string, version string) (Release, error) {
-	if s.storeFactory != nil {
-		return s.createReleaseStoreBacked(context.Background(), appID, version)
-	}
-	if version == "" {
-		return Release{}, errors.New("version is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.apps[appID]; !ok {
-		return Release{}, errors.New("app not found")
-	}
-	id := strconv.FormatInt(s.nextReleaseID, 10)
-	s.nextReleaseID++
-	r := Release{ID: id, AppID: appID, Version: version, CreatedAt: time.Now().UTC().Format(time.RFC3339)}
-	s.releasesByApp[appID] = append(s.releasesByApp[appID], r)
-	s.releaseByID[id] = r
-	return r, nil
+	return s.createReleaseStoreBacked(context.Background(), appID, version)
 }
 
 func (s *Service) createReleaseStoreBacked(ctx context.Context, appID string, version string) (Release, error) {
@@ -334,13 +254,7 @@ func (s *Service) createReleaseStoreBacked(ctx context.Context, appID string, ve
 }
 
 func (s *Service) GetRelease(releaseID string) (Release, bool) {
-	if s.storeFactory != nil {
-		return s.getReleaseStoreBacked(context.Background(), releaseID)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	r, ok := s.releaseByID[releaseID]
-	return r, ok
+	return s.getReleaseStoreBacked(context.Background(), releaseID)
 }
 
 func (s *Service) getReleaseStoreBacked(ctx context.Context, releaseID string) (Release, bool) {
@@ -368,15 +282,7 @@ func (s *Service) getReleaseStoreBacked(ctx context.Context, releaseID string) (
 }
 
 func (s *Service) ListArtifacts(releaseID string) []Artifact {
-	if s.storeFactory != nil {
-		return s.listArtifactsStoreBacked(context.Background(), releaseID)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	in := s.artifactsByRelease[releaseID]
-	out := make([]Artifact, len(in))
-	copy(out, in)
-	return out
+	return s.listArtifactsStoreBacked(context.Background(), releaseID)
 }
 
 func (s *Service) listArtifactsStoreBacked(ctx context.Context, releaseID string) []Artifact {
@@ -407,35 +313,7 @@ func (s *Service) listArtifactsStoreBacked(ctx context.Context, releaseID string
 }
 
 func (s *Service) CreateArtifact(releaseID, artifactType, name, contentType string, size uint64, storageRef, checksumSHA256, platform, architecture string, metadata map[string]any) (Artifact, error) {
-	if s.storeFactory != nil {
-		return s.createArtifactStoreBacked(context.Background(), releaseID, artifactType, name, contentType, size, storageRef, checksumSHA256, platform, architecture, metadata)
-	}
-	if strings.TrimSpace(releaseID) == "" || strings.TrimSpace(artifactType) == "" || strings.TrimSpace(name) == "" {
-		return Artifact{}, errors.New("release_id, artifact_type, and name are required")
-	}
-	if _, ok := s.releaseByID[releaseID]; !ok {
-		return Artifact{}, errors.New("release not found")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextArtifactID, 10)
-	s.nextArtifactID++
-	item := Artifact{
-		ID:             id,
-		ReleaseID:      releaseID,
-		ArtifactType:   strings.TrimSpace(artifactType),
-		Name:           strings.TrimSpace(name),
-		ContentType:    strings.TrimSpace(contentType),
-		Size:           size,
-		StorageRef:     strings.TrimSpace(storageRef),
-		ChecksumSHA256: strings.TrimSpace(checksumSHA256),
-		Platform:       strings.TrimSpace(platform),
-		Architecture:   strings.TrimSpace(architecture),
-		Metadata:       metadata,
-		UploadedAt:     time.Now().UTC().Format(time.RFC3339),
-	}
-	s.artifactsByRelease[releaseID] = append(s.artifactsByRelease[releaseID], item)
-	return item, nil
+	return s.createArtifactStoreBacked(context.Background(), releaseID, artifactType, name, contentType, size, storageRef, checksumSHA256, platform, architecture, metadata)
 }
 
 func (s *Service) createArtifactStoreBacked(ctx context.Context, releaseID, artifactType, name, contentType string, size uint64, storageRef, checksumSHA256, platform, architecture string, metadata map[string]any) (Artifact, error) {

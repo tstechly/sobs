@@ -5,11 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -28,9 +25,6 @@ type Repository struct {
 }
 
 type Service struct {
-	mu      sync.RWMutex
-	items   map[string]Repository
-	nextID  int64
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -65,17 +59,7 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) List() []Repository {
-	if s.storeFactory != nil {
-		return s.listStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Repository, 0, len(s.items))
-	for _, r := range s.items {
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
+	return s.listStoreBacked(context.Background())
 }
 
 func (s *Service) listStoreBacked(ctx context.Context) []Repository {
@@ -121,20 +105,7 @@ func (s *Service) listStoreBacked(ctx context.Context) []Repository {
 }
 
 func (s *Service) Create(name, url string) (Repository, error) {
-	if s.storeFactory != nil {
-		return s.createStoreBacked(context.Background(), name, url)
-	}
-	if strings.TrimSpace(name) == "" {
-		return Repository{}, errors.New("name is required")
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := strconv.FormatInt(s.nextID, 10)
-	s.nextID++
-	r := Repository{ID: id, Name: name, URL: url, Realtime: false, CIIngestKey: newSecret(), Releases: []string{}, CreatedAt: now, UpdatedAt: now}
-	s.items[id] = r
-	return r, nil
+	return s.createStoreBacked(context.Background(), name, url)
 }
 
 func (s *Service) createStoreBacked(ctx context.Context, name, url string) (Repository, error) {
@@ -161,24 +132,7 @@ func (s *Service) createStoreBacked(ctx context.Context, name, url string) (Repo
 }
 
 func (s *Service) Update(id, name, url string) (Repository, bool) {
-	if s.storeFactory != nil {
-		return s.updateStoreBacked(context.Background(), id, name, url)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.items[id]
-	if !ok {
-		return Repository{}, false
-	}
-	if strings.TrimSpace(name) != "" {
-		r.Name = name
-	}
-	if strings.TrimSpace(url) != "" {
-		r.URL = url
-	}
-	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.items[id] = r
-	return r, true
+	return s.updateStoreBacked(context.Background(), id, name, url)
 }
 
 func (s *Service) updateStoreBacked(ctx context.Context, id, name, url string) (Repository, bool) {
@@ -207,16 +161,7 @@ func (s *Service) updateStoreBacked(ctx context.Context, id, name, url string) (
 }
 
 func (s *Service) Delete(id string) bool {
-	if s.storeFactory != nil {
-		return s.deleteStoreBacked(context.Background(), id)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.items[id]; !ok {
-		return false
-	}
-	delete(s.items, id)
-	return true
+	return s.deleteStoreBacked(context.Background(), id)
 }
 
 func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
@@ -234,78 +179,28 @@ func (s *Service) deleteStoreBacked(ctx context.Context, id string) bool {
 }
 
 func (s *Service) SetRealtime(id string, enabled bool) (Repository, bool) {
-	if s.storeFactory != nil {
-		repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
-			repo.Realtime = enabled
-		})
-		return repo, ok
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.items[id]
-	if !ok {
-		return Repository{}, false
-	}
-	r.Realtime = enabled
-	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.items[id] = r
-	return r, true
+	repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
+		repo.Realtime = enabled
+	})
+	return repo, ok
 }
 
 func (s *Service) RotateCIIngestKey(id string) (Repository, bool) {
-	if s.storeFactory != nil {
-		repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
-			repo.CIIngestKey = newSecret()
-		})
-		return repo, ok
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.items[id]
-	if !ok {
-		return Repository{}, false
-	}
-	r.CIIngestKey = newSecret()
-	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.items[id] = r
-	return r, true
+	repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
+		repo.CIIngestKey = newSecret()
+	})
+	return repo, ok
 }
 
 func (s *Service) RevokeCIIngestKey(id string) (Repository, bool) {
-	if s.storeFactory != nil {
-		repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
-			repo.CIIngestKey = ""
-		})
-		return repo, ok
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.items[id]
-	if !ok {
-		return Repository{}, false
-	}
-	r.CIIngestKey = ""
-	r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.items[id] = r
-	return r, true
+	repo, ok := s.updateMetadataStoreBacked(context.Background(), id, func(repo *Repository) {
+		repo.CIIngestKey = ""
+	})
+	return repo, ok
 }
 
 func (s *Service) AddRelease(id, release string) (Repository, bool) {
-	if s.storeFactory != nil {
-		return s.addReleaseStoreBacked(context.Background(), id, release)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r, ok := s.items[id]
-	if !ok {
-		return Repository{}, false
-	}
-	if strings.TrimSpace(release) != "" {
-		r.Releases = append(r.Releases, release)
-		r.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.items[id] = r
-	}
-	return r, true
+	return s.addReleaseStoreBacked(context.Background(), id, release)
 }
 
 func (s *Service) addReleaseStoreBacked(ctx context.Context, id, release string) (Repository, bool) {

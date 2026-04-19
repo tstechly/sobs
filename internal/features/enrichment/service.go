@@ -2,10 +2,8 @@ package enrichment
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -21,8 +19,6 @@ type CVEFinding struct {
 }
 
 type Service struct {
-	mu       sync.RWMutex
-	findings map[string]CVEFinding
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -75,73 +71,39 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 }
 
 func (s *Service) Geo() []map[string]any {
-	if s.storeFactory != nil {
-		return s.aggregateTelemetry(context.Background(), "LogAttributes['client.geo.country']", "country")
-	}
-	return []map[string]any{{"country": "US", "count": 120}, {"country": "DE", "count": 30}, {"country": "IN", "count": 45}}
+	return s.aggregateTelemetry(context.Background(), "LogAttributes['client.geo.country']", "country")
 }
 
 func (s *Service) Browsers() []map[string]any {
-	if s.storeFactory != nil {
-		return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.browserName']", "browser")
-	}
-	return []map[string]any{{"browser": "Chrome", "count": 140}, {"browser": "Firefox", "count": 28}, {"browser": "Safari", "count": 20}}
+	return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.browserName']", "browser")
 }
 
 func (s *Service) OS() []map[string]any {
-	if s.storeFactory != nil {
-		return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.osName']", "os")
-	}
-	return []map[string]any{{"os": "macOS", "count": 60}, {"os": "Linux", "count": 75}, {"os": "Windows", "count": 53}}
+	return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.osName']", "os")
 }
 
 func (s *Service) Timezones() []map[string]any {
-	if s.storeFactory != nil {
-		return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.timezone']", "timezone")
-	}
-	return []map[string]any{{"timezone": "UTC", "count": 41}, {"timezone": "America/New_York", "count": 52}, {"timezone": "Europe/Berlin", "count": 18}}
+	return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.timezone']", "timezone")
 }
 
 func (s *Service) Languages() []map[string]any {
-	if s.storeFactory != nil {
-		return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.language']", "language")
-	}
-	return []map[string]any{{"language": "en-US", "count": 130}, {"language": "de-DE", "count": 16}, {"language": "fr-FR", "count": 11}}
+	return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.language']", "language")
 }
 
 func (s *Service) Devices() []map[string]any {
-	if s.storeFactory != nil {
-		return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.deviceClass']", "device")
-	}
-	return []map[string]any{{"device": "desktop", "count": 155}, {"device": "mobile", "count": 61}, {"device": "tablet", "count": 9}}
+	return s.aggregateTelemetry(context.Background(), "LogAttributes['browser.context.deviceClass']", "device")
 }
 
 func (s *Service) Libraries() []map[string]any {
-	if s.storeFactory != nil {
-		return s.listLibrariesStoreBacked(context.Background())
-	}
-	return []map[string]any{{"name": "flask", "version": "3.1.0"}, {"name": "clickhouse-connect", "version": "0.8.18"}, {"name": "requests", "version": "2.32.0"}}
+	return s.listLibrariesStoreBacked(context.Background())
 }
 
 func (s *Service) GitHubRepoHealth() map[string]any {
-	if s.storeFactory != nil {
-		return s.repoHealthStoreBacked(context.Background())
-	}
-	return map[string]any{"status": "ok", "repos": 3, "token_valid": true}
+	return s.repoHealthStoreBacked(context.Background())
 }
 
 func (s *Service) ListFindings() []CVEFinding {
-	if s.storeFactory != nil {
-		return s.listFindingsStoreBacked(context.Background())
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]CVEFinding, 0, len(s.findings))
-	for _, f := range s.findings {
-		out = append(out, f)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].OSVID < out[j].OSVID })
-	return out
+	return s.listFindingsStoreBacked(context.Background())
 }
 
 func (s *Service) listFindingsStoreBacked(ctx context.Context) []CVEFinding {
@@ -188,30 +150,11 @@ func (s *Service) listFindingsStoreBacked(ctx context.Context) []CVEFinding {
 }
 
 func (s *Service) SetDisposition(osvID, disposition string) (CVEFinding, bool) {
-	if s.storeFactory != nil {
-		return s.setDispositionStoreBacked(context.Background(), osvID, disposition)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f, ok := s.findings[osvID]
-	if !ok {
-		return CVEFinding{}, false
-	}
-	d := strings.TrimSpace(disposition)
-	if d == "" {
-		d = "open"
-	}
-	f.Disposition = d
-	f.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.findings[osvID] = f
-	return f, true
+	return s.setDispositionStoreBacked(context.Background(), osvID, disposition)
 }
 
 func (s *Service) Scan() map[string]any {
-	if s.storeFactory != nil {
-		return s.scanStoreBacked(context.Background())
-	}
-	return map[string]any{"ok": true, "scanned": len(s.findings)}
+	return s.scanStoreBacked(context.Background())
 }
 
 func (s *Service) aggregateTelemetry(ctx context.Context, expr, field string) []map[string]any {
