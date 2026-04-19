@@ -34,27 +34,32 @@ func sameOriginRequest(r *http.Request, trustedProxyMode bool) bool {
 	}
 	expectedOrigin := strings.ToLower(expectedScheme + "://" + expectedHost)
 
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin != "" {
-		u, err := url.Parse(origin)
-		if err == nil && u.Host != "" && u.Scheme != "" {
-			if strings.EqualFold(strings.ToLower(u.Scheme+"://"+u.Host), expectedOrigin) {
-				return true
-			}
-		}
-	}
-
-	referer := strings.TrimSpace(r.Header.Get("Referer"))
-	if referer != "" {
-		u, err := url.Parse(referer)
-		if err == nil && u.Host != "" && u.Scheme != "" {
-			if strings.EqualFold(strings.ToLower(u.Scheme+"://"+u.Host), expectedOrigin) {
-				return true
-			}
-		}
+	actualOrigin := requestOriginFromHeaders(r.Header.Get("Origin"), r.Header.Get("Referer"))
+	if actualOrigin != "" && strings.EqualFold(actualOrigin, expectedOrigin) {
+		return true
 	}
 
 	return false
+}
+
+func normalizeOrigin(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+func requestOriginFromHeaders(originHeader string, refererHeader string) string {
+	origin := normalizeOrigin(originHeader)
+	if origin != "" {
+		return origin
+	}
+	return normalizeOrigin(refererHeader)
 }
 
 func sessionTokenFromRequest(r *http.Request, sessionCookieName string) string {

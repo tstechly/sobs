@@ -35,7 +35,6 @@ import (
 
 type Server struct {
 	cfg                 config.Config
-	authProvider        extensionpoints.AuthProvider
 	storeFactory        extensionpoints.StoreFactory
 	renderer            *templates.Renderer
 	renderErr           error
@@ -60,7 +59,7 @@ type Server struct {
 	reportService       *reports.Service
 }
 
-func NewServer(cfg config.Config, authProvider extensionpoints.AuthProvider, storeFactory extensionpoints.StoreFactory) *Server {
+func NewServer(cfg config.Config, _ extensionpoints.AuthProvider, storeFactory extensionpoints.StoreFactory) *Server {
 	renderer, err := templates.NewRenderer(cfg.TemplateRoot)
 	if _, ok := storeFactory.(*storepkg.NoopStoreFactory); ok {
 		if tmpPath, tmpErr := os.MkdirTemp("", "sobs-chdb-"); tmpErr == nil {
@@ -90,7 +89,6 @@ func NewServer(cfg config.Config, authProvider extensionpoints.AuthProvider, sto
 	otlpHTTP := otlpreceiver.NewHTTPServerWithPipeline(otlpreceiver.NewStorePipeline(storeFactory))
 	return &Server{
 		cfg:                 cfg,
-		authProvider:        authProvider,
 		storeFactory:        storeFactory,
 		renderer:            renderer,
 		renderErr:           err,

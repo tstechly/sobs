@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,7 +21,7 @@ func TestRUMAssetsAndClientToken(t *testing.T) {
 	body := []byte("asset")
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 	bodyHash := sha256.Sum256(body)
-	payload := stringsJoin([]string{
+	payload := strings.Join([]string{
 		"POST",
 		"/v1/rum/assets",
 		ts,
@@ -94,7 +95,7 @@ func TestRUMSignedAssetUploadAndDownload(t *testing.T) {
 	body := []byte("png-bytes")
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 	bodyHash := sha256.Sum256(body)
-	payload := stringsJoin([]string{
+	payload := strings.Join([]string{
 		"POST",
 		"/v1/rum/assets",
 		ts,
@@ -140,13 +141,3 @@ func TestRUMSignedAssetUploadAndDownload(t *testing.T) {
 	}
 }
 
-func stringsJoin(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	out := parts[0]
-	for i := 1; i < len(parts); i++ {
-		out += sep + parts[i]
-	}
-	return out
-}

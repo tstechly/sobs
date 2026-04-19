@@ -133,7 +133,7 @@ func (s *Server) v1RUMClientToken(w http.ResponseWriter, r *http.Request) {
 
 	origin := strings.TrimSpace(stringVal(payload, "origin", ""))
 	if origin == "" {
-		origin = requestOrigin(r)
+		origin = requestOriginFromHeaders(r.Header.Get("Origin"), r.Header.Get("Referer"))
 	}
 	if origin == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "origin is required"})
@@ -163,34 +163,6 @@ func (s *Server) v1RUMClientToken(w http.ResponseWriter, r *http.Request) {
 		"app":       appName,
 	})
 }
-
-// requestOrigin derives the request origin from Origin or Referer headers,
-// matching Python's _request_origin().
-func requestOrigin(r *http.Request) string {
-	if origin := r.Header.Get("Origin"); origin != "" {
-		return normalizeOrigin(origin)
-	}
-	if referer := r.Header.Get("Referer"); referer != "" {
-		// Extract scheme://host from referer.
-		if idx := strings.Index(referer, "://"); idx != -1 {
-			rest := referer[idx+3:]
-			if end := strings.IndexAny(rest, "/?#"); end != -1 {
-				return strings.ToLower(referer[:idx+3+end])
-			}
-			return strings.ToLower(referer)
-		}
-	}
-	return ""
-}
-
-func normalizeOrigin(origin string) string {
-	origin = strings.TrimSpace(origin)
-	if origin == "" {
-		return ""
-	}
-	return strings.ToLower(origin)
-}
-
 func stringVal(m map[string]any, key, def string) string {
 	if v, ok := m[key]; ok {
 		if s, ok := v.(string); ok {
