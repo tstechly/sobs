@@ -14,9 +14,28 @@ import (
 )
 
 func TestRUMAssetsAndClientToken(t *testing.T) {
+	t.Setenv("SOBS_RUM_ASSET_SIGNING_KEY", "test-signing-key")
 	srv := newTestServer()
 
-	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum/assets", bytes.NewReader([]byte(`{"content":"asset"}`)))
+	body := []byte("asset")
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	bodyHash := sha256.Sum256(body)
+	payload := stringsJoin([]string{
+		"POST",
+		"/v1/rum/assets",
+		ts,
+		fmt.Sprintf("%x", bodyHash[:]),
+		"application/octet-stream",
+		"asset",
+		"asset",
+	}, "\n")
+	mac := hmac.New(sha256.New, []byte("test-signing-key"))
+	_, _ = mac.Write([]byte(payload))
+	sig := fmt.Sprintf("%x", mac.Sum(nil))
+
+	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum/assets", bytes.NewReader(body))
+	createReq.Header.Set("X-SOBS-Asset-Timestamp", ts)
+	createReq.Header.Set("X-SOBS-Asset-Signature", sig)
 	createRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(createRec, createReq)
 	if createRec.Code != http.StatusCreated {
@@ -53,6 +72,18 @@ func TestRUMAssetsAndClientToken(t *testing.T) {
 	enabled, _ := tokenResp["enabled"].(bool)
 	if enabled {
 		t.Fatal("expected enabled=false when auth mode is none")
+	}
+}
+
+func TestRUMAssetUploadRequiresSignatureHeaders(t *testing.T) {
+	t.Setenv("SOBS_RUM_ASSET_SIGNING_KEY", "test-signing-key")
+	srv := newTestServer()
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum/assets", bytes.NewReader([]byte("asset")))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
 

@@ -16,10 +16,6 @@ import (
 
 var rumAssetIDRegex = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
-type createRUMAssetRequest struct {
-	Content string `json:"content"`
-}
-
 func (s *Server) v1RUMAssets(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -30,22 +26,18 @@ func (s *Server) v1RUMAssets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
+	if len(body) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "asset body is required"})
+		return
+	}
+	if len(body) > rumAssetMaxBytes() {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "asset exceeds max allowed size"})
+		return
+	}
 
 	contentType := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
 	if contentType == "" {
 		contentType = "application/octet-stream"
-	}
-
-	// Backward compatibility for tests and older clients posting {"content": "..."}.
-	var req createRUMAssetRequest
-	if err := json.Unmarshal(body, &req); err == nil && strings.TrimSpace(req.Content) != "" {
-		a, err := s.rumService.CreateAsset(strings.TrimSpace(req.Content))
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusCreated, a)
-		return
 	}
 
 	assetType := strings.TrimSpace(r.URL.Query().Get("type"))
@@ -259,6 +251,22 @@ func verifyRUMAssetSignature(r *http.Request, body []byte, contentType, assetTyp
 func absInt64(v int64) int64 {
 	if v < 0 {
 		return -v
+	}
+	return v
+}
+
+func rumAssetMaxBytes() int {
+	const defaultMax = 8 * 1024 * 1024
+	raw := strings.TrimSpace(os.Getenv("SOBS_RUM_ASSET_MAX_BYTES"))
+	if raw == "" {
+		return defaultMax
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultMax
+	}
+	if v < 1024 {
+		return 1024
 	}
 	return v
 }

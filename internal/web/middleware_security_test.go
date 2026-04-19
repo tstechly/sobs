@@ -59,3 +59,36 @@ func TestReadRoutesRequireUIAuthInBasicMode(t *testing.T) {
 		t.Fatalf("expected 200, got %d", authRec.Code)
 	}
 }
+
+func TestV1APIKeyCanBeDisabledViaConfig(t *testing.T) {
+	t.Setenv("SOBS_API_KEY", "test-key")
+	cfg := config.Default()
+	cfg.EnforceAPIAuth = false
+	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/traces", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("expected non-401 when EnforceAPIAuth=false, got %d", rec.Code)
+	}
+}
+
+func TestCSRFDefaultFollowsBehindTLSWhenUnset(t *testing.T) {
+	t.Setenv("SOBS_CSRF_ORIGIN_CHECK", "")
+	t.Setenv("SOBS_BEHIND_TLS", "1")
+	t.Setenv("SOBS_BASIC_AUTH_USERNAME", "user")
+	t.Setenv("SOBS_BASIC_AUTH_PASSWORD", "pass")
+	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
+
+	cfg := config.Default()
+	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 due to CSRF origin check, got %d", rec.Code)
+	}
+}

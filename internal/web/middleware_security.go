@@ -30,7 +30,7 @@ func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 			return
 		}
 
-		if mode != "none" && csrfOriginCheckEnabled(s.cfg.TrustedProxyMode) && isWriteMethod(r.Method) && !sameOriginRequest(r, s.cfg.TrustedProxyMode) {
+		if mode != "none" && csrfOriginCheckEnabled() && isWriteMethod(r.Method) && !sameOriginRequest(r, s.cfg.TrustedProxyMode) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -72,6 +72,9 @@ func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 }
 
 func (s *Server) allowV1APIKey(r *http.Request) bool {
+	if !s.cfg.EnforceAPIAuth {
+		return true
+	}
 	if !requiresV1APIKey(r.URL.Path, r.Method) {
 		return true
 	}
@@ -234,7 +237,7 @@ func allowExternalBearer(authz string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func csrfOriginCheckEnabled(defaultValue bool) bool {
+func csrfOriginCheckEnabled() bool {
 	if raw := strings.TrimSpace(os.Getenv("SOBS_CSRF_ORIGIN_CHECK")); raw != "" {
 		switch strings.ToLower(raw) {
 		case "1", "true", "yes", "on":
@@ -243,7 +246,15 @@ func csrfOriginCheckEnabled(defaultValue bool) bool {
 			return false
 		}
 	}
-	return defaultValue
+	if raw := strings.TrimSpace(os.Getenv("SOBS_BEHIND_TLS")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return false
 }
 
 func isWriteMethod(method string) bool {

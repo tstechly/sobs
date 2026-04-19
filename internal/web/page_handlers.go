@@ -253,10 +253,9 @@ func (s *Server) pageTracesHandler(w http.ResponseWriter, r *http.Request) {
 
 func buildLogsWhereClause(levels, services []string, traceID, fromTS, toTS, q, sqlWhere string) (string, []any, string) {
 	if sqlWhere != "" {
-		safeSQL := strings.ReplaceAll(strings.TrimSpace(sqlWhere), ";", "")
-		upper := strings.ToUpper(safeSQL)
-		if strings.Contains(upper, "INSERT") || strings.Contains(upper, "DELETE") || strings.Contains(upper, "DROP") || strings.Contains(upper, "ALTER") {
-			return "", nil, "SQL filter contains disallowed keywords"
+		safeSQL := normalizeLogsSQLWhere(sqlWhere)
+		if err := validateUserSQLWhere(safeSQL); err != nil {
+			return "", nil, err.Error()
 		}
 		where := "WHERE " + safeSQL
 		params := []any{}
