@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -117,6 +118,8 @@ func NewServer(cfg config.Config, authProvider extensionpoints.AuthProvider, sto
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	staticRoot := resolveAssetRoot("static", "bootstrap.min.css")
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticRoot))))
 	mux.HandleFunc("/", s.root)
 	mux.HandleFunc("/health", s.healthz)
 	mux.HandleFunc("/health/db", s.readyz)
@@ -268,6 +271,35 @@ func (s *Server) Handler() http.Handler {
 	return s.wrapSecurity(mux)
 }
 
+func resolveAssetRoot(root string, requiredFile string) string {
+	resolved := root
+	if filepath.IsAbs(root) {
+		return root
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return resolved
+	}
+	probe := cwd
+	for i := 0; i < 8; i++ {
+		candidate := filepath.Join(probe, root)
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			if requiredFile == "" {
+				return candidate
+			}
+			if fInfo, fErr := os.Stat(filepath.Join(candidate, requiredFile)); fErr == nil && !fInfo.IsDir() {
+				return candidate
+			}
+		}
+		next := filepath.Dir(probe)
+		if next == probe {
+			break
+		}
+		probe = next
+	}
+	return resolved
+}
+
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
@@ -282,9 +314,27 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	body, err := s.renderer.Render("go_smoke.html", pongo2.Context{
-		"title":   "SOBS",
-		"message": "Go runtime active.",
+	body, err := s.renderer.Render("summary.html", pongo2.Context{
+		"title":                 "Summary",
+		"mobile_breakpoint_max": "575.98px",
+		"request":               map[string]any{"endpoint": "summary"},
+		"stats": map[string]any{
+			"logs":     0,
+			"errors":   0,
+			"spans":    0,
+			"rum":      0,
+			"ai":       0,
+			"services": []any{},
+		},
+		"signal_health": []any{},
+		"recent_errors": []any{},
+		"recent_logs":   []any{},
+		"rum_summary":   []any{},
+		"ai_summary":    []any{},
+		"cve_overview": map[string]any{
+			"enabled": false,
+			"total":   0,
+		},
 	})
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)

@@ -19,7 +19,7 @@ func (s *Server) enrichmentCVEPage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"findings": s.enrichmentService.ListFindings()})
 		return
 	}
-	s.pageTemplateHandler("/enrichment/cve", "enrichment_cve.html")(w, r)
+	s.pageTemplateHandler("/enrichment/cve", "cve.html")(w, r)
 }
 
 func (s *Server) apiWebTrafficGeo(w http.ResponseWriter, r *http.Request) {

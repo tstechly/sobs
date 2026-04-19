@@ -20,7 +20,7 @@ type HTTPServer struct {
 }
 
 type OpaqueJSONConsumer interface {
-	ConsumeOpaqueJSON(ctx context.Context, path string, payload map[string]any) error
+	ConsumeOpaqueJSON(ctx context.Context, path string, payload any) error
 }
 
 // NewHTTPServer is retained for test convenience; production code should use
@@ -108,8 +108,12 @@ func (s *HTTPServer) acceptOpaqueJSON(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "empty body", http.StatusBadRequest)
 		return
 	}
-	var payload map[string]any
+	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if payload == nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}

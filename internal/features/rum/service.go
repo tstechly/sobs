@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,16 @@ type Asset struct {
 	ID        string `json:"id"`
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
+}
+
+type UploadedAsset struct {
+	ID           string `json:"id"`
+	Type         string `json:"type"`
+	OriginalName string `json:"original_name"`
+	StorageName  string `json:"storage_name"`
+	ContentType  string `json:"content_type"`
+	Size         int    `json:"size"`
+	UploadedAt   string `json:"uploaded_at"`
 }
 
 // TokenClaims holds the claims encoded in a RUM client token, matching
@@ -69,6 +81,55 @@ func (s *Service) createFileBackedAsset(content string) (Asset, error) {
 
 func (s *Service) GetAsset(id string) (Asset, bool) {
 	return s.getFileBackedAsset(id)
+}
+
+func (s *Service) CreateUploadedAsset(assetType, assetName, contentType string, body []byte) (UploadedAsset, error) {
+	if len(body) == 0 {
+		return UploadedAsset{}, errors.New("asset body is required")
+	}
+	id := newAssetID()
+	ext := assetExtension(assetName, contentType)
+	storageName := id + "." + ext
+	filePath := filepath.Join(s.assetDir, storageName)
+	if err := os.WriteFile(filePath, body, 0o644); err != nil {
+		return UploadedAsset{}, err
+	}
+	meta := UploadedAsset{
+		ID:           id,
+		Type:         sanitizeAssetType(assetType),
+		OriginalName: sanitizeAssetName(assetName),
+		StorageName:  storageName,
+		ContentType:  strings.TrimSpace(contentType),
+		Size:         len(body),
+		UploadedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	metaRaw, err := json.Marshal(meta)
+	if err != nil {
+		return UploadedAsset{}, err
+	}
+	if err := os.WriteFile(filepath.Join(s.assetDir, id+".meta.json"), metaRaw, 0o644); err != nil {
+		return UploadedAsset{}, err
+	}
+	return meta, nil
+}
+
+func (s *Service) GetUploadedAsset(id string) (UploadedAsset, []byte, bool) {
+	metaRaw, err := os.ReadFile(filepath.Join(s.assetDir, id+".meta.json"))
+	if err != nil {
+		return UploadedAsset{}, nil, false
+	}
+	var meta UploadedAsset
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		return UploadedAsset{}, nil, false
+	}
+	if meta.StorageName == "" || strings.Contains(meta.StorageName, "/") || strings.Contains(meta.StorageName, "\\") {
+		return UploadedAsset{}, nil, false
+	}
+	body, err := os.ReadFile(filepath.Join(s.assetDir, meta.StorageName))
+	if err != nil {
+		return UploadedAsset{}, nil, false
+	}
+	return meta, body, true
 }
 
 func (s *Service) getFileBackedAsset(id string) (Asset, bool) {
@@ -176,6 +237,53 @@ func b64urlDecode(s string) ([]byte, error) {
 // newAssetID returns a random 32-char hex string used as an asset file ID.
 func newAssetID() string {
 	buf := make([]byte, 16)
-	_, _ = rand.Read(buf)
+	_, _ = io.ReadFull(rand.Reader, buf)
 	return hex.EncodeToString(buf)
+}
+
+func sanitizeAssetName(value string) string {
+	raw := filepath.Base(strings.TrimSpace(value))
+	if raw == "" {
+		return "asset"
+	}
+	cleaned := regexp.MustCompile(`[^a-zA-Z0-9._-]+`).ReplaceAllString(raw, "-")
+	cleaned = strings.Trim(cleaned, "-._")
+	if cleaned == "" {
+		return "asset"
+	}
+	return cleaned
+}
+
+func sanitizeAssetType(value string) string {
+	raw := strings.ToLower(strings.TrimSpace(value))
+	if raw == "" {
+		return "asset"
+	}
+	cleaned := regexp.MustCompile(`[^a-z0-9._-]+`).ReplaceAllString(raw, "-")
+	cleaned = strings.Trim(cleaned, "-._")
+	if cleaned == "" {
+		return "asset"
+	}
+	return cleaned
+}
+
+func assetExtension(assetName, contentType string) string {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(assetName)), ".")
+	if ok, _ := regexp.MatchString(`^[a-z0-9]{1,8}$`, ext); ok && ext != "" {
+		return ext
+	}
+	m := map[string]string{
+		"application/json":         "json",
+		"application/octet-stream": "bin",
+		"text/plain":               "txt",
+		"image/png":                "png",
+		"image/jpeg":               "jpg",
+		"image/webp":               "webp",
+		"video/webm":               "webm",
+	}
+	baseCT := strings.TrimSpace(strings.SplitN(strings.ToLower(contentType), ";", 2)[0])
+	if mapped, ok := m[baseCT]; ok {
+		return mapped
+	}
+	return "bin"
 }

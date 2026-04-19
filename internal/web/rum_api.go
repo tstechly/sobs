@@ -1,9 +1,16 @@
 package web
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type createRUMAssetRequest struct {
@@ -15,17 +22,57 @@ func (s *Server) v1RUMAssets(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req createRUMAssetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
 		return
 	}
-	a, err := s.rumService.CreateAsset(strings.TrimSpace(req.Content))
+
+	contentType := strings.TrimSpace(strings.SplitN(r.Header.Get("Content-Type"), ";", 2)[0])
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	// Backward compatibility for tests and older clients posting {"content": "..."}.
+	var req createRUMAssetRequest
+	if err := json.Unmarshal(body, &req); err == nil && strings.TrimSpace(req.Content) != "" {
+		a, err := s.rumService.CreateAsset(strings.TrimSpace(req.Content))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, a)
+		return
+	}
+
+	assetType := strings.TrimSpace(r.URL.Query().Get("type"))
+	if assetType == "" {
+		assetType = "asset"
+	}
+	assetName := strings.TrimSpace(r.URL.Query().Get("name"))
+	if assetName == "" {
+		assetName = "asset"
+	}
+
+	ok, status, msg := verifyRUMAssetSignature(r, body, contentType, assetType, assetName)
+	if !ok {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+
+	meta, err := s.rumService.CreateUploadedAsset(assetType, assetName, contentType, body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusCreated, a)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":          meta.ID,
+		"type":        meta.Type,
+		"name":        meta.OriginalName,
+		"contentType": meta.ContentType,
+		"size":        meta.Size,
+		"url":         "/v1/rum/assets/" + meta.ID,
+	})
 }
 
 func (s *Server) v1RUMAssetByID(w http.ResponseWriter, r *http.Request) {
@@ -38,6 +85,14 @@ func (s *Server) v1RUMAssetByID(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	meta, body, ok := s.rumService.GetUploadedAsset(id)
+	if ok {
+		w.Header().Set("Content-Type", meta.ContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+		return
+	}
+
 	a, ok := s.rumService.GetAsset(id)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
@@ -148,4 +203,59 @@ func stringVal(m map[string]any, key, def string) string {
 		}
 	}
 	return def
+}
+
+func verifyRUMAssetSignature(r *http.Request, body []byte, contentType, assetType, assetName string) (bool, int, string) {
+	secret := strings.TrimSpace(os.Getenv("SOBS_RUM_ASSET_SIGNING_KEY"))
+	if secret == "" {
+		return false, http.StatusServiceUnavailable, "Asset upload signing key is not configured"
+	}
+
+	tsRaw := strings.TrimSpace(r.Header.Get("X-SOBS-Asset-Timestamp"))
+	sig := strings.ToLower(strings.TrimSpace(r.Header.Get("X-SOBS-Asset-Signature")))
+	if tsRaw == "" || sig == "" {
+		return false, http.StatusUnauthorized, "Missing asset signature headers"
+	}
+
+	ts, err := strconv.ParseInt(tsRaw, 10, 64)
+	if err != nil {
+		return false, http.StatusUnauthorized, "Invalid asset signature timestamp"
+	}
+
+	window := int64(300)
+	if raw := strings.TrimSpace(os.Getenv("SOBS_RUM_ASSET_SIGN_WINDOW_SEC")); raw != "" {
+		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil && parsed > 0 {
+			window = parsed
+		}
+	}
+	if absInt64(time.Now().Unix()-ts) > window {
+		return false, http.StatusUnauthorized, "Asset signature timestamp outside allowed window"
+	}
+
+	bodyHash := sha256.Sum256(body)
+	payload := strings.Join([]string{
+		strings.ToUpper(r.Method),
+		r.URL.Path,
+		tsRaw,
+		fmt.Sprintf("%x", bodyHash[:]),
+		strings.ToLower(strings.TrimSpace(contentType)),
+		strings.ToLower(strings.TrimSpace(assetType)),
+		assetName,
+	}, "\n")
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(payload))
+	expected := fmt.Sprintf("%x", mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(sig)) {
+		return false, http.StatusUnauthorized, "Invalid asset signature"
+	}
+
+	return true, http.StatusOK, ""
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

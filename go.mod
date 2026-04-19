@@ -19,6 +19,7 @@ require (
 	github.com/huandu/xstrings v1.4.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect
+	github.com/mitsuhiko/minijinja/minijinja-go/v2 v2.19.0 // indirect
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/parquet-go/parquet-go v0.23.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect

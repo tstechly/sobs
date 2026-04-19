@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,7 +12,11 @@ import (
 	"github.com/abartrim/sobs/internal/store"
 )
 
-func TestWriteRoutesRequireAuthWhenEnabled(t *testing.T) {
+func TestWriteRoutesRequireUIAuthInBasicMode(t *testing.T) {
+	t.Setenv("SOBS_BASIC_AUTH_USERNAME", "user")
+	t.Setenv("SOBS_BASIC_AUTH_PASSWORD", "pass")
+	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
+
 	cfg := config.Default()
 	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
 
@@ -23,7 +28,7 @@ func TestWriteRoutesRequireAuthWhenEnabled(t *testing.T) {
 	}
 
 	authReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
-	authReq.Header.Set("Authorization", "Bearer test")
+	authReq.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")))
 	authRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(authRec, authReq)
 	if authRec.Code != http.StatusCreated {
@@ -31,7 +36,11 @@ func TestWriteRoutesRequireAuthWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestReadRoutesRequireAuthWhenEnabled(t *testing.T) {
+func TestReadRoutesRequireUIAuthInBasicMode(t *testing.T) {
+	t.Setenv("SOBS_BASIC_AUTH_USERNAME", "user")
+	t.Setenv("SOBS_BASIC_AUTH_PASSWORD", "pass")
+	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
+
 	cfg := config.Default()
 	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
 
@@ -43,7 +52,7 @@ func TestReadRoutesRequireAuthWhenEnabled(t *testing.T) {
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/query/schema", nil)
-	authReq.Header.Set("Authorization", "Bearer test")
+	authReq.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")))
 	authRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(authRec, authReq)
 	if authRec.Code != http.StatusOK {

@@ -9,6 +9,9 @@ captures full-page Playwright screenshots for visual-regression checking.
 Run standalone:
     pytest tests/test_integration.py -v
 
+Run integration tests against Go migration server:
+    SOBS_INTEGRATION_RUNTIME=go pytest tests/test_integration.py -v
+
 Run as part of the full suite (unit tests excluded from integration marker):
     pytest tests/ -v -m "not integration"   # unit tests only
     pytest tests/test_integration.py -v     # integration tests only
@@ -18,6 +21,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,22 +75,41 @@ if "SOBS_DATA_DIR" not in os.environ:
 
 @pytest.fixture(scope="session", autouse=True)
 def live_server():
-    """Start a live SOBS server in a subprocess for the session."""
+    """Start a live SOBS server in a subprocess for the session.
+
+    Runtime selection:
+    - SOBS_INTEGRATION_RUNTIME=python (default): launches app.py
+    - SOBS_INTEGRATION_RUNTIME=go: launches cmd/sobs
+    """
     _prepare_screenshots_dir()
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     data_dir = tempfile.mkdtemp(prefix="sobs-integration-")
-    server_log_path = os.path.join(SCREENSHOTS_DIR, "integration-live-server.log")
+    runtime = str(os.getenv("SOBS_INTEGRATION_RUNTIME", "python")).strip().lower()
+    server_log_path = os.path.join(SCREENSHOTS_DIR, f"integration-live-server-{runtime}.log")
 
     env = os.environ.copy()
-    env["PORT"] = str(SERVER_PORT)
-    env["SOBS_DATA_DIR"] = data_dir
-    env["SOBS_ENABLE_FIRST_RUN_TOUR"] = "0"
-    env["SOBS_AI_ENDPOINT_URL"] = "http://localhost:9999/v1"
-    env["SOBS_AI_MODEL"] = "docs-screenshot-model"
+    if runtime == "go":
+        if shutil.which("go") is None:
+            pytest.fail("SOBS_INTEGRATION_RUNTIME=go requested, but 'go' is not available on PATH")
+        env["SOBS_HTTP_ADDR"] = f"{SERVER_HOST}:{SERVER_PORT}"
+        env["SOBS_GRPC_ADDR"] = f"{SERVER_HOST}:14317"
+        env["SOBS_STORE_PROVIDER"] = "chdb"
+        env["SOBS_CHDB_PATH"] = os.path.join(data_dir, "sobs.chdb")
+        env["SOBS_ENFORCE_API_AUTH"] = "0"
+        server_cmd = ["go", "run", "./cmd/sobs"]
+    elif runtime in {"", "python"}:
+        env["PORT"] = str(SERVER_PORT)
+        env["SOBS_DATA_DIR"] = data_dir
+        env["SOBS_ENABLE_FIRST_RUN_TOUR"] = "0"
+        env["SOBS_AI_ENDPOINT_URL"] = "http://localhost:9999/v1"
+        env["SOBS_AI_MODEL"] = "docs-screenshot-model"
+        server_cmd = [sys.executable, "app.py"]
+    else:
+        pytest.fail("Unknown SOBS_INTEGRATION_RUNTIME value. Expected 'python' or 'go'.")
 
     server_log = open(server_log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, "app.py"],
+        server_cmd,
         cwd=repo_root,
         env=env,
         stdout=server_log,
@@ -100,8 +123,9 @@ def live_server():
                 return "".join(content[-lines:]).strip()
         return ""
 
-    # Wait up to 10 s for the server to become ready.
-    deadline = time.time() + 10
+    # Wait for server to become ready. Go startup can take longer on first run.
+    startup_timeout_s = 20 if runtime == "go" else 10
+    deadline = time.time() + startup_timeout_s
     while time.time() < deadline:
         if proc.poll() is not None:
             tail = _tail_server_log()
@@ -119,7 +143,7 @@ def live_server():
     else:
         proc.terminate()
         tail = _tail_server_log()
-        msg = "Live SOBS server did not start within 10 seconds"
+        msg = f"Live SOBS server did not start within {startup_timeout_s} seconds"
         if tail:
             msg += f"\n--- server log tail ---\n{tail}"
         pytest.fail(msg)

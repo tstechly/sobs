@@ -8,6 +8,7 @@ import (
 )
 
 var pageRouteTemplates = map[string]string{
+	"/summary":                        "summary.html",
 	"/logs":                           "logs.html",
 	"/logs/help":                      "logs_help.html",
 	"/errors":                         "errors.html",
@@ -68,15 +69,14 @@ func (s *Server) pageTemplateHandler(path string, templateName string) http.Hand
 			return
 		}
 		ctx := pongo2.Context{
-			"title":   strings.TrimPrefix(path, "/"),
-			"message": "Go runtime active.",
+			"title":                 strings.TrimPrefix(path, "/"),
+			"message":               "Go runtime active.",
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": strings.TrimPrefix(path, "/")},
 		}
 		body, err := s.renderer.Render(templateName, ctx)
 		if err != nil {
-			body, err = s.renderer.Render("go_smoke.html", ctx)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "page": strings.TrimPrefix(path, "/")})
+			http.Error(w, "template error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -78,6 +78,20 @@ func TestAdditionalIngestEndpoints(t *testing.T) {
 	}
 }
 
+func TestAdditionalIngestEndpointsAcceptJSONArray(t *testing.T) {
+	srv := NewHTTPServer()
+	mux := http.NewServeMux()
+	srv.Register(mux)
+
+	req := httptest.NewRequest("POST", "http://example.com/v1/rum", bytes.NewReader([]byte(`[{"type":"pageview","appName":"demo"}]`)))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /v1/rum array payload, got %d", w.Code)
+	}
+}
+
 func TestRejectInvalidIngestPayload(t *testing.T) {
 	srv := NewHTTPServer()
 	mux := http.NewServeMux()

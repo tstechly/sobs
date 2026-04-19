@@ -537,7 +537,7 @@ func (p *StorePipeline) ConsumeMetrics(ctx context.Context, req *colmetricpb.Exp
 // ConsumeOpaqueJSON stages raw JSON payloads from /v1/rum, /v1/ai, /v1/errors.
 // These require domain-specific processing beyond OTLP normalisation and are
 // held in sobs_ingest_opaque for downstream enrichment.
-func (p *StorePipeline) ConsumeOpaqueJSON(ctx context.Context, path string, payload map[string]any) error {
+func (p *StorePipeline) ConsumeOpaqueJSON(ctx context.Context, path string, payload any) error {
 	if err := p.ensureSchema(ctx); err != nil {
 		return err
 	}

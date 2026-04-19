@@ -1,37 +1,207 @@
 package web
 
 import (
+	"crypto/subtle"
+	"encoding/base64"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
+var externalAuthClient = &http.Client{Timeout: 5 * time.Second}
+
 func (s *Server) wrapSecurity(next http.Handler) http.Handler {
-	if !s.cfg.EnforceAPIAuth {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !requiresAuth(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		permission := requiredPermission(r.URL.Path, r.Method)
-		if isWriteMethod(r.Method) {
-			if !sameOriginRequest(r, s.cfg.TrustedProxyMode) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
-		id, err := s.authProvider.Authenticate(r.Context(), r)
-		if err != nil {
+		if !allowV1APIKey(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if err := s.authProvider.Authorize(r.Context(), id, permission); err != nil {
+		if !requiresUIAuth(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		mode, invalid := uiAuthMode()
+		if invalid {
+			http.Error(w, "server auth misconfiguration", http.StatusInternalServerError)
+			return
+		}
+
+		if mode != "none" && csrfOriginCheckEnabled(s.cfg.TrustedProxyMode) && isWriteMethod(r.Method) && !sameOriginRequest(r, s.cfg.TrustedProxyMode) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		if mode == "none" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		authz := strings.TrimSpace(r.Header.Get("Authorization"))
+		switch mode {
+		case "basic":
+			if allowBasicAuth(authz) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", `Basic realm="SOBS"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		case "external":
+			if !strings.HasPrefix(authz, "Bearer ") {
+				token := strings.TrimSpace(sessionTokenFromRequest(r, s.cfg.SessionCookieName))
+				if token != "" && !strings.ContainsAny(token, "\r\n") {
+					authz = "Bearer " + token
+				}
+			}
+			if strings.HasPrefix(authz, "Bearer ") && allowExternalBearer(authz) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", `Bearer realm="SOBS"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		default:
+			http.Error(w, "server auth misconfiguration", http.StatusInternalServerError)
+			return
+		}
 	})
+}
+
+func allowV1APIKey(r *http.Request) bool {
+	if !requiresV1APIKey(r.URL.Path, r.Method) {
+		return true
+	}
+	expected := strings.TrimSpace(os.Getenv("SOBS_API_KEY"))
+	if expected == "" {
+		return true
+	}
+	provided := strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if provided == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func requiresV1APIKey(path string, method string) bool {
+	if path == "/v1/logs" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/traces" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/metrics" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/errors" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/rum" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/ai" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/rum/assets" && method == http.MethodPost {
+		return true
+	}
+	if path == "/v1/rum/client-token" && method == http.MethodPost {
+		return true
+	}
+	if strings.HasPrefix(path, "/v1/apps") || strings.HasPrefix(path, "/v1/releases/") {
+		return true
+	}
+	return false
+}
+
+func requiresUIAuth(path string) bool {
+	if strings.HasPrefix(path, "/health") || strings.HasPrefix(path, "/readyz") {
+		return false
+	}
+	if strings.HasPrefix(path, "/static/") || path == "/service-worker.js" {
+		return false
+	}
+	if strings.HasPrefix(path, "/mcp") || path == "/auth/session" {
+		return false
+	}
+	if strings.HasPrefix(path, "/v1/rum/assets/") {
+		return true
+	}
+	if strings.HasPrefix(path, "/v1/") {
+		return false
+	}
+	return true
+}
+
+func uiAuthMode() (mode string, invalid bool) {
+	hasUser := strings.TrimSpace(os.Getenv("SOBS_BASIC_AUTH_USERNAME")) != ""
+	hasPass := strings.TrimSpace(os.Getenv("SOBS_BASIC_AUTH_PASSWORD")) != ""
+	hasExternal := strings.TrimSpace(os.Getenv("SOBS_EXTERNAL_AUTH_URL")) != ""
+
+	if hasExternal && (hasUser || hasPass) {
+		return "", true
+	}
+	if hasUser != hasPass {
+		return "", true
+	}
+	if hasExternal {
+		return "external", false
+	}
+	if hasUser && hasPass {
+		return "basic", false
+	}
+	return "none", false
+}
+
+func allowBasicAuth(authz string) bool {
+	if !strings.HasPrefix(authz, "Basic ") {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(strings.TrimPrefix(authz, "Basic ")))
+	if err != nil {
+		return false
+	}
+	decoded := string(raw)
+	username, password, ok := strings.Cut(decoded, ":")
+	if !ok {
+		return false
+	}
+	expectedUser := strings.TrimSpace(os.Getenv("SOBS_BASIC_AUTH_USERNAME"))
+	expectedPass := strings.TrimSpace(os.Getenv("SOBS_BASIC_AUTH_PASSWORD"))
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(expectedPass)) == 1
+	return userOK && passOK
+}
+
+func allowExternalBearer(authz string) bool {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("SOBS_EXTERNAL_AUTH_URL")), "/")
+	if base == "" {
+		return false
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/internal/auth/validate", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", authz)
+	resp, err := externalAuthClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func csrfOriginCheckEnabled(defaultValue bool) bool {
+	if raw := strings.TrimSpace(os.Getenv("SOBS_CSRF_ORIGIN_CHECK")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return defaultValue
 }
 
 func isWriteMethod(method string) bool {
@@ -41,51 +211,4 @@ func isWriteMethod(method string) bool {
 	default:
 		return false
 	}
-}
-
-func requiresAuth(path string) bool {
-	if strings.HasPrefix(path, "/health") || strings.HasPrefix(path, "/readyz") {
-		return false
-	}
-	if path == "/" || strings.HasPrefix(path, "/static/") || strings.HasPrefix(path, "/service-worker.js") {
-		return false
-	}
-	if strings.HasPrefix(path, "/auth/session") || strings.HasPrefix(path, "/mcp") {
-		return false
-	}
-	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/settings/") {
-		return true
-	}
-	if strings.HasPrefix(path, "/dashboards") || strings.HasPrefix(path, "/reports/") {
-		return true
-	}
-	if strings.HasPrefix(path, "/v1/apps") || strings.HasPrefix(path, "/v1/releases/") {
-		return true
-	}
-	return false
-}
-
-func requiredPermission(path string, method string) string {
-	action := "read"
-	if isWriteMethod(method) {
-		action = "write"
-	}
-	domain := "session"
-	switch {
-	case strings.HasPrefix(path, "/api/reports") || strings.HasPrefix(path, "/reports/"):
-		domain = "reports"
-	case strings.HasPrefix(path, "/api/dashboards") || strings.HasPrefix(path, "/dashboards"):
-		domain = "dashboards"
-	case strings.HasPrefix(path, "/api/agent") || strings.HasPrefix(path, "/settings/agents"):
-		domain = "agents"
-	case strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/settings/notifications"):
-		domain = "notifications"
-	case strings.HasPrefix(path, "/api/query") || strings.HasPrefix(path, "/api/table-explorer") || strings.HasPrefix(path, "/table-explorer"):
-		domain = "query"
-	case strings.HasPrefix(path, "/v1/apps") || strings.HasPrefix(path, "/v1/releases/"):
-		domain = "apps"
-	case strings.HasPrefix(path, "/api/settings/") || strings.HasPrefix(path, "/settings/"):
-		domain = "settings"
-	}
-	return domain + ":" + action
 }
