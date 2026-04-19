@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/abartrim/sobs/internal/auth"
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
 )
@@ -18,7 +17,7 @@ func TestWriteRoutesRequireUIAuthInBasicMode(t *testing.T) {
 	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
 
 	cfg := config.Default()
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	unauthReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
 	unauthRec := httptest.NewRecorder()
@@ -42,7 +41,7 @@ func TestReadRoutesRequireUIAuthInBasicMode(t *testing.T) {
 	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
 
 	cfg := config.Default()
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	unauthReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/query/schema", nil)
 	unauthRec := httptest.NewRecorder()
@@ -64,7 +63,7 @@ func TestV1APIKeyCanBeDisabledViaConfig(t *testing.T) {
 	t.Setenv("SOBS_API_KEY", "test-key")
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/traces", nil)
 	rec := httptest.NewRecorder()
@@ -82,7 +81,7 @@ func TestCSRFDefaultFollowsBehindTLSWhenUnset(t *testing.T) {
 	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
 
 	cfg := config.Default()
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")))

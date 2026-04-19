@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/abartrim/sobs/internal/auth"
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
 )
@@ -15,7 +14,7 @@ func newParityTestServer() *Server {
 	cfg := config.Default()
 	cfg.TemplateRoot = "../../templates"
 	cfg.EnforceAPIAuth = false
-	return NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	return NewServer(cfg, store.NewNoopStoreFactory())
 }
 
 func TestUIBasicModeRequiresAuthorization(t *testing.T) {

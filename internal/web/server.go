@@ -59,7 +59,7 @@ type Server struct {
 	reportService       *reports.Service
 }
 
-func NewServer(cfg config.Config, _ extensionpoints.AuthProvider, storeFactory extensionpoints.StoreFactory) *Server {
+func NewServer(cfg config.Config, storeFactory extensionpoints.StoreFactory) *Server {
 	renderer, err := templates.NewRenderer(cfg.TemplateRoot)
 	if _, ok := storeFactory.(*storepkg.NoopStoreFactory); ok {
 		if tmpPath, tmpErr := os.MkdirTemp("", "sobs-chdb-"); tmpErr == nil {

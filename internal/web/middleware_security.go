@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"net/http"
@@ -57,7 +58,7 @@ func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 					authz = "Bearer " + token
 				}
 			}
-			if strings.HasPrefix(authz, "Bearer ") && allowExternalBearer(authz) {
+			if strings.HasPrefix(authz, "Bearer ") && allowExternalBearer(r.Context(), authz) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -219,12 +220,12 @@ func allowBasicAuth(authz string) bool {
 	return userOK && passOK
 }
 
-func allowExternalBearer(authz string) bool {
+func allowExternalBearer(ctx context.Context, authz string) bool {
 	base := strings.TrimRight(strings.TrimSpace(os.Getenv("SOBS_EXTERNAL_AUTH_URL")), "/")
 	if base == "" {
 		return false
 	}
-	req, err := http.NewRequest(http.MethodPost, base+"/internal/auth/validate", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/internal/auth/validate", nil)
 	if err != nil {
 		return false
 	}

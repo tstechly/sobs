@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abartrim/sobs/internal/auth"
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
 )
@@ -15,7 +14,7 @@ func TestSessionEndpointUsesConfiguredCookieName(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.SessionCookieName = "custom_session"
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("GET", "http://example.com/auth/session", nil)
 	r.Header.Set("Authorization", "Bearer test")
@@ -38,7 +37,7 @@ func TestSessionEndpointRequiresUIAuthInBasicMode(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.SessionCookieName = "session"
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("GET", "http://example.com/auth/session", nil)
 	r.Header.Set("Origin", "http://example.com")
@@ -56,7 +55,7 @@ func TestSessionEndpointIgnoresForwardedHeadersWhenNotTrusted(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.TrustedProxyMode = false
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("POST", "http://real.example.com/auth/session", nil)
 	r.Host = "real.example.com"
@@ -78,7 +77,7 @@ func TestSessionEndpointUsesForwardedHeadersWhenTrusted(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.TrustedProxyMode = true
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("POST", "http://internal.service/auth/session", nil)
 	r.Host = "internal.service"
@@ -99,7 +98,7 @@ func TestSessionEndpointUsesForwardedHeadersWhenTrusted(t *testing.T) {
 func TestReadyzEndpoint(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("GET", "http://example.com/readyz", nil)
 	w := httptest.NewRecorder()
@@ -114,7 +113,7 @@ func TestReadyzEndpoint(t *testing.T) {
 func TestHealthAliases(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r1 := httptest.NewRequest("GET", "http://example.com/health", nil)
 	w1 := httptest.NewRecorder()
@@ -135,7 +134,7 @@ func TestRootEndpoint(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.TemplateRoot = "../../templates"
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("GET", "http://example.com/", nil)
 	w := httptest.NewRecorder()
@@ -154,7 +153,7 @@ func TestGoSmokeEndpoint(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.TemplateRoot = "../../templates"
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("GET", "http://example.com/go/smoke", nil)
 	w := httptest.NewRecorder()
@@ -173,7 +172,7 @@ func TestCompatibilityPageRoute(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.TemplateRoot = "../../templates"
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("GET", "http://example.com/logs", nil)
 	w := httptest.NewRecorder()
@@ -191,7 +190,7 @@ func TestCompatibilityHelpRoutes(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
 	cfg.TemplateRoot = "../../templates"
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	for _, path := range []string{"/query/help", "/metrics/help/anomaly", "/settings/help/notifications"} {
 		r := httptest.NewRequest("GET", "http://example.com"+path, nil)
@@ -210,7 +209,7 @@ func TestCompatibilityHelpRoutes(t *testing.T) {
 func TestNotificationsCheckEndpoint(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	r := httptest.NewRequest("POST", "http://example.com/api/notifications/check", nil)
 	w := httptest.NewRecorder()

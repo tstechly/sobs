@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/abartrim/sobs/internal/auth"
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
 )
@@ -105,7 +104,7 @@ func TestMCPKeysPersistInChdbStore(t *testing.T) {
 	chdbPath := filepath.Join(t.TempDir(), "sobs.chdb")
 	factory := store.NewChdbStoreFactory(chdbPath)
 
-	srvA := NewServer(cfg, auth.NewStaticProvider(), factory)
+	srvA := NewServer(cfg, factory)
 	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/mcp/keys", bytes.NewReader([]byte(`{"label":"persisted"}`)))
 	createRec := httptest.NewRecorder()
 	srvA.Handler().ServeHTTP(createRec, createReq)
@@ -113,7 +112,7 @@ func TestMCPKeysPersistInChdbStore(t *testing.T) {
 		t.Fatalf("expected 200 from create, got %d", createRec.Code)
 	}
 
-	srvB := NewServer(cfg, auth.NewStaticProvider(), factory)
+	srvB := NewServer(cfg, factory)
 	listReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/mcp/keys", nil)
 	listRec := httptest.NewRecorder()
 	srvB.Handler().ServeHTTP(listRec, listReq)

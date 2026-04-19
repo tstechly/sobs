@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/abartrim/sobs/internal/auth"
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
 )
@@ -15,7 +14,7 @@ import (
 func newTestServer() *Server {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
-	return NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	return NewServer(cfg, store.NewNoopStoreFactory())
 }
 
 func TestV1AppsCreateListGetPatch(t *testing.T) {

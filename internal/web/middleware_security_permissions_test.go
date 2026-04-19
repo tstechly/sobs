@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/abartrim/sobs/internal/auth"
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
 )
@@ -13,7 +12,7 @@ import (
 func TestV1AppsRequireAPIKeyWhenConfigured(t *testing.T) {
 	t.Setenv("SOBS_API_KEY", "test-key")
 	cfg := config.Default()
-	srv := NewServer(cfg, auth.NewStaticProvider(), store.NewNoopStoreFactory())
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
 	noKeyReq := httptest.NewRequest(http.MethodGet, "http://example.com/v1/apps", nil)
 	noKeyRec := httptest.NewRecorder()
