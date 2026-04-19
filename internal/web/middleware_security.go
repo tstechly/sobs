@@ -14,9 +14,8 @@ func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		permission := "session:read"
+		permission := requiredPermission(r.URL.Path, r.Method)
 		if isWriteMethod(r.Method) {
-			permission = "session:write"
 			if !sameOriginRequest(r, s.cfg.TrustedProxyMode) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
@@ -64,4 +63,29 @@ func requiresAuth(path string) bool {
 		return true
 	}
 	return false
+}
+
+func requiredPermission(path string, method string) string {
+	action := "read"
+	if isWriteMethod(method) {
+		action = "write"
+	}
+	domain := "session"
+	switch {
+	case strings.HasPrefix(path, "/api/reports") || strings.HasPrefix(path, "/reports/"):
+		domain = "reports"
+	case strings.HasPrefix(path, "/api/dashboards") || strings.HasPrefix(path, "/dashboards"):
+		domain = "dashboards"
+	case strings.HasPrefix(path, "/api/agent") || strings.HasPrefix(path, "/settings/agents"):
+		domain = "agents"
+	case strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/settings/notifications"):
+		domain = "notifications"
+	case strings.HasPrefix(path, "/api/query") || strings.HasPrefix(path, "/api/table-explorer") || strings.HasPrefix(path, "/table-explorer"):
+		domain = "query"
+	case strings.HasPrefix(path, "/v1/apps") || strings.HasPrefix(path, "/v1/releases/"):
+		domain = "apps"
+	case strings.HasPrefix(path, "/api/settings/") || strings.HasPrefix(path, "/settings/"):
+		domain = "settings"
+	}
+	return domain + ":" + action
 }
