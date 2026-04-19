@@ -3,6 +3,7 @@ package otlpreceiver
 import (
 	"context"
 	"crypto/md5" //nolint:gosec // MD5 used for non-cryptographic fingerprinting only
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -209,9 +210,6 @@ func (p *StorePipeline) insertJSONEachRow(ctx context.Context, table string, row
 // nsToISO converts a nanosecond Unix timestamp to a ClickHouse-compatible
 // DateTime64 string matching Python's _normalize_ch_timestamp output.
 func nsToISO(nanos uint64) string {
-	if nanos == 0 {
-		return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
-	}
 	t := time.Unix(0, int64(nanos)).UTC()
 	return t.Format("2006-01-02 15:04:05.000000")
 }
@@ -240,7 +238,7 @@ func anyValueToString(val *commonv1.AnyValue) string {
 		}
 		return "false"
 	case *commonv1.AnyValue_BytesValue:
-		return hex.EncodeToString(v.BytesValue)
+		return base64.StdEncoding.EncodeToString(v.BytesValue)
 	case *commonv1.AnyValue_ArrayValue:
 		parts := make([]any, 0)
 		if v.ArrayValue != nil {

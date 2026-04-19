@@ -23,8 +23,6 @@ func BuildStoreFactory() (extensionpoints.StoreFactory, error) {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("SOBS_STORE_PROVIDER"))) {
 	case "", "chdb":
 		return store.NewChdbStoreFactoryFromEnv(), nil
-	case "noop":
-		return store.NewNoopStoreFactory(), nil
 	default:
 		return nil, fmt.Errorf("unknown store provider")
 	}
