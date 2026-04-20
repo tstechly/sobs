@@ -229,35 +229,35 @@ Status legend:
 
 ## Query Explorer Kubernetes And Data Management
 
-- `TODO | GET | /query | app.py`
-- `TODO | GET | /query/help | app.py`
-- `TODO | POST | /api/query/ask | app.py`
-- `TODO | POST | /api/query/run | app.py`
-- `TODO | POST | /api/query/refine-chart | app.py`
-- `TODO | GET | /api/query/schema | app.py`
-- `TODO | GET | /table-explorer | app.py`
-- `TODO | GET | /table-explorer/help | app.py`
-- `TODO | GET | /api/table-explorer/tables | app.py`
-- `TODO | GET | /api/table-explorer/table/<name> | app.py`
-- `TODO | GET | /api/chart-types | app.py`
-- `TODO | GET | /settings/kubernetes | app.py`
-- `TODO | GET | /kubernetes/help | app.py`
-- `TODO | GET | /settings/help/kubernetes | app.py`
-- `TODO | POST | /settings/kubernetes | app.py`
-- `TODO | GET | /kubernetes | app.py`
-- `TODO | GET | /api/kubernetes/status | app.py`
-- `TODO | GET | /settings/data-management | app.py`
-- `TODO | GET | /settings/help/data-management | app.py`
-- `TODO | POST | /settings/data-management | app.py`
-- `TODO | GET | /api/data-management/backup/list | app.py`
-- `TODO | POST | /api/data-management/backup/run | app.py`
-- `TODO | POST | /api/data-management/restore | app.py`
-- `TODO | GET | /api/setup-wizard/steps | app.py`
-- `TODO | GET | /setup/help/playbooks | app.py`
-- `TODO | POST | /api/onboarding/create-repo | app.py`
-- `TODO | POST | /api/onboarding/import-repo | app.py`
-- `TODO | POST | /api/onboarding/list-repos | app.py`
-- `TODO | GET | /api/onboarding/inspect-repo | app.py`
+- `DONE | GET | /query | app.py`
+- `DONE | GET | /query/help | app.py`
+- `DONE | POST | /api/query/ask | app.py`
+- `DONE | POST | /api/query/run | app.py`
+- `DONE | POST | /api/query/refine-chart | app.py`
+- `DONE | GET | /api/query/schema | app.py`
+- `DONE | GET | /table-explorer | app.py`
+- `DONE | GET | /table-explorer/help | app.py`
+- `DONE | GET | /api/table-explorer/tables | app.py`
+- `DONE | GET | /api/table-explorer/table/<name> | app.py`
+- `DONE | GET | /api/chart-types | app.py`
+- `DONE | GET | /settings/kubernetes | app.py`
+- `DONE | GET | /kubernetes/help | app.py`
+- `DONE | GET | /settings/help/kubernetes | app.py`
+- `DONE | POST | /settings/kubernetes | app.py`
+- `DONE | GET | /kubernetes | app.py`
+- `DONE | GET | /api/kubernetes/status | app.py`
+- `DONE | GET | /settings/data-management | app.py`
+- `DONE | GET | /settings/help/data-management | app.py`
+- `DONE | POST | /settings/data-management | app.py`
+- `DONE | GET | /api/data-management/backup/list | app.py`
+- `DONE | POST | /api/data-management/backup/run | app.py`
+- `DONE | POST | /api/data-management/restore | app.py`
+- `DONE | GET | /api/setup-wizard/steps | app.py`
+- `DONE | GET | /setup/help/playbooks | app.py`
+- `DONE | POST | /api/onboarding/create-repo | app.py`
+- `DONE | POST | /api/onboarding/import-repo | app.py`
+- `DONE | POST | /api/onboarding/list-repos | app.py`
+- `DONE | GET | /api/onboarding/inspect-repo | app.py`
 - `TODO | POST | /api/onboarding/create-issues | app.py`
 
 ## MCP Routes
