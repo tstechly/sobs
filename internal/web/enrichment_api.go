@@ -159,6 +159,10 @@ func (s *Server) apiWebTrafficGeo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if len(ipDetails) > 100 {
+		ipDetails = ipDetails[:100]
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":             true,
 		"country_counts": countryCounts,
@@ -304,7 +308,7 @@ func (s *Server) apiWebTrafficDevices(w http.ResponseWriter, r *http.Request) {
 	store, err := s.storeFactory.Open(r.Context())
 	if err == nil {
 		defer store.Close()
-		rows, queryErr := store.Query(r.Context(), "SELECT coalesce(nullIf(LogAttributes['browser.context.deviceType'], ''), nullIf(LogAttributes['browser.context.deviceClass'], ''), 'Unknown') AS device, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY device ORDER BY cnt DESC LIMIT 50", params...)
+		rows, queryErr := store.Query(r.Context(), "SELECT LogAttributes['browser.context.deviceClass'] AS device, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY device HAVING device != '' ORDER BY cnt DESC", params...)
 		if queryErr == nil {
 			defer rows.Close()
 			for rows.Next() {

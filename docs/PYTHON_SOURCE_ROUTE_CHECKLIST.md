@@ -64,12 +64,12 @@ Status legend:
 - `DONE | GET | /rum/help | app.py`
 - `DONE | GET | /web-traffic | app.py`
 - `DONE | GET | /web-traffic/help | app.py`
-- `TODO | GET | /api/web-traffic/geo | app.py`
-- `TODO | GET | /api/web-traffic/browsers | app.py`
-- `TODO | GET | /api/web-traffic/os | app.py`
-- `TODO | GET | /api/web-traffic/timezones | app.py`
-- `TODO | GET | /api/web-traffic/languages | app.py`
-- `TODO | GET | /api/web-traffic/devices | app.py`
+- `DONE | GET | /api/web-traffic/geo | app.py`
+- `DONE | GET | /api/web-traffic/browsers | app.py`
+- `DONE | GET | /api/web-traffic/os | app.py`
+- `DONE | GET | /api/web-traffic/timezones | app.py`
+- `DONE | GET | /api/web-traffic/languages | app.py`
+- `DONE | GET | /api/web-traffic/devices | app.py`
 
 ## Enrichment And Work Items
 
