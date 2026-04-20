@@ -211,21 +211,21 @@ Status legend:
 
 ## Agents And AI Helper
 
-- `TODO | GET | /settings/agents | app.py`
-- `TODO | GET | /settings/help/agents | app.py`
-- `TODO | POST | /settings/agents | app.py`
-- `TODO | POST | /settings/agents/<rule_id>/delete | app.py`
-- `TODO | GET | /api/ai/helper/capabilities | app.py`
-- `TODO | GET | /api/ai/helper/actions/manifest | app.py`
-- `TODO | GET | /api/ai/helper/chats | app.py`
-- `TODO | GET | /api/ai/helper/chats/<chat_id> | app.py`
-- `TODO | POST | /api/ai/helper/feedback | app.py`
-- `TODO | POST | /api/ai/helper | app.py`
-- `TODO | POST | /api/ai/helper/actions/execute | app.py`
-- `TODO | POST | /api/issues/raise | app.py`
-- `TODO | GET | /api/agent/runs | app.py`
-- `TODO | POST | /api/agent/runs | app.py`
-- `TODO | POST | /api/agent/runs/<run_id>/dismiss | app.py`
+- `DONE | GET | /settings/agents | app.py`
+- `DONE | GET | /settings/help/agents | app.py`
+- `DONE | POST | /settings/agents | app.py`
+- `DONE | POST | /settings/agents/<rule_id>/delete | app.py`
+- `DONE | GET | /api/ai/helper/capabilities | app.py`
+- `DONE | GET | /api/ai/helper/actions/manifest | app.py`
+- `DONE | GET | /api/ai/helper/chats | app.py`
+- `DONE | GET | /api/ai/helper/chats/<chat_id> | app.py`
+- `DONE | POST | /api/ai/helper/feedback | app.py`
+- `DONE | POST | /api/ai/helper | app.py`
+- `DONE | POST | /api/ai/helper/actions/execute | app.py`
+- `DONE | POST | /api/issues/raise | app.py`
+- `DONE | GET | /api/agent/runs | app.py`
+- `DONE | POST | /api/agent/runs | app.py`
+- `DONE | POST | /api/agent/runs/<run_id>/dismiss | app.py`
 
 ## Query Explorer Kubernetes And Data Management
 
