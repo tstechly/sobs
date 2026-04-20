@@ -32,17 +32,17 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 		dmSettings := map[string]string{
 			"data_management.backup_enabled":              boolToSetting(st.BackupEnabled),
 			"data_management.s3_bucket":                   st.S3Bucket,
+			"data_management.s3_access_key_id":            st.S3AccessKeyID,
+			"data_management.s3_region":                   st.S3Region,
+			"data_management.s3_path_prefix":              st.S3PathPrefix,
+			"data_management.s3_encrypt_backup":           boolToSetting(st.S3EncryptBackup),
+			"data_management.backup_schedule_full":        st.BackupScheduleFull,
+			"data_management.backup_schedule_incremental": st.BackupScheduleIncremental,
 			"data_management.ttl_logs_days":               strconv.Itoa(st.TTLLogsDays),
 			"data_management.ttl_traces_days":             strconv.Itoa(st.TTLTracesDays),
 			"data_management.ttl_metrics_hours":           strconv.Itoa(st.TTLMetricsHours),
 			"data_management.ttl_sessions_days":           strconv.Itoa(st.TTLSessionsDays),
-			"data_management.ttl_backup_coupling_enabled": "0",
-			"data_management.s3_region":                   "",
-			"data_management.s3_path_prefix":              "",
-			"data_management.s3_access_key_id":            "",
-			"data_management.s3_encrypt_backup":           "0",
-			"data_management.backup_schedule_full":        "",
-			"data_management.backup_schedule_incremental": "",
+			"data_management.ttl_backup_coupling_enabled": boolToSetting(st.TTLBackupCouplingEnabled),
 		}
 		ctx := map[string]any{
 			"title":                 "Data Management Settings",
@@ -50,8 +50,8 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 			"request":               map[string]any{"endpoint": "settings/data-management"},
 			"dm_settings":           dmSettings,
 			"dm_secret_present": map[string]bool{
-				"s3_secret_access_key":       false,
-				"backup_encryption_password": false,
+				"s3_secret_access_key":       s.dataManagementService.GetSettings().S3SecretAccessKey != "",
+				"backup_encryption_password": s.dataManagementService.GetSettings().BackupEncryptionPassword != "",
 			},
 			"flash_msg":  "",
 			"flash_type": "info",
@@ -84,12 +84,21 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		st := datamanagement.Settings{
-			BackupEnabled:   parseBool(vals["backup_enabled"]),
-			S3Bucket:        vals["s3_bucket"],
-			TTLLogsDays:     parseIntDefault(vals["ttl_logs_days"], 30),
-			TTLTracesDays:   parseIntDefault(vals["ttl_traces_days"], 30),
-			TTLMetricsHours: parseIntDefault(vals["ttl_metrics_hours"], 168),
-			TTLSessionsDays: parseIntDefault(vals["ttl_sessions_days"], 30),
+			BackupEnabled:             parseBool(vals["backup_enabled"]),
+			S3Bucket:                  vals["s3_bucket"],
+			S3AccessKeyID:             vals["s3_access_key_id"],
+			S3SecretAccessKey:         vals["s3_secret_access_key"],
+			S3Region:                  vals["s3_region"],
+			S3PathPrefix:              vals["s3_path_prefix"],
+			S3EncryptBackup:           parseBool(vals["s3_encrypt_backup"]),
+			BackupEncryptionPassword:  vals["backup_encryption_password"],
+			BackupScheduleFull:        vals["backup_schedule_full"],
+			BackupScheduleIncremental: vals["backup_schedule_incremental"],
+			TTLLogsDays:               parseIntDefault(vals["ttl_logs_days"], 30),
+			TTLTracesDays:             parseIntDefault(vals["ttl_traces_days"], 30),
+			TTLMetricsHours:           parseIntDefault(vals["ttl_metrics_hours"], 168),
+			TTLSessionsDays:           parseIntDefault(vals["ttl_sessions_days"], 30),
+			TTLBackupCouplingEnabled:  parseBool(vals["ttl_backup_coupling_enabled"]),
 		}
 		writeJSON(w, http.StatusOK, s.dataManagementService.SaveSettings(st))
 	default:

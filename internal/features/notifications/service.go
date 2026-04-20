@@ -19,6 +19,27 @@ type Subscription struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// Channel represents a persistent named notification channel of any type
+// (webhook, slack, email, browser_push / webpush).
+type Channel struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	ChannelType string            `json:"channel_type"`
+	Config      map[string]string `json:"config"`
+	Enabled     bool              `json:"enabled"`
+	CreatedAt   string            `json:"created_at"`
+}
+
+// RuleParams holds all fields required to create or update a notification rule.
+type RuleParams struct {
+	Name              string
+	LogicOperator     string
+	Severity          string
+	CooldownSeconds   int
+	ChannelIDs        []string
+	ConditionsJSON    string
+}
+
 type Rule struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -90,6 +111,125 @@ func (s *Service) subscribeStoreBacked(ctx context.Context, endpoint string) (Su
 		return Subscription{}, err
 	}
 	return Subscription{ID: id, Endpoint: endpoint, Enabled: true, CreatedAt: createdAt}, nil
+}
+
+// CreateChannel creates a named notification channel of any supported type.
+// Valid channelTypes: "webhook", "slack", "email", "browser_push" / "webpush".
+func (s *Service) CreateChannel(name, channelType string, config map[string]string) (Channel, error) {
+	return s.createChannelStoreBacked(context.Background(), name, channelType, config)
+}
+
+func (s *Service) createChannelStoreBacked(ctx context.Context, name, channelType string, config map[string]string) (Channel, error) {
+	if name == "" {
+		return Channel{}, errors.New("name is required")
+	}
+	validTypes := map[string]bool{"webhook": true, "slack": true, "email": true, "browser_push": true, "webpush": true}
+	if !validTypes[channelType] {
+		return Channel{}, errors.New("invalid channel_type")
+	}
+	if err := s.ensureSchema(ctx); err != nil {
+		return Channel{}, err
+	}
+	id := persist.NewID()
+	createdAt := persist.RFC3339Now()
+	configJSON := persist.JSONString(config)
+	store, err := persist.Open(ctx, s.storeFactory)
+	if err != nil {
+		return Channel{}, err
+	}
+	defer func() { _ = store.Close() }()
+	_, err = store.Exec(ctx, "INSERT INTO sobs_notification_channels (Id, Name, ChannelType, ConfigJson, Enabled, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", id, name, channelType, configJSON, 1, 0, persist.Version())
+	if err != nil {
+		return Channel{}, err
+	}
+	return Channel{ID: id, Name: name, ChannelType: channelType, Config: config, Enabled: true, CreatedAt: createdAt}, nil
+}
+
+// GetChannel fetches a single channel by ID, returning its full config.
+func (s *Service) GetChannel(id string) (Channel, bool) {
+	return s.getChannelStoreBacked(context.Background(), id)
+}
+
+func (s *Service) getChannelStoreBacked(ctx context.Context, id string) (Channel, bool) {
+	if err := s.ensureSchema(ctx); err != nil {
+		return Channel{}, false
+	}
+	store, err := persist.Open(ctx, s.storeFactory)
+	if err != nil {
+		return Channel{}, false
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.Query(ctx, "SELECT Id, Name, ChannelType, ConfigJson, Enabled FROM sobs_notification_channels FINAL WHERE IsDeleted = 0 AND Id = ? LIMIT 1", id)
+	if err != nil {
+		return Channel{}, false
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return Channel{}, false
+	}
+	var ch Channel
+	var configJSON string
+	var enabled uint8
+	if err := rows.Scan(&ch.ID, &ch.Name, &ch.ChannelType, &configJSON, &enabled); err != nil {
+		return Channel{}, false
+	}
+	ch.Config = persist.ParseStringMap(configJSON)
+	ch.Enabled = enabled == 1
+	ch.CreatedAt = persist.RFC3339Now()
+	return ch, true
+}
+
+// CreateFullRule creates a notification rule with all configurable fields.
+func (s *Service) CreateFullRule(p RuleParams) (Rule, error) {
+	return s.createFullRuleStoreBacked(context.Background(), p)
+}
+
+func (s *Service) createFullRuleStoreBacked(ctx context.Context, p RuleParams) (Rule, error) {
+	if p.Name == "" {
+		return Rule{}, errors.New("name is required")
+	}
+	if p.LogicOperator == "" {
+		p.LogicOperator = "any"
+	}
+	if p.Severity == "" {
+		p.Severity = "warning"
+	}
+	if p.CooldownSeconds < 0 || p.CooldownSeconds > 86400 {
+		p.CooldownSeconds = 300
+	}
+	if p.ConditionsJSON == "" {
+		p.ConditionsJSON = "[]"
+	}
+	channelIDsStr := ""
+	if len(p.ChannelIDs) > 0 {
+		channelIDsStr = joinStrings(p.ChannelIDs, ",")
+	}
+	if err := s.ensureSchema(ctx); err != nil {
+		return Rule{}, err
+	}
+	id := persist.NewID()
+	createdAt := persist.RFC3339Now()
+	store, err := persist.Open(ctx, s.storeFactory)
+	if err != nil {
+		return Rule{}, err
+	}
+	defer func() { _ = store.Close() }()
+	_, err = store.Exec(ctx, "INSERT INTO sobs_notification_rules (Id, Name, Enabled, LogicOperator, ConditionsJson, ChannelIds, Severity, CooldownSeconds, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", id, p.Name, 1, p.LogicOperator, p.ConditionsJSON, channelIDsStr, p.Severity, p.CooldownSeconds, 0, persist.Version())
+	if err != nil {
+		return Rule{}, err
+	}
+	return Rule{ID: id, Name: p.Name, Enabled: true, CreatedAt: createdAt}, nil
+}
+
+func joinStrings(items []string, sep string) string {
+	result := ""
+	for i, s := range items {
+		if i > 0 {
+			result += sep
+		}
+		result += s
+	}
+	return result
 }
 
 func makeID() string {

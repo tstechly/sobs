@@ -1,40 +1,42 @@
 package web
 
 import (
-	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 func TestSettingsNotificationsChannelsCreate(t *testing.T) {
 	srv := newTestServer()
-	req := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	// POST with form data matching Python's form-based channel creation;
+	// the handler now redirects (303) on success instead of returning JSON 201.
+	body := strings.NewReader("name=test-channel&channel_type=browser_push&push_endpoint=https%3A%2F%2Fexample.com%2Fpush")
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", body)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/settings/notifications" {
+		t.Fatalf("expected redirect to /settings/notifications, got %q", loc)
 	}
 }
 
 func TestNotificationRulesLifecycleRoutes(t *testing.T) {
 	srv := newTestServer()
 
-	createReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules", bytes.NewReader([]byte(`{"name":"critical-errors"}`)))
-	createRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(createRec, createReq)
-	if createRec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", createRec.Code)
+	// Create rule directly via the service (form-based creation redirects and
+	// does not return the ID in the response body, so we create it here to
+	// obtain the ID for subsequent toggle / delete calls).
+	rule, err := srv.notificationService.CreateRule("critical-errors")
+	if err != nil {
+		t.Fatalf("create rule via service: %v", err)
 	}
-
-	var rule map[string]any
-	if err := json.Unmarshal(createRec.Body.Bytes(), &rule); err != nil {
-		t.Fatalf("unmarshal rule: %v", err)
-	}
-	id, _ := rule["id"].(string)
+	id := rule.ID
 	if id == "" {
-		t.Fatal("expected id")
+		t.Fatal("expected non-empty rule ID from service")
 	}
 
 	toggleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules/"+id+"/toggle", nil)
@@ -61,3 +63,4 @@ func TestNotificationsRulesAutoGenerate(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 }
+

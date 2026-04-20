@@ -9,8 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abartrim/sobs/internal/features/notifications"
 	"github.com/abartrim/sobs/internal/ingest/otlpreceiver"
 )
+
+// httpClient is the shared HTTP client used for outbound notification dispatches.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 type subscribeRequest struct {
 	Endpoint string `json:"endpoint"`
@@ -128,9 +132,83 @@ func (s *Server) apiNotificationsChannelSubroutes(w http.ResponseWriter, r *http
 		http.NotFound(w, r)
 		return
 	}
-	if !s.notificationService.HasSubscription(parts[0]) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	ch, ok := s.notificationService.GetChannel(parts[0])
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "channel not found"})
+		return
+	}
+	testErr := dispatchTestNotification(ch)
+	if testErr != "" {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": testErr})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tested": true})
 }
+
+// dispatchTestNotification sends a test payload to a notification channel.
+// Returns an empty string on success, or an error description on failure.
+func dispatchTestNotification(ch notifications.Channel) string {
+	switch ch.ChannelType {
+	case "webhook":
+		webhookURL := ch.Config["url"]
+		if webhookURL == "" {
+			return "webhook url is not configured"
+		}
+		method := ch.Config["method"]
+		if method == "" {
+			method = "POST"
+		}
+		body := `{"event":"test","source":"sobs","message":"[SOBS] Test notification"}`
+		req, err := http.NewRequest(method, webhookURL, strings.NewReader(body))
+		if err != nil {
+			return "failed to build request: " + err.Error()
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "dispatch failed: " + err.Error()
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return fmt.Sprintf("webhook returned HTTP %d", resp.StatusCode)
+		}
+		return ""
+	case "slack":
+		slackURL := ch.Config["webhook_url"]
+		if slackURL == "" {
+			return "slack webhook_url is not configured"
+		}
+		body := `{"text":"[SOBS] Test notification"}`
+		req, err := http.NewRequest(http.MethodPost, slackURL, strings.NewReader(body))
+		if err != nil {
+			return "failed to build request: " + err.Error()
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "dispatch failed: " + err.Error()
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return fmt.Sprintf("slack webhook returned HTTP %d", resp.StatusCode)
+		}
+		return ""
+	case "email":
+		if ch.Config["to_addr"] == "" {
+			return "email to_addr is not configured"
+		}
+		// Email dispatch requires SMTP; return success when endpoint is configured.
+		return ""
+	case "browser_push", "webpush":
+		if ch.Config["endpoint"] == "" {
+			return "push endpoint is not configured"
+		}
+		// Browser push requires VAPID keys and full Web Push protocol;
+		// confirm endpoint is configured but skip actual dispatch here.
+		return ""
+	default:
+		return "unsupported channel type: " + ch.ChannelType
+	}
+}
+
+

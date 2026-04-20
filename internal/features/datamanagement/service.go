@@ -12,12 +12,21 @@ import (
 )
 
 type Settings struct {
-	BackupEnabled    bool   `json:"backup_enabled"`
-	S3Bucket         string `json:"s3_bucket"`
-	TTLLogsDays      int    `json:"ttl_logs_days"`
-	TTLTracesDays    int    `json:"ttl_traces_days"`
-	TTLMetricsHours  int    `json:"ttl_metrics_hours"`
-	TTLSessionsDays  int    `json:"ttl_sessions_days"`
+	BackupEnabled               bool   `json:"backup_enabled"`
+	S3Bucket                    string `json:"s3_bucket"`
+	S3AccessKeyID               string `json:"s3_access_key_id"`
+	S3SecretAccessKey           string `json:"s3_secret_access_key"`
+	S3Region                    string `json:"s3_region"`
+	S3PathPrefix                string `json:"s3_path_prefix"`
+	S3EncryptBackup             bool   `json:"s3_encrypt_backup"`
+	BackupEncryptionPassword    string `json:"backup_encryption_password"`
+	BackupScheduleFull          string `json:"backup_schedule_full"`
+	BackupScheduleIncremental   string `json:"backup_schedule_incremental"`
+	TTLLogsDays                 int    `json:"ttl_logs_days"`
+	TTLTracesDays               int    `json:"ttl_traces_days"`
+	TTLMetricsHours             int    `json:"ttl_metrics_hours"`
+	TTLSessionsDays             int    `json:"ttl_sessions_days"`
+	TTLBackupCouplingEnabled    bool   `json:"ttl_backup_coupling_enabled"`
 }
 
 type Backup struct {
@@ -45,12 +54,21 @@ func (s *Service) GetSettings() Settings {
 
 func (s *Service) getSettingsStoreBacked(ctx context.Context) Settings {
 	return Settings{
-		BackupEnabled:   settingBool(ctx, s.storeFactory, "data_management.backup_enabled", false),
-		S3Bucket:        settingString(ctx, s.storeFactory, "data_management.s3_bucket", ""),
-		TTLLogsDays:     settingInt(ctx, s.storeFactory, "data_management.ttl_logs_days", 30),
-		TTLTracesDays:   settingInt(ctx, s.storeFactory, "data_management.ttl_traces_days", 30),
-		TTLMetricsHours: settingInt(ctx, s.storeFactory, "data_management.ttl_metrics_hours", 168),
-		TTLSessionsDays: settingInt(ctx, s.storeFactory, "data_management.ttl_sessions_days", 30),
+		BackupEnabled:             settingBool(ctx, s.storeFactory, "data_management.backup_enabled", false),
+		S3Bucket:                  settingString(ctx, s.storeFactory, "data_management.s3_bucket", ""),
+		S3AccessKeyID:             settingString(ctx, s.storeFactory, "data_management.s3_access_key_id", ""),
+		S3SecretAccessKey:         settingString(ctx, s.storeFactory, "data_management.s3_secret_access_key", ""),
+		S3Region:                  settingString(ctx, s.storeFactory, "data_management.s3_region", ""),
+		S3PathPrefix:              settingString(ctx, s.storeFactory, "data_management.s3_path_prefix", ""),
+		S3EncryptBackup:           settingBool(ctx, s.storeFactory, "data_management.s3_encrypt_backup", false),
+		BackupEncryptionPassword:  settingString(ctx, s.storeFactory, "data_management.backup_encryption_password", ""),
+		BackupScheduleFull:        settingString(ctx, s.storeFactory, "data_management.backup_schedule_full", ""),
+		BackupScheduleIncremental: settingString(ctx, s.storeFactory, "data_management.backup_schedule_incremental", ""),
+		TTLLogsDays:               settingInt(ctx, s.storeFactory, "data_management.ttl_logs_days", 30),
+		TTLTracesDays:             settingInt(ctx, s.storeFactory, "data_management.ttl_traces_days", 30),
+		TTLMetricsHours:           settingInt(ctx, s.storeFactory, "data_management.ttl_metrics_hours", 168),
+		TTLSessionsDays:           settingInt(ctx, s.storeFactory, "data_management.ttl_sessions_days", 30),
+		TTLBackupCouplingEnabled:  settingBool(ctx, s.storeFactory, "data_management.ttl_backup_coupling_enabled", false),
 	}
 }
 
@@ -73,10 +91,25 @@ func (s *Service) saveSettingsStoreBacked(ctx context.Context, st Settings) Sett
 	}
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.backup_enabled", boolString(st.BackupEnabled))
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_bucket", st.S3Bucket)
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_access_key_id", st.S3AccessKeyID)
+	// Sensitive: only overwrite if a new value is provided; empty string = keep existing
+	if st.S3SecretAccessKey != "" {
+		_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_secret_access_key", st.S3SecretAccessKey)
+	}
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_region", st.S3Region)
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_path_prefix", st.S3PathPrefix)
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_encrypt_backup", boolString(st.S3EncryptBackup))
+	// Sensitive: only overwrite if a new value is provided
+	if st.BackupEncryptionPassword != "" {
+		_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.backup_encryption_password", st.BackupEncryptionPassword)
+	}
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.backup_schedule_full", st.BackupScheduleFull)
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.backup_schedule_incremental", st.BackupScheduleIncremental)
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.ttl_logs_days", strconv.Itoa(st.TTLLogsDays))
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.ttl_traces_days", strconv.Itoa(st.TTLTracesDays))
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.ttl_metrics_hours", strconv.Itoa(st.TTLMetricsHours))
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.ttl_sessions_days", strconv.Itoa(st.TTLSessionsDays))
+	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.ttl_backup_coupling_enabled", boolString(st.TTLBackupCouplingEnabled))
 	return st
 }
 

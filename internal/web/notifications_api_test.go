@@ -178,19 +178,21 @@ func TestSettingsNotificationsChannelActions(t *testing.T) {
 func TestSettingsNotificationsCreateAcceptsFormPayloads(t *testing.T) {
 	srv := newTestServer()
 
-	channelReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", strings.NewReader("endpoint=https%3A%2F%2Fexample.com%2Fform-push"))
+	// Channel creation with form data; handler now redirects (303) matching Python.
+	channelReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", strings.NewReader("name=form-channel&channel_type=browser_push&push_endpoint=https%3A%2F%2Fexample.com%2Fform-push"))
 	channelReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	channelRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(channelRec, channelReq)
-	if channelRec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", channelRec.Code)
+	if channelRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d body=%s", channelRec.Code, channelRec.Body.String())
 	}
 
+	// Rule creation with form data; handler now redirects (303) matching Python.
 	ruleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules", strings.NewReader("name=form-rule"))
 	ruleReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	ruleRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(ruleRec, ruleReq)
-	if ruleRec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", ruleRec.Code)
+	if ruleRec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d body=%s", ruleRec.Code, ruleRec.Body.String())
 	}
 }
