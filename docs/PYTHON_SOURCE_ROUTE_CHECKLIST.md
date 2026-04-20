@@ -60,8 +60,8 @@ Status legend:
 
 ## RUM And Web Traffic
 
-- `TODO | GET | /rum | app.py`
-- `TODO | GET | /rum/help | app.py`
+- `DONE | GET | /rum | app.py`
+- `DONE | GET | /rum/help | app.py`
 - `TODO | GET | /web-traffic | app.py`
 - `TODO | GET | /web-traffic/help | app.py`
 - `TODO | GET | /api/web-traffic/geo | app.py`
