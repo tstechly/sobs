@@ -192,22 +192,22 @@ Status legend:
 
 ## AI Settings And Repositories
 
-- `TODO | GET | /settings/ai | app.py`
-- `TODO | GET | /settings/help/ai | app.py`
-- `TODO | POST | /settings/ai | app.py`
-- `TODO | GET | /settings/enrichment | app.py`
-- `TODO | GET | /settings/help/enrichment | app.py`
-- `TODO | POST | /settings/enrichment | app.py`
-- `TODO | GET | /settings/repositories | app.py`
-- `TODO | GET | /settings/help/repositories | app.py`
-- `TODO | POST | /settings/repositories | app.py`
-- `TODO | POST | /settings/repositories/github-token/validate | app.py`
-- `TODO | POST | /settings/repositories/<app_id>/realtime-mode | app.py`
-- `TODO | POST | /settings/repositories/<app_id>/ci-ingest-key/rotate | app.py`
-- `TODO | POST | /settings/repositories/<app_id>/ci-ingest-key/revoke | app.py`
-- `TODO | POST | /settings/repositories/<app_id> | app.py`
-- `TODO | POST | /settings/repositories/<app_id>/releases | app.py`
-- `TODO | POST | /settings/repositories/<app_id>/delete | app.py`
+- `DONE | GET | /settings/ai | app.py`
+- `DONE | GET | /settings/help/ai | app.py`
+- `DONE | POST | /settings/ai | app.py`
+- `DONE | GET | /settings/enrichment | app.py`
+- `DONE | GET | /settings/help/enrichment | app.py`
+- `DONE | POST | /settings/enrichment | app.py`
+- `DONE | GET | /settings/repositories | app.py`
+- `DONE | GET | /settings/help/repositories | app.py`
+- `DONE | POST | /settings/repositories | app.py`
+- `DONE | POST | /settings/repositories/github-token/validate | app.py`
+- `DONE | POST | /settings/repositories/<app_id>/realtime-mode | app.py`
+- `DONE | POST | /settings/repositories/<app_id>/ci-ingest-key/rotate | app.py`
+- `DONE | POST | /settings/repositories/<app_id>/ci-ingest-key/revoke | app.py`
+- `DONE | POST | /settings/repositories/<app_id> | app.py`
+- `DONE | POST | /settings/repositories/<app_id>/releases | app.py`
+- `DONE | POST | /settings/repositories/<app_id>/delete | app.py`
 
 ## Agents And AI Helper
 
