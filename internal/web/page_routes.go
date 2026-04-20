@@ -749,13 +749,22 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 	fromTS := strings.TrimSpace(q.Get("from_ts"))
 	toTS := strings.TrimSpace(q.Get("to_ts"))
 	service := strings.TrimSpace(q.Get("service"))
+	timeError := ""
 
 	windowMinutes := 30
 	if parsed, err := strconv.Atoi(strings.TrimSpace(q.Get("window_minutes"))); err == nil {
-		switch parsed {
-		case 15, 30, 60, 180:
-			windowMinutes = parsed
+		if parsed < 1 {
+			parsed = 1
 		}
+		if parsed > 180 {
+			parsed = 180
+		}
+		windowMinutes = parsed
+	}
+
+	errorMsg := ""
+	if traceID == "" && errorID == "" && rumSession == "" {
+		errorMsg = "No incident reference provided. Specify trace_id, error_id, or rum_session."
 	}
 
 	ref := strings.TrimSpace(q.Get("_ref"))
@@ -783,11 +792,13 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		"to_ts":                    toTS,
 		"service":                  service,
 		"window_minutes":           windowMinutes,
-		"error_msg":                "",
+		"error_msg":                errorMsg,
+		"time_error":               timeError,
 		"primary_error":            nil,
 		"primary_trace":            nil,
 		"primary_rum":              nil,
 		"existing_work_item":       nil,
+		"work_item_links":          map[string]any{},
 		"related_errors":           []any{},
 		"related_errors_truncated": false,
 		"related_log_count":        0,
@@ -797,11 +808,21 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		"related_rum_sessions":     0,
 		"related_rum_error_count":  0,
 		"related_rum_events":       []any{},
+		"metrics_context": map[string]any{
+			"health_chips":     []any{},
+			"total_points":     0,
+			"series":           []any{},
+			"source_mode":      "none",
+			"match_mode":       "none",
+			"match_label":      "",
+			"match_dimensions": []any{},
+		},
 		"mc": map[string]any{
 			"health_chips":     []any{},
 			"total_points":     0,
 			"series":           []any{},
 			"source_mode":      "none",
+			"match_mode":       "none",
 			"match_label":      "",
 			"match_dimensions": []any{},
 		},
