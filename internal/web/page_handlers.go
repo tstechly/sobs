@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -193,17 +194,26 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if s.renderErr != nil || s.renderer == nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
 
-	selectedServices := r.URL.Query()["service"]
+	selectedServices := normalizeQueryValues(r.URL.Query()["service"], false)
+	service := firstSelected(selectedServices)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
 	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
 	groupBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_by")))
-	grouped := r.URL.Query().Get("grouped") == "1" || groupBy != ""
+	groupedMode := r.URL.Query().Get("grouped") == "1" || groupBy == "group" || groupBy == "message" || groupBy == "fingerprint" || groupBy == "signature"
+	resolved := strings.TrimSpace(r.URL.Query().Get("resolved"))
+	if resolved == "" {
+		resolved = "0"
+	}
 	limit := parseLimitParam(r, defaultErrorsLimit, 1, 10000)
 	offset := parseOffsetParam(r)
 
@@ -213,7 +223,10 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		sortDir = "DESC"
 	}
 	sortCol := "Timestamp"
-	if grouped {
+	if groupedMode {
+		if sortBy == "" {
+			sortBy = "count"
+		}
 		sortCol = "Count"
 		switch sortBy {
 		case "last_seen", "Timestamp":
@@ -223,8 +236,13 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		case "count":
 			sortCol = "Count"
 		}
-	} else if sortBy == "service" {
-		sortCol = "ServiceName"
+	} else {
+		if sortBy == "" {
+			sortBy = "Timestamp"
+		}
+		if sortBy == "service" {
+			sortCol = "ServiceName"
+		}
 	}
 	orderClause := fmt.Sprintf("ORDER BY %s %s", sortCol, sortDir)
 
@@ -236,22 +254,46 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 
 	where, params, errMsg := buildErrorsWhereClause(selectedServices, fromTS, toTS, q)
 	if errMsg != "" {
-		s.renderPageWithError(w, "errors.html", "errors", errMsg, services, nil)
+		s.renderTemplate(w, "errors.html", pongo2.Context{
+			"title":                 "Errors",
+			"mobile_breakpoint_max": "575.98px",
+			"request":               map[string]any{"endpoint": "errors"},
+			"errors":                []map[string]any{},
+			"total":                 0,
+			"limit":                 limit,
+			"offset":                offset,
+			"service":               service,
+			"selected_services":     selectedServices,
+			"q":                     q,
+			"from_ts":               fromTS,
+			"to_ts":                 toTS,
+			"resolved":              resolved,
+			"services":              services,
+			"sort_by":               sortBy,
+			"sort_dir":              strings.ToLower(sortDir),
+			"grouped":               groupedMode,
+			"grouped_mode":          groupedMode,
+			"group_by":              groupBy,
+			"work_item_links":       map[string]any{},
+			"error_msg":             errMsg,
+		})
 		return
 	}
 
 	var rows []map[string]any
 	var total int
 	var queryErr error
-	if grouped {
-		rows, total, queryErr = s.queryErrorsGrouped(r, where, params, orderClause, limit, offset)
+	if groupedMode {
+		rows, total, queryErr = s.queryErrorsGrouped(r, where, params, resolved, orderClause, limit, offset)
 	} else {
-		rows, total, queryErr = s.queryErrors(r, where, params, orderClause, limit, offset)
+		rows, total, queryErr = s.queryErrors(r, where, params, resolved, orderClause, limit, offset)
 	}
 	if queryErr != nil {
 		s.renderPageError(w, "errors", queryErr)
 		return
 	}
+
+	workItemLinks := s.loadErrorWorkItemLinks(r, rows)
 
 	s.renderTemplate(w, "errors.html", pongo2.Context{
 		"title":                 "Errors",
@@ -261,15 +303,19 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 		"total":                 total,
 		"limit":                 limit,
 		"offset":                offset,
+		"service":               service,
 		"selected_services":     selectedServices,
 		"q":                     q,
 		"from_ts":               fromTS,
 		"to_ts":                 toTS,
+		"resolved":              resolved,
 		"services":              services,
 		"sort_by":               sortBy,
 		"sort_dir":              strings.ToLower(sortDir),
-		"grouped":               grouped,
+		"grouped":               groupedMode,
+		"grouped_mode":          groupedMode,
 		"group_by":              groupBy,
+		"work_item_links":       workItemLinks,
 		"error_msg":             "",
 	})
 }
@@ -1129,28 +1175,33 @@ func topStringCounts(counts map[string]int, valueKey, countKey string, limit int
 	return items
 }
 
-func (s *Server) queryErrors(r *http.Request, where string, params []any, orderClause string, limit, offset int) ([]map[string]any, int, error) {
+func (s *Server) queryErrors(r *http.Request, where string, params []any, resolved string, orderClause string, limit, offset int) ([]map[string]any, int, error) {
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
 		return nil, 0, err
 	}
 	defer store.Close()
+	_, _ = store.Exec(r.Context(), "CREATE TABLE IF NOT EXISTS sobs_error_resolutions (ErrorId String, CreatedAt DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(CreatedAt) ORDER BY (ErrorId)")
 
-	finalWhere := "WHERE SeverityText IN ('ERROR','FATAL')"
-	if where != "" {
-		finalWhere = "WHERE SeverityText IN ('ERROR','FATAL') AND (" + strings.TrimPrefix(where, "WHERE ") + ")"
-	}
-
-	total, err := queryCount(r, store, "otel_logs", finalWhere, params)
+	baseSQL, finalWhere, finalParams := buildErrorsBaseSQL(where, params, resolved)
+	totalRows, err := store.Query(r.Context(), "SELECT count() FROM ("+baseSQL+finalWhere+")", finalParams...)
 	if err != nil {
 		if isMissingTableError(err) {
 			return []map[string]any{}, 0, nil
 		}
 		return nil, 0, err
 	}
+	defer totalRows.Close()
+	total := 0
+	if totalRows.Next() {
+		var count any
+		if scanErr := totalRows.Scan(&count); scanErr == nil {
+			total = anyToInt(count)
+		}
+	}
 
-	query := fmt.Sprintf("SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId FROM otel_logs %s %s LIMIT %d OFFSET %d", finalWhere, orderClause, limit, offset)
-	rows, err := store.Query(r.Context(), query, params...)
+	query := baseSQL + finalWhere + " " + orderClause + fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
+	rows, err := store.Query(r.Context(), query, finalParams...)
 	if err != nil {
 		if isMissingTableError(err) {
 			return []map[string]any{}, total, nil
@@ -1160,38 +1211,44 @@ func (s *Server) queryErrors(r *http.Request, where string, params []any, orderC
 	defer rows.Close()
 
 	result := []map[string]any{}
+	ids := []string{}
 	for rows.Next() {
-		var ts, level, service, body, traceID, spanID any
-		if scanErr := rows.Scan(&ts, &level, &service, &body, &traceID, &spanID); scanErr != nil {
+		var errorID, ts, service, traceID, spanID, body, errType, message any
+		if scanErr := rows.Scan(&errorID, &ts, &service, &traceID, &spanID, &body, &errType, &message); scanErr != nil {
 			continue
 		}
+		itemID := anyToString(errorID)
+		ids = append(ids, itemID)
+		traceIDText := anyToString(traceID)
 		result = append(result, map[string]any{
-			"ts":       anyToString(ts),
-			"err_type": anyToString(level),
-			"service":  anyToString(service),
-			"message":  anyToString(body),
-			"trace_id": anyToString(traceID),
-			"span_id":  anyToString(spanID),
+			"id":            itemID,
+			"ts":            anyToString(ts),
+			"err_type":      anyToString(errType),
+			"service":       anyToString(service),
+			"message":       anyToString(message),
+			"raw_body":      anyToString(body),
+			"trace_id":      traceIDText,
+			"span_id":       anyToString(spanID),
+			"trace_ids_csv": traceIDText,
+			"resolved":      resolved == "1",
 		})
 	}
+	applyResolvedState(r.Context(), store, result, ids, resolved)
 	return result, total, nil
 }
 
-func (s *Server) queryErrorsGrouped(r *http.Request, where string, params []any, orderClause string, limit, offset int) ([]map[string]any, int, error) {
+func (s *Server) queryErrorsGrouped(r *http.Request, where string, params []any, resolved string, orderClause string, limit, offset int) ([]map[string]any, int, error) {
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
 		return nil, 0, err
 	}
 	defer store.Close()
+	_, _ = store.Exec(r.Context(), "CREATE TABLE IF NOT EXISTS sobs_error_resolutions (ErrorId String, CreatedAt DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(CreatedAt) ORDER BY (ErrorId)")
 
-	finalWhere := "WHERE SeverityText IN ('ERROR','FATAL')"
-	if where != "" {
-		finalWhere = "WHERE SeverityText IN ('ERROR','FATAL') AND (" + strings.TrimPrefix(where, "WHERE ") + ")"
-	}
+	baseSQL, finalWhere, finalParams := buildErrorsBaseSQL(where, params, resolved)
+	groupedSQL := "SELECT ServiceName, ErrType, Message, min(Timestamp) AS FirstSeen, max(Timestamp) AS LastSeen, count() AS Count, arrayStringConcat(groupUniqArray(64)(TraceId), ',') AS TraceIdsCsv, min(ErrorId) AS ErrorId, min(Body) AS Body, '' AS TraceId, '' AS SpanId FROM (" + baseSQL + finalWhere + ") GROUP BY ServiceName, ErrType, Message"
 
-	groupedSQL := "SELECT ServiceName, SeverityText, Body, TraceId, SpanId, min(Timestamp) AS FirstSeen, max(Timestamp) AS LastSeen, count() AS Count FROM otel_logs " + finalWhere + " GROUP BY ServiceName, SeverityText, Body, TraceId, SpanId"
-
-	countRows, err := store.Query(r.Context(), "SELECT count() FROM ("+groupedSQL+")", params...)
+	countRows, err := store.Query(r.Context(), "SELECT count() FROM (SELECT ServiceName, ErrType, Message FROM ("+baseSQL+finalWhere+") GROUP BY ServiceName, ErrType, Message)", finalParams...)
 	if err != nil {
 		if isMissingTableError(err) {
 			return []map[string]any{}, 0, nil
@@ -1208,7 +1265,7 @@ func (s *Server) queryErrorsGrouped(r *http.Request, where string, params []any,
 	}
 
 	query := "SELECT * FROM (" + groupedSQL + ") " + orderClause + fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
-	rows, err := store.Query(r.Context(), query, params...)
+	rows, err := store.Query(r.Context(), query, finalParams...)
 	if err != nil {
 		if isMissingTableError(err) {
 			return []map[string]any{}, total, nil
@@ -1218,26 +1275,155 @@ func (s *Server) queryErrorsGrouped(r *http.Request, where string, params []any,
 	defer rows.Close()
 
 	result := []map[string]any{}
+	ids := []string{}
 	for rows.Next() {
-		var service, level, body, traceID, spanID, firstSeen, lastSeen, count any
-		if scanErr := rows.Scan(&service, &level, &body, &traceID, &spanID, &firstSeen, &lastSeen, &count); scanErr != nil {
+		var service, errType, message, firstSeen, lastSeen, count, traceIDsCSV, errorID, body, traceID, spanID any
+		if scanErr := rows.Scan(&service, &errType, &message, &firstSeen, &lastSeen, &count, &traceIDsCSV, &errorID, &body, &traceID, &spanID); scanErr != nil {
 			continue
 		}
+		itemID := anyToString(errorID)
+		ids = append(ids, itemID)
 		result = append(result, map[string]any{
-			"ts":         anyToString(lastSeen),
-			"last_seen":  anyToString(lastSeen),
-			"first_seen": anyToString(firstSeen),
-			"count":      anyToInt(count),
-			"err_type":   anyToString(level),
-			"service":    anyToString(service),
-			"message":    anyToString(body),
-			"raw_body":   anyToString(body),
-			"trace_id":   anyToString(traceID),
-			"span_id":    anyToString(spanID),
-			"resolved":   false,
+			"id":            itemID,
+			"ts":            anyToString(lastSeen),
+			"last_seen":     anyToString(lastSeen),
+			"first_seen":    anyToString(firstSeen),
+			"count":         anyToInt(count),
+			"err_type":      anyToString(errType),
+			"service":       anyToString(service),
+			"message":       anyToString(message),
+			"raw_body":      anyToString(body),
+			"trace_id":      anyToString(traceID),
+			"span_id":       anyToString(spanID),
+			"trace_ids_csv": anyToString(traceIDsCSV),
+			"resolved":      resolved == "1",
 		})
 	}
+	applyResolvedState(r.Context(), store, result, ids, resolved)
 	return result, total, nil
+}
+
+func buildErrorsBaseSQL(where string, params []any, resolved string) (string, string, []any) {
+	errorSourcesSQL := summaryErrorSourcesSQL()
+	errorIDExpr := summaryErrorIDSQLExpr()
+	baseSQL := "SELECT " + errorIDExpr + " AS ErrorId, Timestamp, ServiceName, TraceId, SpanId, Body, if(mapContains(LogAttributes, 'exception.type') AND LogAttributes['exception.type'] != '', LogAttributes['exception.type'], 'Error') AS ErrType, if(mapContains(LogAttributes, 'exception.message') AND LogAttributes['exception.message'] != '', LogAttributes['exception.message'], Body) AS Message FROM (" + errorSourcesSQL + ")"
+	finalWhere := where
+	if resolvedClause := buildResolvedErrorsClause(resolved); resolvedClause != "" {
+		finalWhere = appendWhereClause(finalWhere, resolvedClause)
+	}
+	return baseSQL, finalWhere, append([]any{}, params...)
+}
+
+func buildResolvedErrorsClause(resolved string) string {
+	errorIDExpr := summaryErrorIDSQLExpr()
+	localIDExpr := summaryErrorIDLocalTimeSQLExpr()
+	resolvedMatch := "(" + errorIDExpr + " IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId) OR " + localIDExpr + " IN (SELECT ErrorId FROM sobs_error_resolutions GROUP BY ErrorId))"
+	switch strings.TrimSpace(resolved) {
+	case "1":
+		return resolvedMatch
+	case "0":
+		return "NOT " + resolvedMatch
+	default:
+		return ""
+	}
+}
+
+func applyResolvedState(ctx context.Context, store extensionpoints.ClickHouseStore, rows []map[string]any, ids []string, resolved string) {
+	if len(rows) == 0 {
+		return
+	}
+	if resolved == "0" || resolved == "1" {
+		state := resolved == "1"
+		for _, row := range rows {
+			row["resolved"] = state
+		}
+		return
+	}
+	resolvedIDs := loadResolvedErrorIDs(ctx, store, ids)
+	for _, row := range rows {
+		row["resolved"] = resolvedIDs[anyToString(row["id"])]
+	}
+}
+
+func loadResolvedErrorIDs(ctx context.Context, store extensionpoints.ClickHouseStore, ids []string) map[string]bool {
+	result := map[string]bool{}
+	trimmed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			trimmed = append(trimmed, id)
+		}
+	}
+	if len(trimmed) == 0 {
+		return result
+	}
+	placeholders := strings.Repeat("?,", len(trimmed))
+	placeholders = strings.TrimRight(placeholders, ",")
+	args := make([]any, 0, len(trimmed))
+	for _, id := range trimmed {
+		args = append(args, id)
+	}
+	rows, err := store.Query(ctx, "SELECT ErrorId FROM sobs_error_resolutions WHERE ErrorId IN ("+placeholders+") GROUP BY ErrorId", args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id any
+		if scanErr := rows.Scan(&id); scanErr == nil {
+			result[anyToString(id)] = true
+		}
+	}
+	return result
+}
+
+func (s *Server) loadErrorWorkItemLinks(r *http.Request, rows []map[string]any) map[string]any {
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if id := strings.TrimSpace(anyToString(row["id"])); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return map[string]any{}
+	}
+	store, err := s.storeFactory.Open(r.Context())
+	if err != nil {
+		return map[string]any{}
+	}
+	defer store.Close()
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = strings.TrimRight(placeholders, ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	query := "SELECT AnomalyRuleId, IssueUrl, CanonicalIssueUrl, IssueNumber, IssueState FROM sobs_github_work_items FINAL WHERE IsDeleted = 0 AND IssueUrl != '' AND AnomalyRuleId IN (" + placeholders + ") ORDER BY CreatedAt DESC"
+	resultRows, queryErr := store.Query(r.Context(), query, args...)
+	if queryErr != nil {
+		return map[string]any{}
+	}
+	defer resultRows.Close()
+	links := map[string]any{}
+	for resultRows.Next() {
+		var refID, issueURL, canonicalURL, issueNumber, issueState any
+		if scanErr := resultRows.Scan(&refID, &issueURL, &canonicalURL, &issueNumber, &issueState); scanErr != nil {
+			continue
+		}
+		ref := anyToString(refID)
+		if ref == "" {
+			continue
+		}
+		if _, exists := links[ref]; exists {
+			continue
+		}
+		links[ref] = map[string]any{
+			"issue_url":    defaultString(anyToString(issueURL), anyToString(canonicalURL)),
+			"issue_number": anyToInt(issueNumber),
+			"issue_state":  anyToString(issueState),
+		}
+	}
+	return links
 }
 
 func (s *Server) queryTraces(r *http.Request, where string, params []any, orderClause string, limit, offset int) ([]map[string]any, int, error) {

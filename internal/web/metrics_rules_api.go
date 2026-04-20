@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
@@ -914,38 +915,211 @@ func (s *Server) metricsAnomalyPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
+	service := strings.TrimSpace(r.URL.Query().Get("service"))
+	metric := strings.TrimSpace(r.URL.Query().Get("metric"))
+	signal := strings.TrimSpace(r.URL.Query().Get("signal"))
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	attrFP := strings.TrimSpace(r.URL.Query().Get("attr_fp"))
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	pointState := strings.TrimSpace(r.URL.Query().Get("_anomaly_state"))
+	pointScore := strings.TrimSpace(r.URL.Query().Get("_anomaly_score"))
+
+	hours := 24
+	if raw := strings.TrimSpace(r.URL.Query().Get("hours")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			if parsed < 1 {
+				hours = 1
+			} else if parsed > 168 {
+				hours = 168
+			} else {
+				hours = parsed
+			}
+		}
+	}
+
+	errorMsg := ""
+	if fromTS != "" {
+		normalized, err := normalizeCHTimestamp(fromTS)
+		if err != nil {
+			errorMsg = err.Error()
+		} else {
+			fromTS = normalized
+		}
+	}
+	if errorMsg == "" && toTS != "" {
+		normalized, err := normalizeCHTimestamp(toTS)
+		if err != nil {
+			errorMsg = err.Error()
+		} else {
+			toTS = normalized
+		}
+	}
+
+	rows := []map[string]any{}
+	services := []string{}
+	signals := []string{}
+	sources := []string{}
+	useOTELMetricsView := metric != "" && signal == "" && source == ""
+	relatedTarget := ""
+	if source == "logs" || source == "traces" || source == "errors" {
+		relatedTarget = source
+	}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer func() { _ = store.Close() }()
+		services, signals, sources = listDerivedSignalDimensions(r, store)
+
+		if errorMsg == "" {
+			whereClause, params := buildMetricsAnomalyWhereClause(service, metric, signal, source, attrFP, fromTS, toTS, hours)
+			query := "SELECT time, ServiceName, MetricName AS Name, MetricKind AS Kind, AttrFingerprint, value, SampleCount, baseline_mean, baseline_stddev, baseline_lower, baseline_upper, anomaly_score, anomaly_state FROM v_otel_metrics_anomaly"
+			if !useOTELMetricsView {
+				query = "SELECT time, ServiceName, SignalName AS Name, SignalSource AS Kind, AttrFingerprint, value, SampleCount, baseline_mean, baseline_stddev, baseline_lower, baseline_upper, anomaly_score, anomaly_state FROM v_derived_signals_anomaly"
+			}
+			query += whereClause + " ORDER BY time DESC LIMIT 500"
+
+			resultRows, queryErr := queryRows(r.Context(), store, query, params...)
+			if queryErr != nil {
+				errorMsg = publicDashboardQueryError(queryErr)
+			} else {
+				for _, row := range resultRows {
+					item := map[string]any{
+						"time":            formatMetricsAnomalyTimestamp(row["time"]),
+						"service":         anyToString(row["ServiceName"]),
+						"metric":          anyToString(row["Name"]),
+						"metric_kind":     anyToString(row["Kind"]),
+						"related_target":  "",
+						"attr_fp":         anyToString(row["AttrFingerprint"]),
+						"value":           row["value"],
+						"sample_count":    row["SampleCount"],
+						"baseline_mean":   row["baseline_mean"],
+						"baseline_stddev": row["baseline_stddev"],
+						"baseline_lower":  row["baseline_lower"],
+						"baseline_upper":  row["baseline_upper"],
+						"anomaly_score":   row["anomaly_score"],
+						"anomaly_state":   anyToString(row["anomaly_state"]),
+					}
+					if !useOTELMetricsView {
+						item["related_target"] = anyToString(row["Kind"])
+						item["source"] = anyToString(row["Kind"])
+						item["signal"] = anyToString(row["Name"])
+						item["last_value"] = row["value"]
+						item["last_sample_count"] = row["SampleCount"]
+						item["last_time"] = formatMetricsAnomalyTimestamp(row["time"])
+						item["last_anomaly_state"] = anyToString(row["anomaly_state"])
+					}
+					rows = append(rows, item)
+				}
+				if !useOTELMetricsView {
+					annotateMetricRowsWithRules(r.Context(), store, rows)
+				}
+			}
+		}
+	} else {
+		errorMsg = publicDashboardQueryError(err)
+	}
+
 	ctx := map[string]any{
 		"title":                 "Metrics Anomaly Details",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "metrics/anomaly"},
-		"source":                "",
-		"service":               "",
-		"signal":                "",
-		"metric":                "",
-		"attr_fp":               "",
-		"from_ts":               "",
-		"to_ts":                 "",
-		"hours":                 24,
-		"error_msg":             "",
-		"rows":                  []map[string]any{},
-		"total":                 0,
-		"sources":               []any{},
-		"services":              []any{},
-		"signals":               []any{},
-		"related_target":        "",
-		"point_state":           "",
-		"point_score":           "",
+		"source":                source,
+		"service":               service,
+		"signal":                signal,
+		"metric":                metric,
+		"attr_fp":               attrFP,
+		"from_ts":               fromTS,
+		"to_ts":                 toTS,
+		"hours":                 hours,
+		"error_msg":             errorMsg,
+		"rows":                  rows,
+		"total":                 len(rows),
+		"sources":               sources,
+		"services":              services,
+		"signals":               signals,
+		"related_target":        relatedTarget,
+		"point_state":           pointState,
+		"point_score":           pointScore,
 		"source_label": func(source any) string {
-			return strings.TrimSpace(toString(source))
+			return strings.TrimSpace(anyToString(source))
 		},
 		"signal_label": func(_source any, signal any) string {
-			return strings.TrimSpace(toString(signal))
+			return strings.TrimSpace(anyToString(signal))
 		},
 		"signal_description": func(_source any, _signal any) string {
 			return ""
 		},
 	}
 	s.renderTemplate(w, "metrics_anomaly.html", ctx)
+}
+
+func buildMetricsAnomalyWhereClause(service, metric, signal, source, attrFP, fromTS, toTS string, hours int) (string, []any) {
+	parts := []string{}
+	params := []any{}
+	if service != "" {
+		parts = append(parts, "ServiceName = ?")
+		params = append(params, service)
+	}
+	if metric != "" {
+		parts = append(parts, "MetricName = ?")
+		params = append(params, metric)
+	}
+	if signal != "" {
+		parts = append(parts, "SignalName = ?")
+		params = append(params, signal)
+	}
+	if source != "" {
+		parts = append(parts, "SignalSource = ?")
+		params = append(params, source)
+	}
+	if attrFP != "" {
+		parts = append(parts, "AttrFingerprint = ?")
+		params = append(params, attrFP)
+	}
+	if fromTS != "" {
+		parts = append(parts, "time >= ?")
+		params = append(params, fromTS)
+	}
+	if toTS != "" {
+		parts = append(parts, "time <= ?")
+		params = append(params, toTS)
+	}
+	if fromTS == "" && toTS == "" {
+		parts = append(parts, "time >= now() - INTERVAL ? HOUR")
+		params = append(params, hours)
+	}
+	if len(parts) == 0 {
+		return "", params
+	}
+	return " WHERE " + strings.Join(parts, " AND "), params
+}
+
+func publicDashboardQueryError(err error) string {
+	if err == nil {
+		return "Query execution failed"
+	}
+	raw := strings.TrimSpace(err.Error())
+	message := strings.TrimSpace(strings.Split(raw, "\n")[0])
+	if idx := strings.Index(message, "DB::Exception:"); idx >= 0 {
+		message = strings.TrimSpace(message[idx+len("DB::Exception:"):])
+	}
+	if idx := strings.Index(message, ": while executing function"); idx >= 0 {
+		message = strings.TrimSpace(message[:idx])
+	}
+	if idx := strings.Index(message, ". Stack trace"); idx >= 0 {
+		message = strings.TrimSpace(message[:idx])
+	}
+	if message == "" {
+		message = "Query execution failed"
+	}
+	if (strings.Contains(raw, "NO_COMMON_TYPE") || strings.Contains(raw, "TYPE_MISMATCH")) && !strings.Contains(message, "Check casts and column types.") {
+		message += ". Check casts and column types."
+	}
+	if len(message) > 280 {
+		message = strings.TrimSpace(message[:277]) + "..."
+	}
+	return message
 }
 
 func toString(value any) string {
@@ -963,5 +1137,110 @@ func (s *Server) apiMetricsAnomaly(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.metricsService.AnomalySnapshot())
+	service := strings.TrimSpace(r.URL.Query().Get("service"))
+	metric := strings.TrimSpace(r.URL.Query().Get("metric"))
+	if service == "" || metric == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "service and metric query parameters are required"})
+		return
+	}
+
+	hours := 24
+	if raw := strings.TrimSpace(r.URL.Query().Get("hours")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			if parsed < 1 {
+				hours = 1
+			} else if parsed > 168 {
+				hours = 168
+			} else {
+				hours = parsed
+			}
+		}
+	}
+	attrFP := strings.TrimSpace(r.URL.Query().Get("attr_fp"))
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": publicDashboardQueryError(err)})
+		return
+	}
+	defer func() { _ = store.Close() }()
+
+	fpClause := ""
+	params := []any{service, metric, hours}
+	if attrFP != "" {
+		fpClause = " AND AttrFingerprint = ?"
+		params = append(params, attrFP)
+	}
+	rows, err := store.Query(r.Context(), "SELECT time, value, SampleCount AS sample_count, baseline_mean, baseline_stddev, baseline_lower, baseline_upper, anomaly_score, anomaly_state, MetricKind AS metric_kind, AttrFingerprint AS attr_fp FROM v_otel_metrics_anomaly WHERE ServiceName = ? AND MetricName = ? AND time >= now() - INTERVAL ? HOUR"+fpClause+" ORDER BY time LIMIT 1440", params...)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": publicDashboardQueryError(err)})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns := []string{"time", "value", "sample_count", "baseline_mean", "baseline_stddev", "baseline_lower", "baseline_upper", "anomaly_score", "anomaly_state", "metric_kind", "attr_fp"}
+	data := make([][]any, 0)
+	for rows.Next() {
+		var timeValue, value, sampleCount, baselineMean, baselineStddev, baselineLower, baselineUpper, anomalyScore, anomalyState, metricKind, rowAttrFP any
+		if scanErr := rows.Scan(&timeValue, &value, &sampleCount, &baselineMean, &baselineStddev, &baselineLower, &baselineUpper, &anomalyScore, &anomalyState, &metricKind, &rowAttrFP); scanErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": publicDashboardQueryError(scanErr)})
+			return
+		}
+		data = append(data, []any{
+			formatMetricsAnomalyTimestamp(timeValue),
+			safeMetricsAnomalyJSONValue(value),
+			safeMetricsAnomalyJSONValue(sampleCount),
+			safeMetricsAnomalyJSONValue(baselineMean),
+			safeMetricsAnomalyJSONValue(baselineStddev),
+			safeMetricsAnomalyJSONValue(baselineLower),
+			safeMetricsAnomalyJSONValue(baselineUpper),
+			safeMetricsAnomalyJSONValue(anomalyScore),
+			anyToString(anomalyState),
+			anyToString(metricKind),
+			anyToString(rowAttrFP),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": publicDashboardQueryError(err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": service,
+		"metric":  metric,
+		"columns": columns,
+		"rows":    data,
+	})
+}
+
+func safeMetricsAnomalyJSONValue(value any) any {
+	switch t := value.(type) {
+	case float64:
+		if t != t {
+			return nil
+		}
+		return t
+	case float32:
+		if t != t {
+			return nil
+		}
+		return t
+	case []byte:
+		return string(t)
+	default:
+		return value
+	}
+}
+
+func formatMetricsAnomalyTimestamp(value any) string {
+	switch t := value.(type) {
+	case time.Time:
+		return t.UTC().Format("2006-01-02 15:04:05")
+	case string:
+		return strings.TrimSpace(t)
+	case []byte:
+		return strings.TrimSpace(string(t))
+	default:
+		return strings.TrimSpace(anyToString(value))
+	}
 }

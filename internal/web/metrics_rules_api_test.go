@@ -168,7 +168,7 @@ func TestMetricsAnomalyEndpointsRemainAvailable(t *testing.T) {
 	srv := newRenderedMetricsTestServer()
 	seedMetricsRulesParityTables(t, srv)
 
-	for _, path := range []string{"/metrics/rules", "/metrics/anomaly", "/api/metrics/anomaly"} {
+	for _, path := range []string{"/metrics/rules", "/metrics/anomaly", "/api/metrics/anomaly?service=svc-otel&metric=http.server.duration"} {
 		req := httptest.NewRequest(http.MethodGet, "http://example.com"+path, nil)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)

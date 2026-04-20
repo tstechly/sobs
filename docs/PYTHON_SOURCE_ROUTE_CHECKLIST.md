@@ -47,11 +47,11 @@ Status legend:
 - `DONE | POST | /metrics/rules/auto | app.py`
 - `DONE | POST | /metrics/rules/dashboard/auto | app.py`
 - `DONE | POST | /metrics/rules/<rule_id>/delete | app.py`
-- `TODO | GET | /metrics/anomaly | app.py`
-- `TODO | GET | /metrics/help/anomaly | app.py`
-- `TODO | GET | /errors | app.py`
-- `TODO | GET | /errors/help | app.py`
-- `TODO | POST | /errors/<string:error_id>/resolve | app.py`
+- `DONE | GET | /metrics/anomaly | app.py`
+- `DONE | GET | /metrics/help/anomaly | app.py`
+- `DONE | GET | /errors | app.py`
+- `DONE | GET | /errors/help | app.py`
+- `DONE | POST | /errors/<string:error_id>/resolve | app.py`
 - `TODO | GET | /traces | app.py`
 - `TODO | GET | /traces/help | app.py`
 - `TODO | GET | /api/traces/span/<span_id> | app.py`
@@ -114,7 +114,7 @@ Status legend:
 - `TODO | POST | /api/dashboards/spec/ai-build | app.py`
 - `TODO | GET | /api/dashboards/<dashboard_id>/charts/<chart_id>/export | app.py`
 - `TODO | POST | /api/dashboards/<dashboard_id>/charts/import | app.py`
-- `TODO | GET | /api/metrics/anomaly | app.py`
+- `DONE | GET | /api/metrics/anomaly | app.py`
 
 ## Reports
 
