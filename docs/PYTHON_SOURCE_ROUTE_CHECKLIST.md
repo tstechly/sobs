@@ -55,7 +55,7 @@ Status legend:
 - `DONE | GET | /traces | app.py`
 - `DONE | GET | /traces/help | app.py`
 - `DONE | GET | /api/traces/span/<span_id> | app.py`
-- `TODO | GET | /incident | app.py`
+- `DONE | GET | /incident | app.py`
 - `DONE | GET | /incident/help | app.py`
 
 ## RUM And Web Traffic

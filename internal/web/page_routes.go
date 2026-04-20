@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/flosch/pongo2/v6"
@@ -746,10 +747,7 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 	errorID := strings.TrimSpace(q.Get("error_id"))
 	rumSession := strings.TrimSpace(q.Get("rum_session"))
 	rumTS := strings.TrimSpace(q.Get("rum_ts"))
-	fromTS := strings.TrimSpace(q.Get("from_ts"))
-	toTS := strings.TrimSpace(q.Get("to_ts"))
-	service := strings.TrimSpace(q.Get("service"))
-	timeError := ""
+	fromTS, toTS, timeError := parseIncidentTimeWindowArgs(r)
 
 	windowMinutes := 30
 	if parsed, err := strconv.Atoi(strings.TrimSpace(q.Get("window_minutes"))); err == nil {
@@ -779,6 +777,295 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	metricsContext := map[string]any{
+		"source_mode":      "none",
+		"total_points":     0,
+		"series":           []any{},
+		"match_mode":       "none",
+		"match_label":      "no match",
+		"match_dimensions": []any{},
+		"health_chips":     []any{},
+	}
+
+	if traceID == "" && errorID == "" && rumSession == "" {
+		s.renderTemplate(w, "incident.html", pongo2.Context{
+			"title":                    "Incident",
+			"mobile_breakpoint_max":    "575.98px",
+			"request":                  map[string]any{"endpoint": "incident"},
+			"_ref":                     ref,
+			"trace_id":                 "",
+			"error_id":                 "",
+			"rum_session":              "",
+			"rum_ts":                   "",
+			"from_ts":                  "",
+			"to_ts":                    "",
+			"service":                  "",
+			"window_minutes":           windowMinutes,
+			"error_msg":                "No incident reference provided. Specify trace_id, error_id, or rum_session.",
+			"time_error":               "",
+			"primary_error":            nil,
+			"primary_trace":            nil,
+			"primary_rum":              nil,
+			"existing_work_item":       nil,
+			"work_item_links":          map[string]any{},
+			"related_errors":           []any{},
+			"related_errors_truncated": false,
+			"related_log_count":        0,
+			"related_span_count":       0,
+			"anomaly_state":            nil,
+			"related_rum_count":        0,
+			"related_rum_sessions":     0,
+			"related_rum_error_count":  0,
+			"related_rum_events":       []any{},
+			"metrics_context":          metricsContext,
+			"mc":                       metricsContext,
+			"raw_windows":              []any{},
+			"_wi_list":                 []any{},
+		})
+		return
+	}
+
+	service := ""
+	var primaryError map[string]any
+	var primaryTrace map[string]any
+	var primaryRUM map[string]any
+	relatedErrors := make([]map[string]any, 0)
+	relatedErrorsTruncated := false
+	relatedLogCount := 0
+	relatedSpanCount := 0
+	relatedRUMCount := 0
+	relatedRUMSessions := 0
+	relatedRUMErrorCount := 0
+	relatedRUMEvents := make([]map[string]any, 0)
+	rawWindows := make([]map[string]any, 0)
+	var anomalyState any
+	workItemLinks := map[string]any{}
+	var existingWorkItem any
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer func() { _ = store.Close() }()
+
+		errorSourcesSQL := summaryErrorSourcesSQL()
+		errorIDExpr := summaryErrorIDSQLExpr()
+		baseErrorSQL := "SELECT " + errorIDExpr + " AS ErrorId, Timestamp, ServiceName, TraceId, SpanId, Body, LogAttributes, if(mapContains(LogAttributes, 'exception.type') AND LogAttributes['exception.type'] != '', LogAttributes['exception.type'], 'Error') AS ErrType, if(mapContains(LogAttributes, 'exception.message') AND LogAttributes['exception.message'] != '', LogAttributes['exception.message'], Body) AS Message FROM (" + errorSourcesSQL + ")"
+
+		if errorID != "" {
+			if rows, queryErr := queryRows(r.Context(), store, "SELECT * FROM ("+baseErrorSQL+") WHERE ErrorId = ? ORDER BY Timestamp DESC LIMIT 1", errorID); queryErr == nil && len(rows) > 0 {
+				primaryError = buildIncidentErrorItem(rows[0])
+				primaryError["resolved"] = loadResolvedErrorIDs(r.Context(), store, []string{anyToString(primaryError["id"])})[anyToString(primaryError["id"])]
+			}
+		}
+
+		if traceID != "" {
+			if traceRows, queryErr := queryRows(r.Context(), store, "SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode, SpanAttributes FROM otel_traces WHERE TraceId = ? ORDER BY Timestamp ASC", traceID); queryErr == nil && len(traceRows) > 0 {
+				servicesSet := map[string]struct{}{}
+				startMS := parseTimestampMs(anyToString(traceRows[0]["Timestamp"]))
+				endMS := startMS
+				for _, row := range traceRows {
+					svc := strings.TrimSpace(anyToString(row["ServiceName"]))
+					if svc != "" {
+						servicesSet[svc] = struct{}{}
+					}
+					spanStart := parseTimestampMs(anyToString(row["Timestamp"]))
+					spanEnd := spanStart + roundFloat(float64(anyToInt(row["Duration"]))/1000000.0, 2)
+					if spanEnd > endMS {
+						endMS = spanEnd
+					}
+				}
+				services := make([]string, 0, len(servicesSet))
+				for svc := range servicesSet {
+					services = append(services, svc)
+				}
+				sort.Strings(services)
+				root := traceRows[0]
+				primaryTrace = map[string]any{
+					"trace_id":   traceID,
+					"services":   services,
+					"service":    firstSelected(services),
+					"span_count": len(traceRows),
+					"start_ts":   anyToString(root["Timestamp"]),
+					"start_ms":   roundFloat(startMS, 0),
+					"end_ms":     roundFloat(endMS, 0),
+					"total_ms":   roundFloat(maxFloat(0, endMS-startMS), 2),
+					"root_name":  anyToString(root["SpanName"]),
+					"status":     normalizeTraceStatus(anyToString(root["StatusCode"])),
+				}
+			}
+		}
+
+		if rumSession != "" {
+			sessionKeyExpr := "coalesce(nullIf(LogAttributes['session.id'], ''), nullIf(JSONExtractString(Body, 'sessionId'), ''), TraceId)"
+			rumWhere := []string{sessionKeyExpr + " = ?"}
+			rumParams := []any{rumSession}
+			if rumTS != "" {
+				rumWhere = append(rumWhere, "Timestamp <= parseDateTime64BestEffort(?, 9)")
+				rumParams = append(rumParams, rumTS)
+			}
+			rumSQL := "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, ServiceName, " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions WHERE " + strings.Join(rumWhere, " AND ") + " ORDER BY Timestamp DESC LIMIT 1"
+			if rumRows, queryErr := queryRows(r.Context(), store, rumSQL, rumParams...); queryErr == nil && len(rumRows) > 0 {
+				row := rumRows[0]
+				primaryRUM = buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], row["TraceId"], row["SpanId"], anyToString(row["session_key"]))
+			}
+		}
+
+		eventTS := ""
+		if primaryError != nil {
+			service = anyToString(primaryError["service"])
+			eventTS = anyToString(primaryError["ts"])
+		} else if primaryTrace != nil {
+			service = anyToString(primaryTrace["service"])
+			eventTS = anyToString(primaryTrace["start_ts"])
+		} else if primaryRUM != nil {
+			service = anyToString(primaryRUM["service"])
+			eventTS = anyToString(primaryRUM["ts"])
+		}
+
+		if eventTS != "" && fromTS == "" && toTS == "" && timeError == "" {
+			if eventTime, ok := parseIncidentTimestamp(eventTS); ok {
+				halfWindow := time.Duration(windowMinutes/2) * time.Minute
+				fromTS = normalizeIncidentTimestamp(eventTime.Add(-halfWindow))
+				toTS = normalizeIncidentTimestamp(eventTime.Add(halfWindow))
+			}
+		}
+
+		errorWhere := make([]string, 0)
+		errorParams := make([]any, 0)
+		if traceID != "" {
+			errorWhere = append(errorWhere, "TraceId = ?")
+			errorParams = append(errorParams, traceID)
+		} else if service != "" {
+			errorWhere = append(errorWhere, "ServiceName = ?")
+			errorParams = append(errorParams, service)
+		}
+		timeConds, timeParams := incidentTimeWindowConditions("Timestamp", fromTS, toTS)
+		errorWhere = append(errorWhere, timeConds...)
+		errorParams = append(errorParams, timeParams...)
+		errorWhereSQL := ""
+		if len(errorWhere) > 0 {
+			errorWhereSQL = " WHERE " + strings.Join(errorWhere, " AND ")
+		}
+		relatedErrSQL := "SELECT * FROM (" + baseErrorSQL + ")" + errorWhereSQL + " ORDER BY Timestamp DESC LIMIT ?"
+		if errRows, queryErr := queryRows(r.Context(), store, relatedErrSQL, append(errorParams, 51)...); queryErr == nil {
+			relatedErrorsTruncated = len(errRows) > 50
+			errRows = errRows[:minInt(len(errRows), 50)]
+			ids := make([]string, 0, len(errRows))
+			for _, row := range errRows {
+				item := buildIncidentErrorItem(row)
+				ids = append(ids, anyToString(item["id"]))
+				relatedErrors = append(relatedErrors, item)
+			}
+			resolvedIDs := loadResolvedErrorIDs(r.Context(), store, ids)
+			filtered := make([]map[string]any, 0, len(relatedErrors))
+			primaryID := ""
+			if primaryError != nil {
+				primaryID = anyToString(primaryError["id"])
+			}
+			for _, item := range relatedErrors {
+				id := anyToString(item["id"])
+				item["resolved"] = resolvedIDs[id]
+				if id == "" || id == primaryID {
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			relatedErrors = filtered
+		}
+
+		logWhere := make([]string, 0)
+		logParams := make([]any, 0)
+		if traceID != "" {
+			logWhere = append(logWhere, "TraceId = ?")
+			logParams = append(logParams, traceID)
+		} else if service != "" {
+			logWhere = append(logWhere, "ServiceName = ?")
+			logParams = append(logParams, service)
+		}
+		timeConds, timeParams = incidentTimeWindowConditions("Timestamp", fromTS, toTS)
+		logWhere = append(logWhere, timeConds...)
+		logParams = append(logParams, timeParams...)
+		logWhereSQL := ""
+		if len(logWhere) > 0 {
+			logWhereSQL = " WHERE " + strings.Join(logWhere, " AND ")
+		}
+		relatedLogCount = summaryQuerySingleInt(r.Context(), store, "SELECT count() FROM otel_logs"+logWhereSQL, logParams...)
+
+		if service != "" {
+			spanWhere := []string{"ServiceName = ?"}
+			spanParams := []any{service}
+			timeConds, timeParams = incidentTimeWindowConditions("Timestamp", fromTS, toTS)
+			spanWhere = append(spanWhere, timeConds...)
+			spanParams = append(spanParams, timeParams...)
+			spanWhereSQL := " WHERE " + strings.Join(spanWhere, " AND ")
+			relatedSpanCount = summaryQuerySingleInt(r.Context(), store, "SELECT count() FROM otel_traces"+spanWhereSQL, spanParams...)
+		}
+
+		rumWhereParts := make([]string, 0)
+		rumWhereParams := make([]any, 0)
+		sessionKeyExpr := "coalesce(nullIf(LogAttributes['session.id'], ''), nullIf(JSONExtractString(Body, 'sessionId'), ''), TraceId)"
+		if traceID != "" {
+			rumWhereParts = append(rumWhereParts, "TraceId = ?")
+			rumWhereParams = append(rumWhereParams, traceID)
+		} else if service != "" {
+			rumWhereParts = append(rumWhereParts, "(LogAttributes['service.name'] = ? OR LogAttributes['service'] = ?)")
+			rumWhereParams = append(rumWhereParams, service, service)
+		}
+		timeConds, timeParams = incidentTimeWindowConditions("Timestamp", fromTS, toTS)
+		rumWhereParts = append(rumWhereParts, timeConds...)
+		rumWhereParams = append(rumWhereParams, timeParams...)
+		rumWhereSQL := ""
+		if len(rumWhereParts) > 0 {
+			rumWhereSQL = " WHERE " + strings.Join(rumWhereParts, " AND ")
+		}
+		if summaryRows, queryErr := queryRows(r.Context(), store, "SELECT count() AS ev_count, uniq("+sessionKeyExpr+") AS session_count, countIf(EventName IN ('error', 'unhandledrejection')) AS err_count FROM hyperdx_sessions"+rumWhereSQL, rumWhereParams...); queryErr == nil && len(summaryRows) > 0 {
+			relatedRUMCount = anyToInt(summaryRows[0]["ev_count"])
+			relatedRUMSessions = anyToInt(summaryRows[0]["session_count"])
+			relatedRUMErrorCount = anyToInt(summaryRows[0]["err_count"])
+		}
+		if rumRows, queryErr := queryRows(r.Context(), store, "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, ServiceName, "+sessionKeyExpr+" AS session_key FROM hyperdx_sessions"+rumWhereSQL+" ORDER BY Timestamp DESC LIMIT ?", append(rumWhereParams, 20)...); queryErr == nil {
+			for _, row := range rumRows {
+				relatedRUMEvents = append(relatedRUMEvents, buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], row["TraceId"], row["SpanId"], anyToString(row["session_key"])))
+			}
+		}
+
+		if fromTS != "" && toTS != "" {
+			serviceNames := []string{}
+			if service != "" {
+				serviceNames = []string{service}
+			}
+			rawWindows = s.listIncidentRawWindows(r.Context(), store, serviceNames, fromTS, toTS, 25)
+			metricsContext = s.incidentMetricsContext(r.Context(), store, serviceNames, fromTS, toTS)
+		}
+
+		if service != "" {
+			if rows, queryErr := queryRows(r.Context(), store, "SELECT anomaly_state FROM v_derived_signals_anomaly WHERE ServiceName = ? AND SignalSource = 'traces' AND time >= now() - INTERVAL 48 HOUR ORDER BY time DESC LIMIT 1", service); queryErr == nil && len(rows) > 0 {
+				anomalyState = anyToString(rows[0]["anomaly_state"])
+			}
+		}
+
+		refIDs := make([]string, 0)
+		if primaryError != nil {
+			refIDs = append(refIDs, anyToString(primaryError["id"]))
+		} else if errorID != "" {
+			refIDs = append(refIDs, errorID)
+		}
+		if traceID != "" {
+			refIDs = append(refIDs, traceID)
+		}
+		if rumSession != "" {
+			refIDs = append(refIDs, rumSession)
+		}
+		workItemLinks = s.loadWorkItemLinksForRefIDs(r.Context(), store, refIDs)
+		for _, refID := range refIDs {
+			if wiRaw, ok := workItemLinks[refID]; ok {
+				if wi, ok := wiRaw.(map[string]any); ok && strings.TrimSpace(anyToString(wi["issue_url"])) != "" {
+					existingWorkItem = wi
+					break
+				}
+			}
+		}
+	}
+
 	ctx := pongo2.Context{
 		"title":                    "Incident",
 		"mobile_breakpoint_max":    "575.98px",
@@ -792,45 +1079,342 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		"to_ts":                    toTS,
 		"service":                  service,
 		"window_minutes":           windowMinutes,
-		"error_msg":                errorMsg,
+		"error_msg":                defaultString(timeError, errorMsg),
 		"time_error":               timeError,
-		"primary_error":            nil,
-		"primary_trace":            nil,
-		"primary_rum":              nil,
-		"existing_work_item":       nil,
-		"work_item_links":          map[string]any{},
-		"related_errors":           []any{},
-		"related_errors_truncated": false,
-		"related_log_count":        0,
-		"related_span_count":       0,
-		"anomaly_state":            "",
-		"related_rum_count":        0,
-		"related_rum_sessions":     0,
-		"related_rum_error_count":  0,
-		"related_rum_events":       []any{},
-		"metrics_context": map[string]any{
-			"health_chips":     []any{},
-			"total_points":     0,
-			"series":           []any{},
-			"source_mode":      "none",
-			"match_mode":       "none",
-			"match_label":      "",
-			"match_dimensions": []any{},
-		},
-		"mc": map[string]any{
-			"health_chips":     []any{},
-			"total_points":     0,
-			"series":           []any{},
-			"source_mode":      "none",
-			"match_mode":       "none",
-			"match_label":      "",
-			"match_dimensions": []any{},
-		},
-		"raw_windows": []any{},
-		"_wi_list":    []any{},
+		"primary_error":            primaryError,
+		"primary_trace":            primaryTrace,
+		"primary_rum":              primaryRUM,
+		"existing_work_item":       existingWorkItem,
+		"work_item_links":          workItemLinks,
+		"related_errors":           relatedErrors,
+		"related_errors_truncated": relatedErrorsTruncated,
+		"related_log_count":        relatedLogCount,
+		"related_span_count":       relatedSpanCount,
+		"anomaly_state":            anomalyState,
+		"related_rum_count":        relatedRUMCount,
+		"related_rum_sessions":     relatedRUMSessions,
+		"related_rum_error_count":  relatedRUMErrorCount,
+		"related_rum_events":       relatedRUMEvents,
+		"metrics_context":          metricsContext,
+		"mc":                       metricsContext,
+		"raw_windows":              rawWindows,
+		"_wi_list":                 []any{},
 	}
 	s.renderTemplate(w, "incident.html", ctx)
 }
+
+func parseIncidentTimeWindowArgs(r *http.Request) (string, string, string) {
+	fromRaw := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toRaw := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	windowRaw := strings.TrimSpace(r.URL.Query().Get("window_s"))
+
+	fromTS := ""
+	toTS := ""
+	if fromRaw != "" {
+		fromTime, ok := parseIncidentTimestamp(fromRaw)
+		if !ok {
+			return "", "", "Invalid time value. Use ISO-8601, e.g. 2026-03-29T12:00:00Z"
+		}
+		fromTS = normalizeIncidentTimestamp(fromTime)
+	}
+	if toRaw != "" {
+		toTime, ok := parseIncidentTimestamp(toRaw)
+		if !ok {
+			return "", "", "Invalid time value. Use ISO-8601, e.g. 2026-03-29T12:00:00Z"
+		}
+		toTS = normalizeIncidentTimestamp(toTime)
+	}
+	if fromTS != "" && toTS == "" && windowRaw != "" {
+		seconds, err := strconv.Atoi(windowRaw)
+		if err != nil || seconds < 1 {
+			return "", "", "Invalid time value. Use ISO-8601, e.g. 2026-03-29T12:00:00Z"
+		}
+		fromTime, _ := parseIncidentTimestamp(fromTS)
+		toTS = normalizeIncidentTimestamp(fromTime.Add(time.Duration(seconds) * time.Second))
+	}
+	if fromTS != "" && toTS != "" {
+		fromTime, _ := parseIncidentTimestamp(fromTS)
+		toTime, _ := parseIncidentTimestamp(toTS)
+		if !toTime.After(fromTime) {
+			return "", "", "Invalid time window: to_ts must be later than from_ts"
+		}
+	}
+	return fromTS, toTS, ""
+}
+
+func parseIncidentTimestamp(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05 -0700 MST", "2006-01-02 15:04:05.999999999 -0700 MST"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func normalizeIncidentTimestamp(ts time.Time) string {
+	return ts.UTC().Format("2006-01-02 15:04:05")
+}
+
+func incidentTimeWindowConditions(column string, fromTS string, toTS string) ([]string, []any) {
+	conditions := make([]string, 0)
+	params := make([]any, 0)
+	if fromTS != "" {
+		conditions = append(conditions, column+" >= parseDateTime64BestEffort(?, 9)")
+		params = append(params, fromTS)
+	}
+	if toTS != "" {
+		conditions = append(conditions, column+" < parseDateTime64BestEffort(?, 9)")
+		params = append(params, toTS)
+	}
+	return conditions, params
+}
+
+func buildIncidentErrorItem(row map[string]any) map[string]any {
+	attrs := parseStringMap(anyToString(incidentRowValue(row, "LogAttributes")))
+	stack := strings.TrimSpace(attrs["exception.stacktrace"])
+	traceID := anyToString(incidentRowValue(row, "TraceId"))
+	spanID := anyToString(incidentRowValue(row, "SpanId"))
+	errType := firstNonEmpty(anyToString(incidentRowValue(row, "ErrType")), "Error")
+	message := firstNonEmpty(anyToString(incidentRowValue(row, "Message")), anyToString(incidentRowValue(row, "Body")))
+	service := anyToString(incidentRowValue(row, "ServiceName"))
+	ts := anyToString(incidentRowValue(row, "Timestamp"))
+	itemID := anyToString(incidentRowValue(row, "ErrorId", "id"))
+	if itemID == "" {
+		itemID = anyToString(incidentRowValue(row, "id"))
+	}
+	return map[string]any{
+		"id":                   itemID,
+		"ts":                   ts,
+		"service":              service,
+		"err_type":             errType,
+		"message":              message,
+		"message_summary":      message,
+		"summary_from_json":    false,
+		"message_is_json":      false,
+		"message_pretty_json":  "",
+		"raw_body":             anyToString(incidentRowValue(row, "Body")),
+		"raw_body_is_json":     false,
+		"raw_body_pretty_json": "",
+		"stack":                stack,
+		"stack_is_json":        false,
+		"stack_pretty_json":    "",
+		"trace_id":             traceID,
+		"span_id":              spanID,
+		"trace_ids_csv":        traceID,
+		"url":                  firstNonEmpty(attrs["url.full"], attrs["url"]),
+		"error_source":         attrs["error.source"],
+		"page_title":           attrs["browser.page.title"],
+		"viewport":             attrs["browser.viewport"],
+		"artifact_type":        attrs["artifact.type"],
+		"artifact_id":          attrs["artifact.id"],
+		"artifact_url":         attrs["artifact.url"],
+		"replay_id":            attrs["replay.id"],
+		"replay_url":           attrs["replay.url"],
+		"resolved":             false,
+	}
+}
+
+func incidentRowValue(row map[string]any, keys ...string) any {
+	if len(keys) == 0 || len(row) == 0 {
+		return nil
+	}
+	for _, key := range keys {
+		if value, ok := row[key]; ok {
+			return value
+		}
+		needle := strings.ToLower(strings.TrimSpace(key))
+		for candidate, value := range row {
+			if strings.ToLower(strings.TrimSpace(candidate)) == needle {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) listIncidentRawWindows(ctx context.Context, store extensionpoints.ClickHouseStore, serviceNames []string, startTS string, endTS string, limit int) []map[string]any {
+	if startTS == "" || endTS == "" {
+		return []map[string]any{}
+	}
+	whereParts := []string{
+		"WindowEnd >= parseDateTime64BestEffort(?, 9)",
+		"WindowStart <= parseDateTime64BestEffort(?, 9)",
+	}
+	params := []any{startTS, endTS}
+	if len(serviceNames) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(serviceNames)), ",")
+		whereParts = append(whereParts, "(ServiceName = '' OR ServiceName IN ("+placeholders+"))")
+		for _, svc := range serviceNames {
+			params = append(params, svc)
+		}
+	}
+	windowSQL := "SELECT Id, SignalType, SignalRef, ServiceName, Namespace, NodeName, WindowStart, WindowEnd FROM sobs_raw_windows FINAL WHERE " + strings.Join(whereParts, " AND ") + " ORDER BY WindowStart DESC LIMIT ?"
+	params = append(params, maxInt(1, minInt(limit, 100)))
+	rows, err := queryRows(ctx, store, windowSQL, params...)
+	if err != nil || len(rows) == 0 {
+		return []map[string]any{}
+	}
+	windowIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		windowIDs = append(windowIDs, anyToString(row["Id"]))
+	}
+	copiedCounts := s.incidentWindowCopyCounts(ctx, store, windowIDs)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		id := anyToString(row["Id"])
+		copiedCount := copiedCounts[id]
+		expectedCount := 3
+		out = append(out, map[string]any{
+			"id":             id,
+			"signal_type":    anyToString(row["SignalType"]),
+			"signal_ref":     anyToString(row["SignalRef"]),
+			"service_name":   anyToString(row["ServiceName"]),
+			"namespace":      anyToString(row["Namespace"]),
+			"node_name":      anyToString(row["NodeName"]),
+			"window_start":   anyToString(row["WindowStart"]),
+			"window_end":     anyToString(row["WindowEnd"]),
+			"copied_count":   copiedCount,
+			"expected_count": expectedCount,
+			"copy_complete":  copiedCount >= expectedCount,
+		})
+	}
+	return out
+}
+
+func (s *Server) incidentWindowCopyCounts(ctx context.Context, store extensionpoints.ClickHouseStore, windowIDs []string) map[string]int {
+	out := map[string]int{}
+	if len(windowIDs) == 0 {
+		return out
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(windowIDs)), ",")
+	args := make([]any, 0, len(windowIDs))
+	for _, id := range windowIDs {
+		args = append(args, id)
+	}
+	query := "SELECT WindowId, countDistinct(SourceTable) AS c FROM sobs_raw_window_copy_state FINAL WHERE WindowId IN (" + placeholders + ") GROUP BY WindowId"
+	rows, err := queryRows(ctx, store, query, args...)
+	if err != nil {
+		return out
+	}
+	for _, row := range rows {
+		out[anyToString(row["WindowId"])] = anyToInt(row["c"])
+	}
+	return out
+}
+
+func (s *Server) incidentMetricsContext(ctx context.Context, store extensionpoints.ClickHouseStore, serviceNames []string, startTS string, endTS string) map[string]any {
+	result := map[string]any{
+		"source_mode":      "none",
+		"total_points":     0,
+		"series":           []any{},
+		"match_mode":       "none",
+		"match_label":      "no match",
+		"match_dimensions": []any{},
+		"health_chips":     []any{},
+	}
+	if startTS == "" || endTS == "" {
+		return result
+	}
+	whereParts := []string{"TimeUnix >= parseDateTime64BestEffort(?, 9)", "TimeUnix <= parseDateTime64BestEffort(?, 9)"}
+	params := []any{startTS, endTS}
+	matchMode := "time_window_only"
+	matchLabel := "time window only"
+	matchDimensions := []any{"time_window"}
+	if len(serviceNames) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(serviceNames)), ",")
+		whereParts = append(whereParts, "ServiceName IN ("+placeholders+")")
+		for _, svc := range serviceNames {
+			params = append(params, svc)
+		}
+		matchMode = "service_exact"
+		matchLabel = "service exact"
+		matchDimensions = []any{"service"}
+	}
+	whereSQL := strings.Join(whereParts, " AND ")
+	total := summaryQuerySingleInt(ctx, store, "SELECT count() FROM v_otel_metrics_dedup WHERE "+whereSQL, params...)
+	if total <= 0 {
+		return result
+	}
+	rows, err := queryRows(ctx, store, "SELECT ServiceName, MetricName, count() AS points, round(avg(Value), 4) AS avg_value, round(min(Value), 4) AS min_value, round(max(Value), 4) AS max_value FROM v_otel_metrics_dedup WHERE "+whereSQL+" GROUP BY ServiceName, MetricName ORDER BY points DESC, MetricName ASC LIMIT 12", params...)
+	if err != nil {
+		return result
+	}
+	series := make([]any, 0, len(rows))
+	for _, row := range rows {
+		series = append(series, map[string]any{
+			"service": anyToString(row["ServiceName"]),
+			"metric":  anyToString(row["MetricName"]),
+			"points":  anyToInt(row["points"]),
+			"avg":     anyToFloat(row["avg_value"]),
+			"min":     anyToFloat(row["min_value"]),
+			"max":     anyToFloat(row["max_value"]),
+		})
+	}
+	result["source_mode"] = "mixed"
+	result["total_points"] = total
+	result["series"] = series
+	result["match_mode"] = matchMode
+	result["match_label"] = matchLabel
+	result["match_dimensions"] = matchDimensions
+	return result
+}
+
+func (s *Server) loadWorkItemLinksForRefIDs(ctx context.Context, store extensionpoints.ClickHouseStore, refIDs []string) map[string]any {
+	refSet := make([]string, 0, len(refIDs))
+	seen := map[string]bool{}
+	for _, raw := range refIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		refSet = append(refSet, id)
+	}
+	if len(refSet) == 0 {
+		return map[string]any{}
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(refSet)), ",")
+	args := make([]any, 0, len(refSet))
+	for _, id := range refSet {
+		args = append(args, id)
+	}
+	query := "SELECT AnomalyRuleId, IssueUrl, CanonicalIssueUrl, IssueNumber, IssueState FROM sobs_github_work_items FINAL WHERE IsDeleted = 0 AND IssueUrl != '' AND AnomalyRuleId IN (" + placeholders + ") ORDER BY CreatedAt DESC"
+	rows, err := queryRows(ctx, store, query, args...)
+	if err != nil {
+		return map[string]any{}
+	}
+	out := map[string]any{}
+	for _, row := range rows {
+		ref := anyToString(row["AnomalyRuleId"])
+		if ref == "" {
+			continue
+		}
+		if _, exists := out[ref]; exists {
+			continue
+		}
+		out[ref] = map[string]any{
+			"issue_url":    defaultString(anyToString(row["IssueUrl"]), anyToString(row["CanonicalIssueUrl"])),
+			"issue_number": anyToInt(row["IssueNumber"]),
+			"issue_state":  anyToString(row["IssueState"]),
+		}
+	}
+	return out
+}
+
 func (s *Server) incidentHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/incident/help" {
 		http.NotFound(w, r)
