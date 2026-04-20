@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	rumfeature "github.com/abartrim/sobs/internal/features/rum"
 )
 
 func TestRUMAssetsAndClientToken(t *testing.T) {
@@ -138,6 +141,58 @@ func TestRUMSignedAssetUploadAndDownload(t *testing.T) {
 	}
 	if !bytes.Equal(getRec.Body.Bytes(), body) {
 		t.Fatalf("expected binary body match")
+	}
+}
+
+func TestRUMAssetDownloadReturns500WhenMetadataIsInvalid(t *testing.T) {
+	srv := newTestServer()
+	assetDir := t.TempDir()
+	srv.rumService = rumfeature.NewFileService(assetDir)
+
+	id := "0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(filepath.Join(assetDir, id+".meta.json"), []byte(`{"id":"`+id+`","storage_name":"../escape.bin","content_type":"image/png"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/v1/rum/assets/"+id, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := payload["error"]; got != "invalid asset metadata" {
+		t.Fatalf("expected invalid asset metadata error, got %v payload=%v", got, payload)
+	}
+}
+
+func TestRUMAssetDownloadReturns500WhenMetadataCannotBeParsed(t *testing.T) {
+	srv := newTestServer()
+	assetDir := t.TempDir()
+	srv.rumService = rumfeature.NewFileService(assetDir)
+
+	id := "fedcba9876543210fedcba9876543210"
+	if err := os.WriteFile(filepath.Join(assetDir, id+".meta.json"), []byte(`{"broken":`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/v1/rum/assets/"+id, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := payload["error"]; got != "asset metadata unavailable" {
+		t.Fatalf("expected asset metadata unavailable error, got %v payload=%v", got, payload)
 	}
 }
 

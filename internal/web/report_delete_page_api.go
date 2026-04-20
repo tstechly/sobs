@@ -17,8 +17,8 @@ func (s *Server) reportsPageDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.reportService.Delete(parts[0]) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		http.Redirect(w, r, "/reports", http.StatusSeeOther)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": parts[0]})
+	http.Redirect(w, r, "/reports", http.StatusSeeOther)
 }

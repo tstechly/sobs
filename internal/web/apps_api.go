@@ -2,23 +2,46 @@ package web
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
+
+	"github.com/abartrim/sobs/internal/features/apps"
 )
 
 type createAppRequest struct {
-	Name string `json:"name"`
+	ID                 string         `json:"id"`
+	Name               string         `json:"name"`
+	Slug               string         `json:"slug"`
+	OwnerTeam          string         `json:"ownerTeam"`
+	RepoURL            string         `json:"repoUrl"`
+	DefaultEnvironment string         `json:"defaultEnvironment"`
+	Enabled            *bool          `json:"enabled"`
+	Metadata           map[string]any `json:"metadata"`
 }
 
 type patchAppRequest struct {
-	Name *string `json:"name"`
+	Name               *string        `json:"name"`
+	Slug               *string        `json:"slug"`
+	OwnerTeam          *string        `json:"ownerTeam"`
+	RepoURL            *string        `json:"repoUrl"`
+	DefaultEnvironment *string        `json:"defaultEnvironment"`
+	Enabled            *bool          `json:"enabled"`
+	Metadata           map[string]any `json:"metadata"`
 }
 
 type createReleaseRequest struct {
-	Version string `json:"version"`
+	ID          string         `json:"id"`
+	Version     string         `json:"version"`
+	CommitSHA   string         `json:"commitSha"`
+	BuildID     string         `json:"buildId"`
+	Environment string         `json:"environment"`
+	ReleasedAt  string         `json:"releasedAt"`
+	Metadata    map[string]any `json:"metadata"`
 }
 
 type createArtifactRequest struct {
+	ID             string         `json:"id"`
 	ArtifactType   string         `json:"artifactType"`
 	Name           string         `json:"name"`
 	ContentType    string         `json:"contentType"`
@@ -28,24 +51,43 @@ type createArtifactRequest struct {
 	Platform       string         `json:"platform"`
 	Architecture   string         `json:"architecture"`
 	Metadata       map[string]any `json:"metadata"`
+	UploadedAt     string         `json:"uploadedAt"`
 }
 
 func (s *Server) v1Apps(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"items": s.appService.ListApps()})
+		items := s.appService.ListApps()
+		query := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("q")))
+		if query != "" {
+			filtered := make([]apps.App, 0, len(items))
+			for _, item := range items {
+				if strings.Contains(strings.ToLower(item.Name), query) || strings.Contains(strings.ToLower(item.Slug), query) {
+					filtered = append(filtered, item)
+				}
+			}
+			items = filtered
+		}
+		writeJSON(w, http.StatusOK, items)
 	case http.MethodPost:
+		raw := decodeJSONObjectLenient(r)
 		var req createAppRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-			return
-		}
-		a, err := s.appService.CreateApp(strings.TrimSpace(req.Name))
+		mapIntoStruct(raw, &req)
+		item, err := s.appService.CreateApp(apps.CreateAppInput{
+			ID:                 strings.TrimSpace(req.ID),
+			Name:               strings.TrimSpace(req.Name),
+			Slug:               strings.TrimSpace(req.Slug),
+			OwnerTeam:          strings.TrimSpace(req.OwnerTeam),
+			RepoURL:            strings.TrimSpace(req.RepoURL),
+			DefaultEnvironment: strings.TrimSpace(req.DefaultEnvironment),
+			Enabled:            req.Enabled,
+			Metadata:           req.Metadata,
+		})
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeAppsError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, a)
+		writeJSON(w, http.StatusCreated, item)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -62,24 +104,31 @@ func (s *Server) v1AppsSubroutes(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			a, ok := s.appService.GetApp(appID)
+			item, ok := s.appService.GetApp(appID)
 			if !ok {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 				return
 			}
-			writeJSON(w, http.StatusOK, a)
+			writeJSON(w, http.StatusOK, item)
 		case http.MethodPatch:
+			raw := decodeJSONObjectLenient(r)
 			var req patchAppRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-				return
-			}
-			a, err := s.appService.PatchApp(appID, req.Name)
+			mapIntoStruct(raw, &req)
+			item, err := s.appService.PatchApp(appID, apps.PatchAppInput{
+				Name:               req.Name,
+				Slug:               req.Slug,
+				OwnerTeam:          req.OwnerTeam,
+				RepoURL:            req.RepoURL,
+				DefaultEnvironment: req.DefaultEnvironment,
+				Enabled:            req.Enabled,
+				Metadata:           req.Metadata,
+				HasMetadata:        hasJSONField(raw, "metadata"),
+			})
 			if err != nil {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+				writeAppsError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, a)
+			writeJSON(w, http.StatusOK, item)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -90,22 +139,28 @@ func (s *Server) v1AppsSubroutes(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			if _, ok := s.appService.GetApp(appID); !ok {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "app not found"})
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"items": s.appService.ListReleases(appID)})
+			writeJSON(w, http.StatusOK, s.appService.ListReleases(appID))
 		case http.MethodPost:
+			raw := decodeJSONObjectLenient(r)
 			var req createReleaseRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-				return
-			}
-			rls, err := s.appService.CreateRelease(appID, strings.TrimSpace(req.Version))
+			mapIntoStruct(raw, &req)
+			item, err := s.appService.CreateRelease(appID, apps.CreateReleaseInput{
+				ID:          strings.TrimSpace(req.ID),
+				Version:     strings.TrimSpace(req.Version),
+				CommitSHA:   strings.TrimSpace(req.CommitSHA),
+				BuildID:     strings.TrimSpace(req.BuildID),
+				Environment: strings.TrimSpace(req.Environment),
+				ReleasedAt:  strings.TrimSpace(req.ReleasedAt),
+				Metadata:    req.Metadata,
+			})
 			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				writeAppsError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusCreated, rls)
+			writeJSON(w, http.StatusCreated, item)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -129,52 +184,29 @@ func (s *Server) v1ReleasesSubroutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		rls, ok := s.appService.GetRelease(releaseID)
+		release, ok := s.appService.GetRelease(releaseID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
-		writeJSON(w, http.StatusOK, rls)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"release":   release,
+			"artifacts": s.appService.ListArtifacts(releaseID),
+		})
 		return
 	}
 
 	if len(parts) == 2 && parts[1] == "artifacts" {
-		switch r.Method {
-		case http.MethodGet:
-			if _, ok := s.appService.GetRelease(releaseID); !ok {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"items": s.appService.ListArtifacts(releaseID)})
-			return
-		case http.MethodPost:
-			var req createArtifactRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-				return
-			}
-			item, err := s.appService.CreateArtifact(
-				releaseID,
-				strings.TrimSpace(req.ArtifactType),
-				strings.TrimSpace(req.Name),
-				strings.TrimSpace(req.ContentType),
-				req.Size,
-				strings.TrimSpace(req.StorageRef),
-				strings.TrimSpace(req.ChecksumSHA256),
-				strings.TrimSpace(req.Platform),
-				strings.TrimSpace(req.Architecture),
-				req.Metadata,
-			)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			writeJSON(w, http.StatusCreated, item)
-			return
-		default:
+		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if _, ok := s.appService.GetRelease(releaseID); !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "release not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, s.appService.ListArtifacts(releaseID))
+		return
 	}
 
 	if len(parts) == 3 && parts[1] == "artifacts" && parts[2] == "meta" {
@@ -182,42 +214,70 @@ func (s *Server) v1ReleasesSubroutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var raw map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-			return
-		}
-		if _, ok := s.appService.GetRelease(releaseID); !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
-		}
+		raw := decodeJSONObjectLenient(r)
 		var req createArtifactRequest
-		if b, err := json.Marshal(raw); err == nil {
-			_ = json.Unmarshal(b, &req)
-		}
-		if strings.TrimSpace(req.ArtifactType) == "" || strings.TrimSpace(req.Name) == "" {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "meta": raw})
-			return
-		}
-		item, err := s.appService.CreateArtifact(
-			releaseID,
-			strings.TrimSpace(req.ArtifactType),
-			strings.TrimSpace(req.Name),
-			strings.TrimSpace(req.ContentType),
-			req.Size,
-			strings.TrimSpace(req.StorageRef),
-			strings.TrimSpace(req.ChecksumSHA256),
-			strings.TrimSpace(req.Platform),
-			strings.TrimSpace(req.Architecture),
-			req.Metadata,
-		)
+		mapIntoStruct(raw, &req)
+		item, err := s.appService.CreateArtifact(releaseID, apps.CreateArtifactInput{
+			ID:             strings.TrimSpace(req.ID),
+			ArtifactType:   strings.TrimSpace(req.ArtifactType),
+			Name:           strings.TrimSpace(req.Name),
+			ContentType:    strings.TrimSpace(req.ContentType),
+			Size:           req.Size,
+			StorageRef:     strings.TrimSpace(req.StorageRef),
+			ChecksumSHA256: strings.TrimSpace(req.ChecksumSHA256),
+			Platform:       strings.TrimSpace(req.Platform),
+			Architecture:   strings.TrimSpace(req.Architecture),
+			Metadata:       req.Metadata,
+			UploadedAt:     strings.TrimSpace(req.UploadedAt),
+		})
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeAppsError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+		writeJSON(w, http.StatusCreated, item)
 		return
 	}
 
 	http.NotFound(w, r)
+}
+
+func decodeJSONObjectLenient(r *http.Request) map[string]any {
+	body, err := io.ReadAll(r.Body)
+	if err != nil || len(strings.TrimSpace(string(body))) == 0 {
+		return map[string]any{}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return map[string]any{}
+	}
+	return payload
+}
+
+func mapIntoStruct(raw map[string]any, target any) {
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(blob, target)
+}
+
+func hasJSONField(raw map[string]any, key string) bool {
+	_, ok := raw[key]
+	return ok
+}
+
+func writeAppsError(w http.ResponseWriter, err error) {
+	switch err {
+	case nil:
+		return
+	case apps.ErrNameRequired, apps.ErrVersionRequired, apps.ErrArtifactFieldsRequired:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	case apps.ErrAppSlugAlreadyExists:
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case apps.ErrAppNotFound, apps.ErrReleaseNotFound, apps.ErrNotFound:
+		status := http.StatusNotFound
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
 }

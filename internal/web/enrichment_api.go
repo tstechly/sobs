@@ -96,24 +96,24 @@ func (s *Server) enrichmentCVEPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := map[string]any{
-		"title":                      "CVE Findings",
-		"mobile_breakpoint_max":      "575.98px",
-		"request":                    map[string]any{"endpoint": "enrichment/cve"},
-		"cve_enabled":                cveEnabled,
-		"cve_findings":               cveFindings,
-		"cve_last_scan":              "",
-		"cve_last_backfill_cap":      maxReleases,
-		"cve_last_backfill_attempted": 0,
-		"cve_last_backfill_inserted":  0,
+		"title":                        "CVE Findings",
+		"mobile_breakpoint_max":        "575.98px",
+		"request":                      map[string]any{"endpoint": "enrichment/cve"},
+		"cve_enabled":                  cveEnabled,
+		"cve_findings":                 cveFindings,
+		"cve_last_scan":                "",
+		"cve_last_backfill_cap":        maxReleases,
+		"cve_last_backfill_attempted":  0,
+		"cve_last_backfill_inserted":   0,
 		"github_backfill_max_releases": maxReleases,
-		"severity_filter":            severityFilter,
-		"ecosystem_filter":           ecosystemFilter,
-		"package_filter":             packageFilter,
-		"show_all":                   showAll,
-		"selected_severities":        selectedSeverities,
-		"selected_ecosystems":        selectedEcosystems,
-		"severities":                 severities,
-		"ecosystems":                 ecosystems,
+		"severity_filter":              severityFilter,
+		"ecosystem_filter":             ecosystemFilter,
+		"package_filter":               packageFilter,
+		"show_all":                     showAll,
+		"selected_severities":          selectedSeverities,
+		"selected_ecosystems":          selectedEcosystems,
+		"severities":                   severities,
+		"ecosystems":                   ecosystems,
 	}
 	s.renderTemplate(w, "cve.html", ctx)
 }
@@ -123,7 +123,48 @@ func (s *Server) apiWebTrafficGeo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.Geo()})
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	where, params := rumTimeWhereAndParams(fromTS, toTS)
+
+	geoEnabled := parseBool(pickSetting(s.settingsService.Enrichment(), "geo_enabled", "enrichment.geo_enabled"))
+
+	ipDetails := []map[string]any{}
+	countryCounts := []map[string]any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer store.Close()
+		rows, queryErr := store.Query(r.Context(), "SELECT LogAttributes['client.ip'] AS ip, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY ip HAVING ip != '' ORDER BY cnt DESC LIMIT 200", params...)
+		if queryErr == nil {
+			defer rows.Close()
+			total := 0
+			for rows.Next() {
+				var ip, cnt any
+				if scanErr := rows.Scan(&ip, &cnt); scanErr != nil {
+					continue
+				}
+				c := anyToInt(cnt)
+				total += c
+				ipDetails = append(ipDetails, map[string]any{
+					"ip":           anyToString(ip),
+					"count":        c,
+					"country":      "Unknown",
+					"country_code": "",
+				})
+			}
+			if total > 0 {
+				countryCounts = append(countryCounts, map[string]any{"name": "Unknown", "value": total})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":             true,
+		"country_counts": countryCounts,
+		"ip_details":     ipDetails,
+		"geo_enabled":    geoEnabled,
+	})
 }
 
 func (s *Server) apiWebTrafficBrowsers(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +172,32 @@ func (s *Server) apiWebTrafficBrowsers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.Browsers()})
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	where, params := rumTimeWhereAndParams(fromTS, toTS)
+	browsers := []map[string]any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer store.Close()
+		rows, queryErr := store.Query(r.Context(), "SELECT LogAttributes['browser.context.browserName'] AS browser, LogAttributes['browser.context.browserVersion'] AS version, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY browser, version ORDER BY cnt DESC LIMIT 50", params...)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var browser, version, cnt any
+				if scanErr := rows.Scan(&browser, &version, &cnt); scanErr != nil {
+					continue
+				}
+				name := strings.TrimSpace(anyToString(browser) + " " + anyToString(version))
+				if name == "" {
+					name = "Unknown"
+				}
+				browsers = append(browsers, map[string]any{"name": name, "value": anyToInt(cnt)})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "browsers": browsers})
 }
 
 func (s *Server) apiWebTrafficOS(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +205,32 @@ func (s *Server) apiWebTrafficOS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.OS()})
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	where, params := rumTimeWhereAndParams(fromTS, toTS)
+	items := []map[string]any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer store.Close()
+		rows, queryErr := store.Query(r.Context(), "SELECT LogAttributes['browser.context.osName'] AS os, LogAttributes['browser.context.osVersion'] AS version, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY os, version ORDER BY cnt DESC LIMIT 50", params...)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var osName, version, cnt any
+				if scanErr := rows.Scan(&osName, &version, &cnt); scanErr != nil {
+					continue
+				}
+				name := strings.TrimSpace(anyToString(osName) + " " + anyToString(version))
+				if name == "" {
+					name = "Unknown"
+				}
+				items = append(items, map[string]any{"name": name, "value": anyToInt(cnt)})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "operating_systems": items})
 }
 
 func (s *Server) apiWebTrafficTimezones(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +238,28 @@ func (s *Server) apiWebTrafficTimezones(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.Timezones()})
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	where, params := rumTimeWhereAndParams(fromTS, toTS)
+	items := []map[string]any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer store.Close()
+		rows, queryErr := store.Query(r.Context(), "SELECT LogAttributes['browser.context.timezone'] AS tz, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY tz HAVING tz != '' ORDER BY cnt DESC LIMIT 50", params...)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var tz, cnt any
+				if scanErr := rows.Scan(&tz, &cnt); scanErr != nil {
+					continue
+				}
+				items = append(items, map[string]any{"name": anyToString(tz), "value": anyToInt(cnt)})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "timezones": items})
 }
 
 func (s *Server) apiWebTrafficLanguages(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +267,28 @@ func (s *Server) apiWebTrafficLanguages(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.Languages()})
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	where, params := rumTimeWhereAndParams(fromTS, toTS)
+	items := []map[string]any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer store.Close()
+		rows, queryErr := store.Query(r.Context(), "SELECT LogAttributes['browser.context.language'] AS lang, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY lang HAVING lang != '' ORDER BY cnt DESC LIMIT 50", params...)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var lang, cnt any
+				if scanErr := rows.Scan(&lang, &cnt); scanErr != nil {
+					continue
+				}
+				items = append(items, map[string]any{"name": anyToString(lang), "value": anyToInt(cnt)})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "languages": items})
 }
 
 func (s *Server) apiWebTrafficDevices(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +296,28 @@ func (s *Server) apiWebTrafficDevices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.Devices()})
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+	where, params := rumTimeWhereAndParams(fromTS, toTS)
+	items := []map[string]any{}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer store.Close()
+		rows, queryErr := store.Query(r.Context(), "SELECT coalesce(nullIf(LogAttributes['browser.context.deviceType'], ''), nullIf(LogAttributes['browser.context.deviceClass'], ''), 'Unknown') AS device, count() AS cnt FROM hyperdx_sessions "+where+" GROUP BY device ORDER BY cnt DESC LIMIT 50", params...)
+		if queryErr == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var device, cnt any
+				if scanErr := rows.Scan(&device, &cnt); scanErr != nil {
+					continue
+				}
+				items = append(items, map[string]any{"name": anyToString(device), "value": anyToInt(cnt)})
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "devices": items})
 }
 
 func (s *Server) apiEnrichmentLibraries(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	rumfeature "github.com/abartrim/sobs/internal/features/rum"
 )
 
 var rumAssetIDRegex = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -80,20 +83,26 @@ func (s *Server) v1RUMAssetByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid asset id"})
 		return
 	}
-	meta, body, ok := s.rumService.GetUploadedAsset(id)
-	if ok {
+	meta, body, err := s.rumService.GetUploadedAsset(id)
+	if err == nil {
 		w.Header().Set("Content-Type", meta.ContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 		return
 	}
-
-	a, ok := s.rumService.GetAsset(id)
-	if !ok {
+	if errors.Is(err, rumfeature.ErrUploadedAssetMetadataUnavailable) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "asset metadata unavailable"})
+		return
+	}
+	if errors.Is(err, rumfeature.ErrInvalidUploadedAssetMetadata) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid asset metadata"})
+		return
+	}
+	if errors.Is(err, os.ErrNotExist) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "asset metadata unavailable"})
 }
 
 // v1RUMClientToken mirrors Python's issue_rum_client_token endpoint.

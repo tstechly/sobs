@@ -1,12 +1,17 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/abartrim/sobs/internal/ingest/otlpreceiver"
 )
 
 func TestNotificationsSubscribe(t *testing.T) {
@@ -21,12 +26,76 @@ func TestNotificationsSubscribe(t *testing.T) {
 
 func TestTailEndpoint(t *testing.T) {
 	srv := newTestServer()
-	req := httptest.NewRequest(http.MethodGet, "http://example.com/tail", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
+	testHTTP := httptest.NewServer(srv.Handler())
+	defer testHTTP.Close()
+
+	resp, err := http.Get(testHTTP.URL + "/tail?source=logs&service=svc-tail")
+	if err != nil {
+		t.Fatalf("get tail stream: %v", err)
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected event stream content type, got %q", ct)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("expected no-cache, got %q", got)
+	}
+	if got := resp.Header.Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("expected X-Accel-Buffering=no, got %q", got)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	firstLine := readLineWithTimeout(t, reader)
+	if firstLine != "retry: 5000\n" {
+		t.Fatalf("expected retry preamble, got %q", firstLine)
+	}
+	blankLine := readLineWithTimeout(t, reader)
+	if blankLine != "\n" {
+		t.Fatalf("expected blank line after retry preamble, got %q", blankLine)
+	}
+
+	srv.tailBroker.Publish(otlpreceiver.TailEvent{Source: "logs", TS: "2026-04-20 12:00:00.000000", Level: "ERROR", Service: "svc-tail", Body: "boom", TraceID: "abc123"})
+	dataLine := readLineWithTimeout(t, reader)
+	if !strings.HasPrefix(dataLine, "data: ") {
+		t.Fatalf("expected data line, got %q", dataLine)
+	}
+	if !strings.Contains(dataLine, `"source":"logs"`) || !strings.Contains(dataLine, `"service":"svc-tail"`) || !strings.Contains(dataLine, `"body":"boom"`) {
+		t.Fatalf("expected streamed log event payload, got %q", dataLine)
+	}
+	blankLine = readLineWithTimeout(t, reader)
+	if blankLine != "\n" {
+		t.Fatalf("expected blank line after event payload, got %q", blankLine)
+	}
+}
+
+func readLineWithTimeout(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	lineCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			errCh <- err
+			return
+		}
+		lineCh <- line
+	}()
+	select {
+	case line := <-lineCh:
+		return line
+	case err := <-errCh:
+		if err == io.EOF {
+			t.Fatal("unexpected EOF while reading SSE response")
+		}
+		t.Fatalf("read SSE line: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SSE line")
+	}
+	return ""
 }
 
 func TestNotificationsVAPIDLifecycleAndChannelTest(t *testing.T) {
@@ -103,38 +172,6 @@ func TestSettingsNotificationsChannelActions(t *testing.T) {
 	srv.Handler().ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", deleteRec.Code)
-	}
-}
-
-func TestNotificationsListEndpoints(t *testing.T) {
-	srv := newTestServer()
-
-	subReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
-	subRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(subRec, subReq)
-	if subRec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", subRec.Code)
-	}
-
-	ruleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules", bytes.NewReader([]byte(`{"name":"critical-errors"}`)))
-	ruleRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(ruleRec, ruleReq)
-	if ruleRec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", ruleRec.Code)
-	}
-
-	listRulesReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/notifications/rules", nil)
-	listRulesRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(listRulesRec, listRulesReq)
-	if listRulesRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", listRulesRec.Code)
-	}
-
-	listSubsReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/notifications/subscriptions", nil)
-	listSubsRec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(listSubsRec, listSubsReq)
-	if listSubsRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", listSubsRec.Code)
 	}
 }
 

@@ -1,9 +1,12 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 )
+
+const rawSpanMaxBytes = 32 * 1024
 
 func (s *Server) errorsResolve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -38,59 +41,83 @@ func (s *Server) apiTraceSpan(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/traces/span/")
 	if id == "" || strings.Contains(id, "/") {
-		http.NotFound(w, r)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "span_id is required"})
 		return
 	}
+	traceID := strings.TrimSpace(r.URL.Query().Get("trace_id"))
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"span_id": id, "service": "", "operation": "", "duration_ms": 0, "raw": map[string]any{}})
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 	defer func() { _ = store.Close() }()
-	rows, err := store.Query(r.Context(), "SELECT Timestamp, ServiceName, SpanName, Duration, TraceId, StatusCode FROM otel_traces WHERE SpanId = ? ORDER BY Timestamp DESC LIMIT 1", id)
+	query := "SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode, SpanAttributes FROM otel_traces WHERE SpanId = ?"
+	params := []any{id}
+	if traceID != "" {
+		query += " AND TraceId = ?"
+		params = append(params, traceID)
+	}
+	query += " ORDER BY Timestamp DESC LIMIT 1"
+	rows, err := store.Query(r.Context(), query, params...)
+	withAttrs := err == nil
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"span_id": id, "service": "", "operation": "", "duration_ms": 0, "raw": map[string]any{}})
+		query = "SELECT Timestamp, TraceId, SpanId, ParentSpanId, SpanName, ServiceName, Duration, StatusCode FROM otel_traces WHERE SpanId = ?"
+		params = []any{id}
+		if traceID != "" {
+			query += " AND TraceId = ?"
+			params = append(params, traceID)
+		}
+		query += " ORDER BY Timestamp DESC LIMIT 1"
+		rows, err = store.Query(r.Context(), query, params...)
+		withAttrs = false
+	}
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "span not found"})
 		return
 	}
 	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
-		writeJSON(w, http.StatusOK, map[string]any{"span_id": id, "service": "", "operation": "", "duration_ms": 0, "raw": map[string]any{}})
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "span not found"})
 		return
 	}
-	var ts string
-	var service string
-	var operation string
-	var durationNs uint64
-	var traceID string
-	var statusCode string
-	if err := rows.Scan(&ts, &service, &operation, &durationNs, &traceID, &statusCode); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"span_id": id, "service": "", "operation": "", "duration_ms": 0, "raw": map[string]any{}})
-		return
+	var ts, tid, sid, parentSID, name, service, duration, status, attrs any
+	if withAttrs {
+		if err := rows.Scan(&ts, &tid, &sid, &parentSID, &name, &service, &duration, &status, &attrs); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	} else {
+		if err := rows.Scan(&ts, &tid, &sid, &parentSID, &name, &service, &duration, &status); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		attrs = ""
 	}
-	rawAttrs := ""
-	attrRows, attrErr := store.Query(r.Context(), "SELECT SpanAttributes FROM otel_traces WHERE SpanId = ? ORDER BY Timestamp DESC LIMIT 1", id)
-	if attrErr == nil {
-		defer func() { _ = attrRows.Close() }()
-		if attrRows.Next() {
-			var attrs any
-			if scanErr := attrRows.Scan(&attrs); scanErr == nil {
-				rawAttrs = anyToString(attrs)
-				if len(rawAttrs) > 32*1024 {
-					rawAttrs = rawAttrs[:32*1024]
-				}
+	attrMap := parseStringMap(anyToString(attrs))
+	payload := map[string]any{
+		"timestamp":           anyToString(ts),
+		"trace_id":            anyToString(tid),
+		"span_id":             anyToString(sid),
+		"parent_span_id":      anyToString(parentSID),
+		"name":                anyToString(name),
+		"service":             anyToString(service),
+		"duration_ns":         anyToInt(duration),
+		"duration_ms":         roundFloat(float64(anyToInt(duration))/1000000.0, 3),
+		"status_code":         normalizeTraceStatus(anyToString(status)),
+		"attributes":          attrMap,
+		"resource_attributes": map[string]any{},
+	}
+	rawBytes, _ := json.MarshalIndent(payload, "", "  ")
+	truncated := false
+	if len(rawBytes) > rawSpanMaxBytes {
+		truncated = true
+		for key, value := range attrMap {
+			if len(value) > 512 {
+				attrMap[key] = value[:512] + "..."
 			}
 		}
+		payload["attributes"] = attrMap
+		rawBytes, _ = json.MarshalIndent(payload, "", "  ")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"span_id":     id,
-		"trace_id":    traceID,
-		"timestamp":   ts,
-		"service":     service,
-		"operation":   operation,
-		"duration_ms": float64(durationNs) / 1_000_000.0,
-		"status":      statusCode,
-		"raw": map[string]any{
-			"span_attributes": rawAttrs,
-		},
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"span": payload, "raw": string(rawBytes), "truncated": truncated})
 }

@@ -20,6 +20,11 @@ import (
 	"github.com/abartrim/sobs/internal/features/defaultstore"
 )
 
+var (
+	ErrUploadedAssetMetadataUnavailable = errors.New("asset metadata unavailable")
+	ErrInvalidUploadedAssetMetadata     = errors.New("invalid asset metadata")
+)
+
 type Asset struct {
 	ID        string `json:"id"`
 	Content   string `json:"content"`
@@ -113,23 +118,23 @@ func (s *Service) CreateUploadedAsset(assetType, assetName, contentType string, 
 	return meta, nil
 }
 
-func (s *Service) GetUploadedAsset(id string) (UploadedAsset, []byte, bool) {
+func (s *Service) GetUploadedAsset(id string) (UploadedAsset, []byte, error) {
 	metaRaw, err := os.ReadFile(filepath.Join(s.assetDir, id+".meta.json"))
 	if err != nil {
-		return UploadedAsset{}, nil, false
+		return UploadedAsset{}, nil, err
 	}
 	var meta UploadedAsset
 	if err := json.Unmarshal(metaRaw, &meta); err != nil {
-		return UploadedAsset{}, nil, false
+		return UploadedAsset{}, nil, ErrUploadedAssetMetadataUnavailable
 	}
 	if meta.StorageName == "" || strings.Contains(meta.StorageName, "/") || strings.Contains(meta.StorageName, "\\") {
-		return UploadedAsset{}, nil, false
+		return UploadedAsset{}, nil, ErrInvalidUploadedAssetMetadata
 	}
 	body, err := os.ReadFile(filepath.Join(s.assetDir, meta.StorageName))
 	if err != nil {
-		return UploadedAsset{}, nil, false
+		return UploadedAsset{}, nil, err
 	}
-	return meta, body, true
+	return meta, body, nil
 }
 
 func (s *Service) getFileBackedAsset(id string) (Asset, bool) {

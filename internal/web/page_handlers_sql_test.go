@@ -3,14 +3,14 @@ package web
 import "testing"
 
 func TestBuildLogsWhereClauseRejectsUnsafeSQLFilter(t *testing.T) {
-	where, params, errMsg := buildLogsWhereClause(nil, nil, "", "", "", "", "service='api'; DROP TABLE otel_logs")
+	where, params, errMsg := buildLogsWhereClause(nil, nil, nil, nil, "", "", "", "service='api'; DROP TABLE otel_logs")
 	if errMsg == "" {
 		t.Fatalf("expected validation error, got where=%q params=%v", where, params)
 	}
 }
 
 func TestBuildLogsWhereClauseNormalizesAliasesInSQLFilter(t *testing.T) {
-	where, _, errMsg := buildLogsWhereClause(nil, nil, "", "", "", "", "service='api' AND level='INFO'")
+	where, _, errMsg := buildLogsWhereClause(nil, nil, nil, nil, "", "", "", "service='api' AND level='INFO'")
 	if errMsg != "" {
 		t.Fatalf("unexpected error: %s", errMsg)
 	}

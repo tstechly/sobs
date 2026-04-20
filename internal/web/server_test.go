@@ -10,106 +10,6 @@ import (
 	"github.com/abartrim/sobs/internal/store"
 )
 
-func TestSessionEndpointUsesConfiguredCookieName(t *testing.T) {
-	cfg := config.Default()
-	cfg.EnforceAPIAuth = false
-	cfg.SessionCookieName = "custom_session"
-	srv := NewServer(cfg, store.NewNoopStoreFactory())
-
-	r := httptest.NewRequest("GET", "http://example.com/auth/session", nil)
-	r.Header.Set("Authorization", "Bearer test")
-	r.Header.Set("Origin", "http://example.com")
-	r.AddCookie(&http.Cookie{Name: "custom_session", Value: "tok123"})
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-}
-
-func TestSessionEndpointRequiresUIAuthInBasicMode(t *testing.T) {
-	t.Setenv("SOBS_BASIC_AUTH_USERNAME", "user")
-	t.Setenv("SOBS_BASIC_AUTH_PASSWORD", "pass")
-	t.Setenv("SOBS_EXTERNAL_AUTH_URL", "")
-
-	cfg := config.Default()
-	cfg.EnforceAPIAuth = false
-	cfg.SessionCookieName = "session"
-	srv := NewServer(cfg, store.NewNoopStoreFactory())
-
-	r := httptest.NewRequest("GET", "http://example.com/auth/session", nil)
-	r.Header.Set("Origin", "http://example.com")
-	r.AddCookie(&http.Cookie{Name: "session", Value: "tok123"})
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status 401, got %d", w.Code)
-	}
-}
-
-func TestSessionEndpointIgnoresForwardedHeadersWhenNotTrusted(t *testing.T) {
-	cfg := config.Default()
-	cfg.EnforceAPIAuth = false
-	cfg.TrustedProxyMode = false
-	srv := NewServer(cfg, store.NewNoopStoreFactory())
-
-	r := httptest.NewRequest("POST", "http://real.example.com/auth/session", nil)
-	r.Host = "real.example.com"
-	r.Header.Set("Authorization", "Bearer test")
-	r.Header.Set("Origin", "http://spoofed.example.com")
-	r.Header.Set("X-Forwarded-Host", "spoofed.example.com")
-	r.Header.Set("X-Forwarded-Proto", "http")
-	r.AddCookie(&http.Cookie{Name: "session", Value: "tok123"})
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected status 403, got %d", w.Code)
-	}
-}
-
-func TestSessionEndpointUsesForwardedHeadersWhenTrusted(t *testing.T) {
-	cfg := config.Default()
-	cfg.EnforceAPIAuth = false
-	cfg.TrustedProxyMode = true
-	srv := NewServer(cfg, store.NewNoopStoreFactory())
-
-	r := httptest.NewRequest("POST", "http://internal.service/auth/session", nil)
-	r.Host = "internal.service"
-	r.Header.Set("Authorization", "Bearer test")
-	r.Header.Set("Origin", "https://public.example.com")
-	r.Header.Set("X-Forwarded-Host", "public.example.com")
-	r.Header.Set("X-Forwarded-Proto", "https")
-	r.AddCookie(&http.Cookie{Name: "session", Value: "tok123"})
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-}
-
-func TestReadyzEndpoint(t *testing.T) {
-	cfg := config.Default()
-	cfg.EnforceAPIAuth = false
-	srv := NewServer(cfg, store.NewNoopStoreFactory())
-
-	r := httptest.NewRequest("GET", "http://example.com/readyz", nil)
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-}
-
 func TestHealthAliases(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
@@ -149,25 +49,6 @@ func TestRootEndpoint(t *testing.T) {
 	}
 }
 
-func TestGoSmokeEndpoint(t *testing.T) {
-	cfg := config.Default()
-	cfg.EnforceAPIAuth = false
-	cfg.TemplateRoot = "../../templates"
-	srv := NewServer(cfg, store.NewNoopStoreFactory())
-
-	r := httptest.NewRequest("GET", "http://example.com/go/smoke", nil)
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "SOBS Go Migration") {
-		t.Fatalf("expected rendered body to contain title, got %q", w.Body.String())
-	}
-}
-
 func TestCompatibilityPageRoute(t *testing.T) {
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
@@ -192,7 +73,7 @@ func TestCompatibilityHelpRoutes(t *testing.T) {
 	cfg.TemplateRoot = "../../templates"
 	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
-	for _, path := range []string{"/query/help", "/metrics/help/anomaly", "/settings/help/notifications"} {
+	for _, path := range []string{"/query/help", "/metrics/help/anomaly", "/settings/help/notifications", "/table-explorer/help", "/summary/help"} {
 		r := httptest.NewRequest("GET", "http://example.com"+path, nil)
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, r)

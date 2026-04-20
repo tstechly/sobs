@@ -30,7 +30,6 @@ import (
 	"github.com/abartrim/sobs/internal/ingest/otlpreceiver"
 	storepkg "github.com/abartrim/sobs/internal/store"
 	"github.com/abartrim/sobs/internal/templates"
-	"github.com/flosch/pongo2/v6"
 )
 
 type Server struct {
@@ -39,6 +38,7 @@ type Server struct {
 	renderer              *templates.Renderer
 	renderErr             error
 	otlpHTTP              *otlpreceiver.HTTPServer
+	tailBroker            *otlpreceiver.TailBroker
 	appService            *apps.Service
 	workItemService       *workitems.Service
 	aiService             *ai.Service
@@ -86,13 +86,15 @@ func NewServer(cfg config.Config, storeFactory extensionpoints.StoreFactory) *Se
 	onboardingService := onboarding.NewStoreService(storeFactory)
 	maskingService := masking.NewStoreService(storeFactory)
 	mcpService := mcp.NewStoreService(storeFactory)
-	otlpHTTP := otlpreceiver.NewHTTPServerWithPipeline(otlpreceiver.NewStorePipeline(storeFactory))
+	tailBroker := otlpreceiver.NewTailBroker()
+	otlpHTTP := otlpreceiver.NewHTTPServerWithPipelineAndTailBroker(otlpreceiver.NewAsyncLogPipeline(otlpreceiver.NewStorePipeline(storeFactory)), tailBroker)
 	return &Server{
 		cfg:                   cfg,
 		storeFactory:          storeFactory,
 		renderer:              renderer,
 		renderErr:             err,
 		otlpHTTP:              otlpHTTP,
+		tailBroker:            tailBroker,
 		appService:            appService,
 		workItemService:       workItemService,
 		aiService:             aiService,
@@ -121,10 +123,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.root)
 	mux.HandleFunc("/health", s.healthz)
 	mux.HandleFunc("/health/db", s.readyz)
-	mux.HandleFunc("/healthz", s.healthz)
-	mux.HandleFunc("/readyz", s.readyz)
-	mux.HandleFunc("/go/smoke", s.goSmoke)
-	mux.HandleFunc("/auth/session", s.session)
 	mux.HandleFunc("/mcp/tools", s.mcpListTools)
 	mux.HandleFunc("/mcp", s.mcpEndpoint)
 	mux.HandleFunc("/v1/apps", s.v1Apps)
@@ -134,13 +132,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/reports/", s.apiReportsSubroutes)
 	mux.HandleFunc("/api/reports/export", s.apiReportsExport)
 	mux.HandleFunc("/api/reports/import", s.apiReportsImport)
-	mux.HandleFunc("/api/logs/list", s.apiLogsList)
-	mux.HandleFunc("/api/logs/options", s.apiLogsOptions)
-	mux.HandleFunc("/api/errors/list", s.apiErrorsList)
-	mux.HandleFunc("/api/errors/options", s.apiErrorsOptions)
-	mux.HandleFunc("/api/traces/list", s.apiTracesList)
-	mux.HandleFunc("/api/traces/options", s.apiTracesOptions)
-	mux.HandleFunc("/api/metrics/options", s.apiMetricsOptions)
 	mux.HandleFunc("/api/dashboards/list", s.apiDashboardsList)
 	mux.HandleFunc("/api/dashboards/query", s.apiDashboardsQuery)
 	mux.HandleFunc("/api/dashboards/spec/templates", s.apiDashboardsSpecTemplates)
@@ -214,8 +205,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/metrics/rules/", s.metricsRulesSubroutes)
 	mux.HandleFunc("/metrics/anomaly", s.metricsAnomalyPage)
 	mux.HandleFunc("/api/metrics/anomaly", s.apiMetricsAnomaly)
-	mux.HandleFunc("/api/metrics/summary", s.apiMetricsSummary)
-	mux.HandleFunc("/api/metrics/timeseries", s.apiMetricsTimeseries)
 	mux.HandleFunc("/api/logs/field-hints", s.apiLogsFieldHints)
 	mux.HandleFunc("/api/ai/field-hints", s.apiAIFieldHints)
 	mux.HandleFunc("/api/logs/validate-filter", s.apiLogsValidateFilter)
@@ -236,8 +225,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/notifications/subscribe", s.apiNotificationsSubscribe)
 	mux.HandleFunc("/api/notifications/vapid-keygen", s.apiNotificationsVAPIDKeygen)
 	mux.HandleFunc("/api/notifications/vapid-keys", s.apiNotificationsVAPIDKeysDelete)
-	mux.HandleFunc("/api/notifications/rules", s.apiNotificationsRules)
-	mux.HandleFunc("/api/notifications/subscriptions", s.apiNotificationsSubscriptions)
 	mux.HandleFunc("/api/notifications/channels/", s.apiNotificationsChannelSubroutes)
 	mux.HandleFunc("/api/notifications/rules/auto-generate", s.apiNotificationsRulesAutoGenerate)
 	mux.HandleFunc("/settings/repositories", s.settingsRepositories)
@@ -317,22 +304,7 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	clone := r.Clone(r.Context())
-	clone.URL.Path = "/summary"
-	s.summaryPage(w, clone)
-}
-
-func (s *Server) session(w http.ResponseWriter, r *http.Request) {
-	if !sameOriginRequest(r, s.cfg.TrustedProxyMode) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	token := sessionTokenFromRequest(r, s.cfg.SessionCookieName)
-	if token == "" {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"session": token, "subject": ""})
+	s.summaryPage(w, r)
 }
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
@@ -350,24 +322,6 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ready"))
-}
-
-func (s *Server) goSmoke(w http.ResponseWriter, r *http.Request) {
-	if s.renderErr != nil || s.renderer == nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
-	body, err := s.renderer.Render("go_smoke.html", pongo2.Context{
-		"title":   "SOBS Go Migration",
-		"message": "Template rendering is active.",
-	})
-	if err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(body))
 }
 
 func (s *Server) notificationsCheck(w http.ResponseWriter, r *http.Request) {

@@ -56,6 +56,14 @@ func toMiniValue(v any) value.Value {
 	}
 }
 
+func toMiniMapValue(values map[string]any) value.Value {
+	mapped := make(map[string]value.Value, len(values))
+	for k, raw := range values {
+		mapped[k] = toMiniValue(raw)
+	}
+	return value.FromMap(mapped)
+}
+
 func (m *flaskMapObject) GetAttr(name string) value.Value {
 	if v, ok := m.values[name]; ok {
 		return toMiniValue(v)
@@ -154,9 +162,15 @@ func (r *requestObject) GetAttr(name string) value.Value {
 	case "path":
 		return value.FromString(r.path)
 	case "args":
-		return value.FromObject(r.args)
+		if r.args == nil {
+			return value.FromMap(map[string]value.Value{})
+		}
+		return toMiniMapValue(r.args.values)
 	case "cookies":
-		return value.FromObject(r.cookies)
+		if r.cookies == nil {
+			return value.FromMap(map[string]value.Value{})
+		}
+		return toMiniMapValue(r.cookies.values)
 	default:
 		return value.Undefined()
 	}

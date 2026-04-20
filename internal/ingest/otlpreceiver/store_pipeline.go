@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -14,10 +15,10 @@ import (
 
 	"github.com/abartrim/sobs/internal/extensionpoints"
 	"github.com/abartrim/sobs/internal/features/persist"
-	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
 	metricsv1 "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
 )
@@ -31,10 +32,14 @@ var severityNumbers = map[string]int{
 	"ERROR": 17, "CRITICAL": 21, "FATAL": 21, "METRIC": 9,
 }
 
+const logAttrKeysMax = 20000
+
 type StorePipeline struct {
 	factory    extensionpoints.StoreFactory
 	schemaOnce sync.Once
 	schemaErr  error
+	attrKeysMu sync.Mutex
+	attrKeys   map[string]map[string]struct{}
 }
 
 func NewStorePipeline(factory extensionpoints.StoreFactory) Pipeline {
@@ -107,6 +112,29 @@ func (p *StorePipeline) ensureSchema(ctx context.Context) error {
 			ORDER BY (ServiceName, SpanName, toDateTime(Timestamp))
 			SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1`,
 
+			`CREATE TABLE IF NOT EXISTS hyperdx_sessions (
+				Timestamp DateTime64(9) CODEC(Delta(8), ZSTD(1)),
+				TimestampTime DateTime DEFAULT toDateTime(Timestamp) CODEC(Delta(4), ZSTD(1)),
+				TraceId String CODEC(ZSTD(1)),
+				SpanId String CODEC(ZSTD(1)),
+				TraceFlags UInt8 CODEC(T64, ZSTD(1)),
+				SeverityText LowCardinality(String) CODEC(ZSTD(1)),
+				SeverityNumber UInt8 CODEC(T64, ZSTD(1)),
+				ServiceName LowCardinality(String) CODEC(ZSTD(1)),
+				Body String CODEC(ZSTD(1)),
+				ResourceSchemaUrl LowCardinality(String) CODEC(ZSTD(1)),
+				ResourceAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+				ScopeSchemaUrl LowCardinality(String) CODEC(ZSTD(1)),
+				ScopeName String CODEC(ZSTD(1)),
+				ScopeVersion LowCardinality(String) CODEC(ZSTD(1)),
+				ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+				LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+				EventName String CODEC(ZSTD(1))
+			) ENGINE = MergeTree()
+			PARTITION BY toDate(TimestampTime)
+			ORDER BY (ServiceName, TimestampTime, Timestamp)
+			SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1`,
+
 			`CREATE TABLE IF NOT EXISTS otel_metrics_gauge (
 				TimeUnix DateTime64(9) CODEC(Delta(8), ZSTD(1)),
 				TimeUnixMs DateTime DEFAULT toDateTime(TimeUnix) CODEC(Delta(4), ZSTD(1)),
@@ -170,6 +198,37 @@ func (p *StorePipeline) ensureSchema(ctx context.Context) error {
 				Version UInt64 DEFAULT 0,
 				UpdatedAt DateTime64(3) DEFAULT now64(3)
 			) ENGINE = ReplacingMergeTree(Version) ORDER BY (Path, UpdatedAt, Id)`,
+			`CREATE TABLE IF NOT EXISTS sobs_tag_rules (
+				Id String,
+				Name String,
+				RecordTypes String,
+				MatchField String,
+				MatchOperator String,
+				MatchValue String,
+				MatchAttrKey String,
+				TagKey String,
+				TagValue String,
+				ConditionsJson String DEFAULT '',
+				IsDeleted UInt8 DEFAULT 0,
+				Version UInt64 DEFAULT 0
+			) ENGINE = ReplacingMergeTree(Version) ORDER BY Id`,
+			`CREATE TABLE IF NOT EXISTS sobs_record_tags (
+				RecordType String,
+				RecordId String,
+				TagKey String,
+				TagValue String,
+				IsAuto UInt8 DEFAULT 0,
+				IsDeleted UInt8 DEFAULT 0,
+				Version UInt64 DEFAULT 0
+			) ENGINE = ReplacingMergeTree(Version) ORDER BY (RecordType, RecordId, TagKey)`,
+			`CREATE TABLE IF NOT EXISTS sobs_log_attr_keys (
+				RecordType LowCardinality(String) CODEC(ZSTD(1)),
+				AttrKey LowCardinality(String) CODEC(ZSTD(1)),
+				IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)),
+				Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))
+			) ENGINE = ReplacingMergeTree(Version)
+			ORDER BY (RecordType, AttrKey)
+			SETTINGS index_granularity = 8192`,
 		}
 
 		for _, ddl := range ddls {
@@ -205,6 +264,159 @@ func (p *StorePipeline) insertJSONEachRow(ctx context.Context, table string, row
 	return err
 }
 
+func extractAttrMaps(rows []map[string]any, field string) []map[string]string {
+	out := make([]map[string]string, 0, len(rows))
+	for _, row := range rows {
+		raw, ok := row[field]
+		if !ok {
+			continue
+		}
+		attrs, ok := raw.(map[string]string)
+		if !ok || len(attrs) == 0 {
+			continue
+		}
+		out = append(out, attrs)
+	}
+	return out
+}
+
+func (p *StorePipeline) rememberAttrKeys(ctx context.Context, attrMaps []map[string]string, recordType string) {
+	if len(attrMaps) == 0 {
+		return
+	}
+	p.primeAttrKeyCache(ctx)
+
+	p.attrKeysMu.Lock()
+	existing := p.ensureAttrKeySet(recordType)
+	if len(existing) >= logAttrKeysMax {
+		p.attrKeysMu.Unlock()
+		return
+	}
+	candidates := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, attrs := range attrMaps {
+		for rawKey := range attrs {
+			key := strings.TrimSpace(rawKey)
+			if key == "" {
+				continue
+			}
+			if _, ok := existing[key]; ok {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			if len(existing)+len(candidates) >= logAttrKeysMax {
+				break
+			}
+			seen[key] = struct{}{}
+			candidates = append(candidates, key)
+		}
+	}
+	if len(candidates) == 0 {
+		p.attrKeysMu.Unlock()
+		return
+	}
+	for _, key := range candidates {
+		existing[key] = struct{}{}
+	}
+	p.attrKeysMu.Unlock()
+
+	sort.Strings(candidates)
+	version := persist.Version()
+	rows := make([]map[string]any, 0, len(candidates))
+	for index, key := range candidates {
+		rows = append(rows, map[string]any{
+			"RecordType": recordType,
+			"AttrKey":    key,
+			"IsDeleted":  0,
+			"Version":    version + uint64(index),
+		})
+	}
+	if err := p.insertJSONEachRow(ctx, "sobs_log_attr_keys", rows); err != nil {
+		p.attrKeysMu.Lock()
+		for _, key := range candidates {
+			delete(existing, key)
+		}
+		p.attrKeysMu.Unlock()
+	}
+}
+
+func (p *StorePipeline) primeAttrKeyCache(ctx context.Context) {
+	p.attrKeysMu.Lock()
+	if p.attrKeys != nil {
+		p.attrKeysMu.Unlock()
+		return
+	}
+	p.attrKeys = map[string]map[string]struct{}{
+		"log":      {},
+		"span":     {},
+		"resource": {},
+		"scope":    {},
+	}
+	p.attrKeysMu.Unlock()
+
+	store, err := persist.Open(ctx, p.factory)
+	if err != nil {
+		return
+	}
+	defer func() { _ = store.Close() }()
+
+	for _, recordType := range []string{"log", "span", "resource", "scope"} {
+		rows, queryErr := store.Query(ctx, "SELECT DISTINCT AttrKey FROM sobs_log_attr_keys FINAL WHERE RecordType = ? AND IsDeleted = 0 ORDER BY AttrKey", recordType)
+		if queryErr != nil {
+			continue
+		}
+		keys := make([]string, 0)
+		for rows.Next() {
+			var value any
+			if scanErr := rows.Scan(&value); scanErr == nil {
+				key := strings.TrimSpace(fmt.Sprint(value))
+				if key != "" {
+					keys = append(keys, key)
+				}
+			}
+		}
+		_ = rows.Close()
+		p.attrKeysMu.Lock()
+		set := p.ensureAttrKeySet(recordType)
+		for _, key := range keys {
+			set[key] = struct{}{}
+		}
+		p.attrKeysMu.Unlock()
+	}
+}
+
+func (p *StorePipeline) ensureAttrKeySet(recordType string) map[string]struct{} {
+	if p.attrKeys == nil {
+		p.attrKeys = map[string]map[string]struct{}{}
+	}
+	set, ok := p.attrKeys[recordType]
+	if !ok {
+		set = map[string]struct{}{}
+		p.attrKeys[recordType] = set
+	}
+	return set
+}
+
+type tagRuleCondition struct {
+	MatchField    string `json:"match_field"`
+	MatchOperator string `json:"match_operator"`
+	MatchValue    string `json:"match_value"`
+	MatchAttrKey  string `json:"match_attr_key,omitempty"`
+}
+
+type tagRule struct {
+	RecordTypes   []string
+	MatchField    string
+	MatchOperator string
+	MatchValue    string
+	MatchAttrKey  string
+	TagKey        string
+	TagValue      string
+	Conditions    []tagRuleCondition
+}
+
 // ── helpers matching Python's helper functions exactly ────────────────────────
 
 // nsToISO converts a nanosecond Unix timestamp to a ClickHouse-compatible
@@ -217,6 +429,16 @@ func nsToISO(nanos uint64) string {
 // nowISO returns the current UTC time in ClickHouse DateTime64 format.
 func nowISO() string {
 	return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
+}
+
+func recordIDForLog(ts string, service string, traceID string, spanID string) string {
+	sum := md5.Sum([]byte(service + "|" + ts + "|" + traceID + "|" + spanID)) //nolint:gosec
+	return hex.EncodeToString(sum[:])
+}
+
+func recordIDForSpan(traceID string, spanID string) string {
+	sum := md5.Sum([]byte(traceID + "|" + spanID)) //nolint:gosec
+	return hex.EncodeToString(sum[:])
 }
 
 // anyValueToString converts an OTel AnyValue to its string representation.
@@ -288,6 +510,52 @@ func traceStatusCode(code tracev1.Status_StatusCode) string {
 	}
 }
 
+func traceEventStatus(code tracev1.Status_StatusCode) string {
+	switch code {
+	case tracev1.Status_STATUS_CODE_OK:
+		return "OK"
+	case tracev1.Status_STATUS_CODE_ERROR:
+		return "ERROR"
+	default:
+		return "UNSET"
+	}
+}
+
+func traceStatusCodeForEventStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "OK":
+		return "STATUS_CODE_OK"
+	case "ERROR":
+		return "STATUS_CODE_ERROR"
+	default:
+		return "STATUS_CODE_UNSET"
+	}
+}
+
+func mergeStringMaps(attrMaps ...map[string]string) map[string]string {
+	total := 0
+	for _, attrMap := range attrMaps {
+		total += len(attrMap)
+	}
+	merged := make(map[string]string, total)
+	for _, attrMap := range attrMaps {
+		for key, value := range attrMap {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // attrFingerprint produces a stable 16-char hex fingerprint of data-point
 // attributes, matching Python's _attr_fingerprint exactly.
 func attrFingerprint(attrs map[string]string) string {
@@ -319,11 +587,12 @@ func (p *StorePipeline) ConsumeTraces(ctx context.Context, req *coltracepb.Expor
 		return err
 	}
 	rows := make([]map[string]any, 0)
+	errorRows := make([]map[string]any, 0)
 	for _, rs := range req.GetResourceSpans() {
 		resourceAttrs := kvListToStringMap(rs.GetResource().GetAttributes())
 		service := resourceAttrs["service.name"]
 		for _, ss := range rs.GetScopeSpans() {
-			scope := ss.GetScope()
+			scopeAttrs := kvListToStringMap(ss.GetScope().GetAttributes())
 			for _, span := range ss.GetSpans() {
 				startNs := span.GetStartTimeUnixNano()
 				endNs := span.GetEndTimeUnixNano()
@@ -332,27 +601,25 @@ func (p *StorePipeline) ConsumeTraces(ctx context.Context, req *coltracepb.Expor
 					durationNs = endNs - startNs
 				}
 				spanAttrs := kvListToStringMap(span.GetAttributes())
-				spanKind := "INTERNAL"
-				if k := span.GetKind(); k != tracev1.Span_SPAN_KIND_UNSPECIFIED {
-					spanKind = strings.TrimPrefix(k.String(), "SPAN_KIND_")
-				}
-				statusCode := traceStatusCode(span.GetStatus().GetCode())
+				mergedAttrs := mergeStringMaps(resourceAttrs, scopeAttrs, spanAttrs)
+				status := traceEventStatus(span.GetStatus().GetCode())
+				spanKind := firstNonEmptyString(mergedAttrs["span.kind"], "INTERNAL")
 				rows = append(rows, map[string]any{
 					"Timestamp":          nsToISO(startNs),
 					"TraceId":            hex.EncodeToString(span.GetTraceId()),
 					"SpanId":             hex.EncodeToString(span.GetSpanId()),
 					"ParentSpanId":       hex.EncodeToString(span.GetParentSpanId()),
-					"TraceState":         span.GetTraceState(),
+					"TraceState":         "",
 					"SpanName":           span.GetName(),
 					"SpanKind":           spanKind,
 					"ServiceName":        service,
 					"ResourceAttributes": resourceAttrs,
-					"ScopeName":          scope.GetName(),
-					"ScopeVersion":       scope.GetVersion(),
-					"SpanAttributes":     spanAttrs,
+					"ScopeName":          "",
+					"ScopeVersion":       "",
+					"SpanAttributes":     mergedAttrs,
 					"Duration":           durationNs,
-					"StatusCode":         statusCode,
-					"StatusMessage":      span.GetStatus().GetMessage(),
+					"StatusCode":         traceStatusCodeForEventStatus(status),
+					"StatusMessage":      mergedAttrs["status.message"],
 					"Events": map[string]any{
 						"Timestamp":  []string{},
 						"Name":       []string{},
@@ -365,10 +632,55 @@ func (p *StorePipeline) ConsumeTraces(ctx context.Context, req *coltracepb.Expor
 						"Attributes": []map[string]string{},
 					},
 				})
+				if strings.Contains(status, "ERROR") {
+					errorAttrs := mergeStringMaps(mergedAttrs)
+					errType := firstNonEmptyString(spanAttrs["exception.type"], "SpanError")
+					message := firstNonEmptyString(spanAttrs["exception.message"], spanAttrs["error.message"], span.GetName())
+					errorAttrs["exception.type"] = errType
+					errorAttrs["exception.message"] = message
+					if stack := strings.TrimSpace(spanAttrs["exception.stacktrace"]); stack != "" {
+						errorAttrs["exception.stacktrace"] = stack
+					}
+					errorRows = append(errorRows, map[string]any{
+						"Timestamp":          nsToISO(startNs),
+						"TraceId":            hex.EncodeToString(span.GetTraceId()),
+						"SpanId":             hex.EncodeToString(span.GetSpanId()),
+						"TraceFlags":         0,
+						"SeverityText":       "ERROR",
+						"SeverityNumber":     severityNumber("ERROR"),
+						"ServiceName":        service,
+						"Body":               message,
+						"ResourceSchemaUrl":  "",
+						"ResourceAttributes": map[string]string{},
+						"ScopeSchemaUrl":     "",
+						"ScopeName":          "",
+						"ScopeVersion":       "",
+						"ScopeAttributes":    map[string]string{},
+						"LogAttributes":      errorAttrs,
+						"EventName":          "exception",
+					})
+				}
 			}
 		}
 	}
-	return p.insertJSONEachRow(ctx, "otel_traces", rows)
+	if len(rows) == 0 {
+		return nil
+	}
+	if err := p.insertJSONEachRow(ctx, "otel_traces", rows); err != nil {
+		return err
+	}
+	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "SpanAttributes"), "span")
+	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "ResourceAttributes"), "resource")
+	_ = p.applyTagRules(ctx, "trace", rows)
+	if len(errorRows) == 0 {
+		return nil
+	}
+	if err := p.insertJSONEachRow(ctx, "otel_logs", errorRows); err != nil {
+		return err
+	}
+	p.rememberAttrKeys(ctx, extractAttrMaps(errorRows, "LogAttributes"), "log")
+	_ = p.applyTagRules(ctx, "error", errorRows)
+	return nil
 }
 
 func (p *StorePipeline) ConsumeLogs(ctx context.Context, req *collogspb.ExportLogsServiceRequest) error {
@@ -421,7 +733,187 @@ func (p *StorePipeline) ConsumeLogs(ctx context.Context, req *collogspb.ExportLo
 			}
 		}
 	}
-	return p.insertJSONEachRow(ctx, "otel_logs", rows)
+	if err := p.insertJSONEachRow(ctx, "otel_logs", rows); err != nil {
+		return err
+	}
+	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "LogAttributes"), "log")
+	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "ResourceAttributes"), "resource")
+	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "ScopeAttributes"), "scope")
+	_ = p.applyTagRules(ctx, "log", rows)
+	return nil
+}
+
+func (p *StorePipeline) applyTagRules(ctx context.Context, recordType string, rows []map[string]any) error {
+	rules, err := p.loadTagRules(ctx)
+	if err != nil || len(rules) == 0 || len(rows) == 0 {
+		return err
+	}
+	version := persist.Version()
+	tagRows := make([]map[string]any, 0)
+	for _, row := range rows {
+		service, _ := row["ServiceName"].(string)
+		severity, _ := row["SeverityText"].(string)
+		body, _ := row["Body"].(string)
+		attrs, _ := row["LogAttributes"].(map[string]string)
+		if recordType == "trace" || recordType == "ai" {
+			attrs, _ = row["SpanAttributes"].(map[string]string)
+		}
+		if attrs == nil {
+			attrs = map[string]string{}
+		}
+		spanName, _ := row["SpanName"].(string)
+		eventType, _ := row["EventName"].(string)
+		traceID, _ := row["TraceId"].(string)
+		spanID, _ := row["SpanId"].(string)
+		ts, _ := row["Timestamp"].(string)
+		recordID := recordIDForLog(ts, service, traceID, spanID)
+		if recordType == "trace" || recordType == "ai" {
+			recordID = recordIDForSpan(traceID, spanID)
+		}
+		matchedByKey := make(map[string]string)
+		for _, rule := range rules {
+			if matchTagRule(rule, recordType, service, severity, body, attrs, spanName, eventType) {
+				matchedByKey[rule.TagKey] = rule.TagValue
+			}
+		}
+		for tagKey, tagValue := range matchedByKey {
+			tagRows = append(tagRows, map[string]any{
+				"RecordType": recordType,
+				"RecordId":   recordID,
+				"TagKey":     tagKey,
+				"TagValue":   tagValue,
+				"IsAuto":     1,
+				"IsDeleted":  0,
+				"Version":    version,
+			})
+			version++
+		}
+	}
+	if len(tagRows) == 0 {
+		return nil
+	}
+	return p.insertJSONEachRow(ctx, "sobs_record_tags", tagRows)
+}
+
+func (p *StorePipeline) loadTagRules(ctx context.Context) ([]tagRule, error) {
+	store, err := persist.Open(ctx, p.factory)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = store.Close() }()
+	rows, err := store.Query(ctx,
+		"SELECT Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, MatchAttrKey, TagKey, TagValue, ConditionsJson FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	loaded := make([]tagRule, 0)
+	for rows.Next() {
+		var id string
+		var name string
+		var recordTypes string
+		var matchField string
+		var matchOperator string
+		var matchValue string
+		var matchAttrKey string
+		var tagKey string
+		var tagValue string
+		var conditionsJSON string
+		if err := rows.Scan(&id, &name, &recordTypes, &matchField, &matchOperator, &matchValue, &matchAttrKey, &tagKey, &tagValue, &conditionsJSON); err != nil {
+			return loaded, err
+		}
+		conditions := make([]tagRuleCondition, 0)
+		if strings.TrimSpace(conditionsJSON) != "" && strings.TrimSpace(conditionsJSON) != "[]" {
+			_ = json.Unmarshal([]byte(conditionsJSON), &conditions)
+		}
+		if len(conditions) == 0 && strings.TrimSpace(matchField) != "" {
+			conditions = []tagRuleCondition{{
+				MatchField:    matchField,
+				MatchOperator: matchOperator,
+				MatchValue:    matchValue,
+				MatchAttrKey:  matchAttrKey,
+			}}
+		}
+		rule := tagRule{
+			MatchField:    matchField,
+			MatchOperator: matchOperator,
+			MatchValue:    matchValue,
+			MatchAttrKey:  matchAttrKey,
+			TagKey:        tagKey,
+			TagValue:      tagValue,
+			Conditions:    conditions,
+		}
+		for _, recordType := range strings.Split(recordTypes, ",") {
+			trimmed := strings.TrimSpace(recordType)
+			if trimmed != "" {
+				rule.RecordTypes = append(rule.RecordTypes, trimmed)
+			}
+		}
+		loaded = append(loaded, rule)
+	}
+	return loaded, nil
+}
+
+func matchTagRule(rule tagRule, recordType string, service string, severity string, body string, attrs map[string]string, spanName string, eventType string) bool {
+	if len(rule.RecordTypes) > 0 {
+		allowed := false
+		for _, value := range rule.RecordTypes {
+			if value == "all" || value == recordType {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	if len(rule.Conditions) > 0 {
+		for _, condition := range rule.Conditions {
+			if !matchSingleCondition(condition, service, severity, body, attrs, spanName, eventType) {
+				return false
+			}
+		}
+		return true
+	}
+	return matchSingleCondition(tagRuleCondition{
+		MatchField:    rule.MatchField,
+		MatchOperator: rule.MatchOperator,
+		MatchValue:    rule.MatchValue,
+		MatchAttrKey:  rule.MatchAttrKey,
+	}, service, severity, body, attrs, spanName, eventType)
+}
+
+func matchSingleCondition(condition tagRuleCondition, service string, severity string, body string, attrs map[string]string, spanName string, eventType string) bool {
+	value := ""
+	switch condition.MatchField {
+	case "service_name":
+		value = service
+	case "severity":
+		value = severity
+	case "body":
+		value = body
+	case "span_name":
+		value = spanName
+	case "event_type":
+		value = eventType
+	case "attribute":
+		value = attrs[condition.MatchAttrKey]
+	}
+	switch condition.MatchOperator {
+	case "eq":
+		return value == condition.MatchValue
+	case "contains":
+		return strings.Contains(strings.ToLower(value), strings.ToLower(condition.MatchValue))
+	case "regex":
+		re, err := regexp.Compile(condition.MatchValue)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(value)
+	default:
+		return false
+	}
 }
 
 func (p *StorePipeline) ConsumeMetrics(ctx context.Context, req *colmetricpb.ExportMetricsServiceRequest) error {
@@ -534,9 +1026,8 @@ func (p *StorePipeline) ConsumeMetrics(ctx context.Context, req *colmetricpb.Exp
 	return p.insertJSONEachRow(ctx, "otel_metrics_histogram", histogramRows)
 }
 
-// ConsumeOpaqueJSON stages raw JSON payloads from /v1/rum, /v1/ai, /v1/errors.
-// These require domain-specific processing beyond OTLP normalisation and are
-// held in sobs_ingest_opaque for downstream enrichment.
+// ConsumeOpaqueJSON stages raw JSON payloads for routes that do not yet have a
+// dedicated normalisation path.
 func (p *StorePipeline) ConsumeOpaqueJSON(ctx context.Context, path string, payload any) error {
 	if err := p.ensureSchema(ctx); err != nil {
 		return err
@@ -550,6 +1041,192 @@ func (p *StorePipeline) ConsumeOpaqueJSON(ctx context.Context, path string, payl
 	_, err = store.Exec(ctx, "INSERT INTO sobs_ingest_opaque (Id, Path, PayloadJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?)",
 		persist.NewID(), path, raw, 0, persist.Version())
 	return err
+}
+
+func (p *StorePipeline) ConsumeErrorsV1(ctx context.Context, req *ErrorIngestRequest) error {
+	if err := p.ensureSchema(ctx); err != nil {
+		return err
+	}
+	row := map[string]any{
+		"Timestamp":          req.Timestamp,
+		"TraceId":            req.TraceID,
+		"SpanId":             req.SpanID,
+		"TraceFlags":         req.TraceFlags,
+		"SeverityText":       "ERROR",
+		"SeverityNumber":     severityNumber("ERROR"),
+		"ServiceName":        req.Service,
+		"Body":               req.Message,
+		"ResourceSchemaUrl":  "",
+		"ResourceAttributes": map[string]string{},
+		"ScopeSchemaUrl":     "",
+		"ScopeName":          "",
+		"ScopeVersion":       "",
+		"ScopeAttributes":    map[string]string{},
+		"LogAttributes":      req.Attributes,
+		"EventName":          "exception",
+	}
+	if err := p.insertJSONEachRow(ctx, "otel_logs", []map[string]any{row}); err != nil {
+		return err
+	}
+	p.rememberAttrKeys(ctx, extractAttrMaps([]map[string]any{row}, "LogAttributes"), "log")
+	_ = p.applyTagRules(ctx, "error", []map[string]any{row})
+	return nil
+}
+
+func (p *StorePipeline) ConsumeAI(ctx context.Context, req *AIIngestRequest) error {
+	if err := p.ensureSchema(ctx); err != nil {
+		return err
+	}
+	row := map[string]any{
+		"Timestamp":          req.Timestamp,
+		"TraceId":            req.TraceID,
+		"SpanId":             req.SpanID,
+		"ParentSpanId":       "",
+		"TraceState":         "",
+		"SpanName":           req.SpanName,
+		"SpanKind":           "CLIENT",
+		"ServiceName":        req.Service,
+		"ResourceAttributes": map[string]string{},
+		"ScopeName":          "sobs-ai",
+		"ScopeVersion":       "",
+		"SpanAttributes":     req.SpanAttributes,
+		"Duration":           max(0, int(req.DurationMS*1_000_000)),
+		"StatusCode":         "STATUS_CODE_OK",
+		"StatusMessage":      "",
+		"Events":             map[string]any{"Timestamp": []string{}, "Name": []string{}, "Attributes": []map[string]string{}},
+		"Links":              map[string]any{"TraceId": []string{}, "SpanId": []string{}, "TraceState": []string{}, "Attributes": []map[string]string{}},
+	}
+	if err := p.insertJSONEachRow(ctx, "otel_traces", []map[string]any{row}); err != nil {
+		return err
+	}
+	_ = p.applyTagRules(ctx, "ai", []map[string]any{row})
+	return nil
+}
+
+func (p *StorePipeline) ConsumeRUM(ctx context.Context, req *RUMIngestRequest) error {
+	if err := p.ensureSchema(ctx); err != nil {
+		return err
+	}
+	sessionRows := make([]map[string]any, 0, len(req.Events))
+	errorRows := make([]map[string]any, 0)
+	for _, sourceEvent := range req.Events {
+		event := cloneJSONMap(sourceEvent)
+		delete(event, "clientAuthToken")
+		if stack := strings.TrimSpace(stringAny(event["stack"])); stack != "" {
+			event["stack"] = maybeDemangleJSStack(stack)
+		}
+		remapRUMConsoleStacks(event)
+		ts := strings.TrimSpace(stringAny(event["timestamp"]))
+		if ts == "" {
+			ts = nowISO()
+		}
+		sessionID := stringAny(event["sessionId"])
+		eventType := strings.TrimSpace(stringAny(event["type"]))
+		if eventType == "" {
+			eventType = "unknown"
+		}
+		url := stringAny(event["url"])
+		traceID, spanID, traceFlags := extractTraceFields(event)
+		attrs := stringifyAttrs(event)
+		for key, value := range handleBrowserContextDelta(event) {
+			attrs[key] = value
+		}
+		if req.ClientIP != "" {
+			attrs["client.ip"] = req.ClientIP
+		}
+		severityText := "INFO"
+		if eventType == "error" || eventType == "unhandledrejection" {
+			severityText = "ERROR"
+		}
+		sessionRows = append(sessionRows, map[string]any{
+			"Timestamp":          ts,
+			"TraceId":            traceID,
+			"SpanId":             spanID,
+			"TraceFlags":         traceFlags,
+			"SeverityText":       severityText,
+			"SeverityNumber":     severityNumber(severityText),
+			"ServiceName":        firstNonEmptyString(stringAny(event["service"]), "browser"),
+			"Body":               persist.JSONString(event),
+			"ResourceSchemaUrl":  "",
+			"ResourceAttributes": map[string]string{},
+			"ScopeSchemaUrl":     "",
+			"ScopeName":          "browser-rum",
+			"ScopeVersion":       "",
+			"ScopeAttributes":    map[string]string{},
+			"LogAttributes":      attrs,
+			"EventName":          eventType,
+		})
+		if eventType != "error" && eventType != "unhandledrejection" {
+			continue
+		}
+		errAttrs := map[string]string{
+			"exception.type":    firstNonEmptyString(stringAny(event["errorType"]), "JSError"),
+			"exception.message": stringAny(event["message"]),
+			"url.full":          url,
+			"session.id":        sessionID,
+		}
+		if stack := strings.TrimSpace(stringAny(event["stack"])); stack != "" {
+			errAttrs["exception.stacktrace"] = stack
+		}
+		if errorSource := strings.TrimSpace(stringAny(event["errorSource"])); errorSource != "" {
+			errAttrs["error.source"] = errorSource
+		}
+		if page, ok := event["page"].(map[string]any); ok {
+			if title := strings.TrimSpace(stringAny(page["title"])); title != "" {
+				errAttrs["browser.page.title"] = title
+			}
+			if viewport := strings.TrimSpace(stringAny(page["viewport"])); viewport != "" {
+				errAttrs["browser.viewport"] = viewport
+			}
+		}
+		if artifact, ok := event["artifact"].(map[string]any); ok {
+			if value := strings.TrimSpace(stringAny(artifact["type"])); value != "" {
+				errAttrs["artifact.type"] = value
+			}
+			if value := strings.TrimSpace(stringAny(artifact["id"])); value != "" {
+				errAttrs["artifact.id"] = value
+			}
+			if value := strings.TrimSpace(stringAny(artifact["url"])); value != "" {
+				errAttrs["artifact.url"] = value
+			}
+		}
+		if replay, ok := event["replay"].(map[string]any); ok {
+			if value := strings.TrimSpace(stringAny(replay["id"])); value != "" {
+				errAttrs["replay.id"] = value
+			}
+			if value := strings.TrimSpace(stringAny(replay["url"])); value != "" {
+				errAttrs["replay.url"] = value
+			}
+		}
+		errorRows = append(errorRows, map[string]any{
+			"Timestamp":          ts,
+			"TraceId":            traceID,
+			"SpanId":             spanID,
+			"TraceFlags":         traceFlags,
+			"SeverityText":       "ERROR",
+			"SeverityNumber":     severityNumber("ERROR"),
+			"ServiceName":        "rum",
+			"Body":               stringAny(event["message"]),
+			"ResourceSchemaUrl":  "",
+			"ResourceAttributes": map[string]string{},
+			"ScopeSchemaUrl":     "",
+			"ScopeName":          "browser-rum",
+			"ScopeVersion":       "",
+			"ScopeAttributes":    map[string]string{},
+			"LogAttributes":      errAttrs,
+			"EventName":          "exception",
+		})
+	}
+	if err := p.insertJSONEachRow(ctx, "hyperdx_sessions", sessionRows); err != nil {
+		return err
+	}
+	if err := p.insertJSONEachRow(ctx, "otel_logs", errorRows); err != nil {
+		return err
+	}
+	p.rememberAttrKeys(ctx, extractAttrMaps(errorRows, "LogAttributes"), "log")
+	_ = p.applyTagRules(ctx, "rum", sessionRows)
+	_ = p.applyTagRules(ctx, "error", errorRows)
+	return nil
 }
 
 // dpValue extracts the float64 value from a NumberDataPoint.

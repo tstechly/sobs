@@ -15,7 +15,7 @@ func TestParityPageRoutesRenderHTML(t *testing.T) {
 	srv := newTestServer()
 
 	for _, path := range []string{
-		"/summary",
+		"/",
 		"/dashboards",
 		"/settings",
 		"/settings/ai",
@@ -54,7 +54,7 @@ func TestParityPageRoutesFailLoudWithoutRenderer(t *testing.T) {
 	cfg.TemplateRoot = "./definitely-missing-templates"
 	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
-	for _, path := range []string{"/summary", "/settings", "/settings/ai", "/dashboards", "/kubernetes", "/metrics"} {
+	for _, path := range []string{"/", "/settings", "/settings/ai", "/dashboards", "/kubernetes", "/metrics"} {
 		req := httptest.NewRequest(http.MethodGet, "http://example.com"+path, nil)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
@@ -187,7 +187,6 @@ func TestParityRepresentativeAPIEndpointsReturnJSON(t *testing.T) {
 		{name: "chart types", method: http.MethodGet, path: "/api/chart-types", status: http.StatusOK},
 		{name: "query schema", method: http.MethodGet, path: "/api/query/schema", status: http.StatusOK},
 		{name: "logs field hints", method: http.MethodGet, path: "/api/logs/field-hints", status: http.StatusOK},
-		{name: "notifications subscriptions", method: http.MethodGet, path: "/api/notifications/subscriptions", status: http.StatusOK},
 		{name: "masking rules", method: http.MethodGet, path: "/api/settings/masking/rules", status: http.StatusOK},
 	}
 

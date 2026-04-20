@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -151,162 +153,15 @@ func (s *Server) metricsPage(w http.ResponseWriter, r *http.Request) {
 			"last_sample_count":  anyToInt(lastSample),
 			"point_count":        anyToInt(points),
 			"rule_name":          "",
-			"rule_state":         "",
+			"rule_state":         "normal",
 			"rule_reason":        "",
+			"rule_seasonal":      false,
+			"effective_state":    anyToString(lastState),
 		})
 	}
+	annotateMetricRowsWithRules(r.Context(), store, rows)
 
 	s.renderTemplate(w, "metrics.html", metricsPageContext(rows, total, limit, offset, service, selectedServices, signal, selectedSignals, source, selectedSources, attrFP, q, fromTS, toTS, hours, sortBy, sortDir, services, signals, sources, errorMsg))
-}
-
-func (s *Server) apiMetricsSummary(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	selectedServices := trimList(r.URL.Query()["service"])
-	selectedSignals := trimList(r.URL.Query()["signal"])
-	selectedSources := trimList(r.URL.Query()["source"])
-	attrFP := strings.TrimSpace(r.URL.Query().Get("attr_fp"))
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
-	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
-	hours := 24
-	if raw := strings.TrimSpace(r.URL.Query().Get("hours")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			if parsed < 1 {
-				hours = 1
-			} else if parsed > 168 {
-				hours = 168
-			} else {
-				hours = parsed
-			}
-		}
-	}
-
-	store, err := s.storeFactory.Open(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "total_series": 0, "outlier_series": 0, "warning_series": 0})
-		return
-	}
-	defer store.Close()
-
-	whereClause, params := buildMetricsWhereClause(selectedServices, selectedSignals, selectedSources, attrFP, q, fromTS, toTS, hours)
-	sql := "SELECT " +
-		"count() AS total_series, " +
-		"countIf(last_anomaly_state = 'outlier') AS outlier_series, " +
-		"countIf(last_anomaly_state = 'warning') AS warning_series " +
-		"FROM (" +
-		"SELECT argMax(anomaly_state, time) AS last_anomaly_state " +
-		"FROM v_derived_signals_anomaly " + whereClause + " " +
-		"GROUP BY ServiceName, SignalSource, SignalName, AttrFingerprint" +
-		")"
-
-	rows, err := store.Query(r.Context(), sql, params...)
-	if err != nil {
-		if isMissingTableError(err) {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total_series": 0, "outlier_series": 0, "warning_series": 0})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	total := 0
-	outliers := 0
-	warnings := 0
-	if rows.Next() {
-		var totalAny, outAny, warnAny any
-		if scanErr := rows.Scan(&totalAny, &outAny, &warnAny); scanErr == nil {
-			total = anyToInt(totalAny)
-			outliers = anyToInt(outAny)
-			warnings = anyToInt(warnAny)
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"total_series":   total,
-		"outlier_series": outliers,
-		"warning_series": warnings,
-	})
-}
-
-func (s *Server) apiMetricsTimeseries(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	selectedServices := trimList(r.URL.Query()["service"])
-	selectedSignals := trimList(r.URL.Query()["signal"])
-	selectedSources := trimList(r.URL.Query()["source"])
-	attrFP := strings.TrimSpace(r.URL.Query().Get("attr_fp"))
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
-	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
-	limit := parseLimitParam(r, 500, 1, 5000)
-	hours := 24
-	if raw := strings.TrimSpace(r.URL.Query().Get("hours")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			if parsed < 1 {
-				hours = 1
-			} else if parsed > 168 {
-				hours = 168
-			} else {
-				hours = parsed
-			}
-		}
-	}
-
-	store, err := s.storeFactory.Open(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "rows": []any{}})
-		return
-	}
-	defer store.Close()
-
-	whereClause, params := buildMetricsWhereClause(selectedServices, selectedSignals, selectedSources, attrFP, q, fromTS, toTS, hours)
-	sql := "SELECT time, ServiceName, SignalSource, SignalName, AttrFingerprint, value, SampleCount, baseline_mean, baseline_lower, baseline_upper, anomaly_score, anomaly_state " +
-		"FROM v_derived_signals_anomaly " + whereClause + " ORDER BY time ASC LIMIT ?"
-	args := append(params, limit)
-
-	rows, err := store.Query(r.Context(), sql, args...)
-	if err != nil {
-		if isMissingTableError(err) {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "rows": []any{}})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	out := []map[string]any{}
-	for rows.Next() {
-		var ts, svc, src, sig, fp, valueAny, sampleAny, meanAny, lowAny, highAny, scoreAny, stateAny any
-		if scanErr := rows.Scan(&ts, &svc, &src, &sig, &fp, &valueAny, &sampleAny, &meanAny, &lowAny, &highAny, &scoreAny, &stateAny); scanErr != nil {
-			continue
-		}
-		out = append(out, map[string]any{
-			"time":           anyToString(ts),
-			"service":        anyToString(svc),
-			"source":         anyToString(src),
-			"signal":         anyToString(sig),
-			"attr_fp":        anyToString(fp),
-			"value":          valueAny,
-			"sample_count":   anyToInt(sampleAny),
-			"baseline_mean":  meanAny,
-			"baseline_lower": lowAny,
-			"baseline_upper": highAny,
-			"anomaly_score":  scoreAny,
-			"anomaly_state":  anyToString(stateAny),
-		})
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "rows": out, "limit": limit})
 }
 
 func metricsPageContext(
@@ -480,4 +335,259 @@ func firstOrEmpty(values []string) string {
 		return ""
 	}
 	return values[0]
+}
+
+type metricRuleEvaluation struct {
+	RuleID       string
+	RuleName     string
+	RuleState    string
+	RuleReason   string
+	RuleSeasonal bool
+}
+
+func annotateMetricRowsWithRules(ctx context.Context, store extensionpoints.ClickHouseStore, rows []map[string]any) {
+	if len(rows) == 0 {
+		return
+	}
+	rules := summaryLoadAnomalyRules(ctx, store)
+	if len(rules) == 0 {
+		for _, row := range rows {
+			row["rule_name"] = ""
+			row["rule_state"] = "normal"
+			row["rule_reason"] = ""
+			row["rule_seasonal"] = false
+			row["effective_state"] = summaryCombineStates(anyToString(row["last_anomaly_state"]), anyToString(row["rule_state"]))
+		}
+		return
+	}
+	latestLookup, timedLookup := buildMetricRuleLookups(rows)
+	for _, row := range rows {
+		row["rule_name"] = ""
+		row["rule_state"] = "normal"
+		row["rule_reason"] = ""
+		row["rule_seasonal"] = false
+		if anyToString(row["effective_state"]) == "" {
+			row["effective_state"] = anyToString(row["last_anomaly_state"])
+		}
+
+		bestSeverity := -1
+		bestTypeRank := -1
+		bestName := ""
+		var bestMatch *metricRuleEvaluation
+
+		rowSource := anyToString(row["source"])
+		rowSignal := anyToString(row["signal"])
+		rowService := anyToString(row["service"])
+		rowAttrFP := anyToString(row["attr_fp"])
+
+		for _, rule := range rules {
+			if !summaryRuleMatchesSeries(rule, rowSource, rowSignal, rowService, rowAttrFP) {
+				continue
+			}
+			var evaluation *metricRuleEvaluation
+			switch rule.RuleType {
+			case "composite":
+				evaluation = evaluateMetricCompositeRule(ctx, store, rule, row, latestLookup, timedLookup)
+			case "seasonal":
+				evaluation = evaluateMetricSeasonalRule(rule, row["last_value"], row["last_sample_count"], anyToString(row["last_time"]))
+			default:
+				evaluation = evaluateMetricThresholdRule(rule, row["last_value"], row["last_sample_count"])
+			}
+			if evaluation == nil {
+				continue
+			}
+			severity := summarySeverityRanks[evaluation.RuleState]
+			typeRank := summaryRuleTypeRank(rule.RuleType)
+			if severity > bestSeverity || (severity == bestSeverity && (typeRank > bestTypeRank || (typeRank == bestTypeRank && evaluation.RuleName > bestName))) {
+				bestMatch = evaluation
+				bestSeverity = severity
+				bestTypeRank = typeRank
+				bestName = evaluation.RuleName
+			}
+		}
+
+		if bestMatch != nil {
+			row["rule_id"] = bestMatch.RuleID
+			row["rule_name"] = bestMatch.RuleName
+			row["rule_state"] = bestMatch.RuleState
+			row["rule_reason"] = bestMatch.RuleReason
+			row["rule_seasonal"] = bestMatch.RuleSeasonal
+		}
+		row["effective_state"] = summaryCombineStates(anyToString(row["last_anomaly_state"]), anyToString(row["rule_state"]))
+	}
+}
+
+func buildMetricRuleLookups(rows []map[string]any) (map[string]map[string]any, map[string]map[string]any) {
+	latestLookup := make(map[string]map[string]any, len(rows))
+	timedLookup := make(map[string]map[string]any, len(rows))
+	for _, row := range rows {
+		baseKey := metricRuleLookupKey(anyToString(row["service"]), anyToString(row["attr_fp"]), anyToString(row["source"]), anyToString(row["signal"]))
+		latestLookup[baseKey] = row
+		timedLookup[baseKey+"\x00"+anyToString(row["last_time"])] = row
+	}
+	return latestLookup, timedLookup
+}
+
+func metricRuleLookupKey(service, attrFP, source, signal string) string {
+	return service + "\x00" + attrFP + "\x00" + source + "\x00" + signal
+}
+
+func evaluateMetricThresholdRule(rule summaryAnomalyRule, value any, sampleCount any) *metricRuleEvaluation {
+	state, reason, ok := evaluateMetricThresholdCondition(rule.Name, rule.Comparator, rule.WarningThreshold, rule.CriticalThreshold, value, sampleCount, rule.MinSampleCount)
+	if !ok {
+		return nil
+	}
+	return &metricRuleEvaluation{
+		RuleID:     rule.ID,
+		RuleName:   rule.Name,
+		RuleState:  state,
+		RuleReason: reason,
+		RuleSeasonal: false,
+	}
+}
+
+func evaluateMetricSeasonalRule(rule summaryAnomalyRule, value any, sampleCount any, timeValue string) *metricRuleEvaluation {
+	warningThreshold := rule.WarningThreshold
+	criticalThreshold := rule.CriticalThreshold
+	ruleSeasonal := false
+	buckets := struct {
+		Strategy string `json:"strategy"`
+		Buckets  map[string]struct {
+			Warning  float64 `json:"warning"`
+			Critical float64 `json:"critical"`
+		} `json:"buckets"`
+	}{}
+	if strings.TrimSpace(rule.SeasonalBucketsJSON) != "" && json.Unmarshal([]byte(rule.SeasonalBucketsJSON), &buckets) == nil && len(buckets.Buckets) > 0 {
+		parsed := parseTimestampTime(strings.ReplaceAll(strings.TrimSpace(timeValue), "T", " "))
+		if !parsed.IsZero() {
+			bucketKey := strconv.Itoa(parsed.Hour())
+			if strings.TrimSpace(buckets.Strategy) == "day_of_week" {
+				day := int(parsed.Weekday())
+				if day == 0 {
+					day = 7
+				}
+				bucketKey = strconv.Itoa(day)
+			}
+			if bucket, ok := buckets.Buckets[bucketKey]; ok {
+				warningThreshold = bucket.Warning
+				criticalThreshold = bucket.Critical
+				ruleSeasonal = true
+			}
+		}
+	}
+	state, reason, ok := evaluateMetricThresholdCondition(rule.Name, rule.Comparator, warningThreshold, criticalThreshold, value, sampleCount, rule.MinSampleCount)
+	if !ok {
+		return nil
+	}
+	return &metricRuleEvaluation{
+		RuleID:       rule.ID,
+		RuleName:     rule.Name,
+		RuleState:    state,
+		RuleReason:   reason,
+		RuleSeasonal: ruleSeasonal,
+	}
+}
+
+func evaluateMetricCompositeRule(ctx context.Context, store extensionpoints.ClickHouseStore, rule summaryAnomalyRule, row map[string]any, latestLookup map[string]map[string]any, timedLookup map[string]map[string]any) *metricRuleEvaluation {
+	primaryState, _, ok := evaluateMetricThresholdCondition(rule.Name+" primary", rule.Comparator, rule.WarningThreshold, rule.CriticalThreshold, row["last_value"], row["last_sample_count"], rule.MinSampleCount)
+	if !ok || rule.SecondarySource == "" || rule.SecondarySignal == "" {
+		return nil
+	}
+	service := anyToString(row["service"])
+	attrFP := anyToString(row["attr_fp"])
+	timeValue := anyToString(row["last_time"])
+	baseKey := metricRuleLookupKey(service, attrFP, rule.SecondarySource, rule.SecondarySignal)
+	secondaryRow := timedLookup[baseKey+"\x00"+timeValue]
+	if secondaryRow == nil {
+		secondaryRow = latestLookup[baseKey]
+	}
+	if secondaryRow == nil {
+		secondaryRow = lookupMetricSecondaryRuleRow(ctx, store, service, attrFP, rule.SecondarySource, rule.SecondarySignal, timeValue)
+	}
+	if secondaryRow == nil {
+		return nil
+	}
+	secondaryState, _, ok := evaluateMetricThresholdCondition(rule.Name+" secondary", rule.SecondaryComparator, rule.SecondaryWarningThreshold, rule.SecondaryCriticalThreshold, secondaryRow["last_value"], secondaryRow["last_sample_count"], rule.MinSampleCount)
+	if !ok {
+		return nil
+	}
+	secondaryValue := secondaryRow["last_value"]
+	return &metricRuleEvaluation{
+		RuleID:     rule.ID,
+		RuleName:   rule.Name,
+		RuleState:  summaryCombineStates(primaryState, secondaryState),
+		RuleReason: fmt.Sprintf("%s: primary %s=%s and secondary %s=%s triggered", rule.Name, anyToString(row["signal"]), formatMetricRuleValue(row["last_value"]), rule.SecondarySignal, formatMetricRuleValue(secondaryValue)),
+	}
+}
+
+func lookupMetricSecondaryRuleRow(ctx context.Context, store extensionpoints.ClickHouseStore, service, attrFP, source, signal, timeValue string) map[string]any {
+	if store == nil {
+		return nil
+	}
+	queryByTime := "SELECT time, value, SampleCount FROM v_derived_signals_anomaly WHERE ServiceName = ? AND SignalSource = ? AND SignalName = ? AND AttrFingerprint = ? AND time = ? ORDER BY time DESC LIMIT 1"
+	queryLatest := "SELECT time, value, SampleCount FROM v_derived_signals_anomaly WHERE ServiceName = ? AND SignalSource = ? AND SignalName = ? AND AttrFingerprint = ? ORDER BY time DESC LIMIT 1"
+	if strings.TrimSpace(timeValue) != "" {
+		if row := queryMetricSecondaryRuleRow(ctx, store, queryByTime, service, source, signal, attrFP, timeValue); row != nil {
+			return row
+		}
+	}
+	return queryMetricSecondaryRuleRow(ctx, store, queryLatest, service, source, signal, attrFP)
+}
+
+func queryMetricSecondaryRuleRow(ctx context.Context, store extensionpoints.ClickHouseStore, query string, args ...any) map[string]any {
+	rows, err := store.Query(ctx, query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil
+	}
+	var timeValue, value, sampleCount any
+	if err := rows.Scan(&timeValue, &value, &sampleCount); err != nil {
+		return nil
+	}
+	return map[string]any{
+		"last_time":         anyToString(timeValue),
+		"last_value":        value,
+		"last_sample_count": sampleCount,
+	}
+}
+
+func evaluateMetricThresholdCondition(name, comparator string, warningThreshold, criticalThreshold float64, value any, sampleCount any, minSampleCount int) (string, string, bool) {
+	valueNum := anyToFloat(value)
+	sampleCountNum := anyToInt(sampleCount)
+	if sampleCountNum < maxInt(minSampleCount, 1) {
+		return "", "", false
+	}
+	state := "normal"
+	triggeredThreshold := 0.0
+	operator := ">="
+	switch comparator {
+	case "lt":
+		operator = "<="
+		if valueNum <= criticalThreshold {
+			state = "outlier"
+			triggeredThreshold = criticalThreshold
+		} else if valueNum <= warningThreshold {
+			state = "warning"
+			triggeredThreshold = warningThreshold
+		}
+	default:
+		if valueNum >= criticalThreshold {
+			state = "outlier"
+			triggeredThreshold = criticalThreshold
+		} else if valueNum >= warningThreshold {
+			state = "warning"
+			triggeredThreshold = warningThreshold
+		}
+	}
+	if state == "normal" {
+		return "", "", false
+	}
+	return state, fmt.Sprintf("%s: value %s %s %s", name, formatMetricRuleValue(valueNum), operator, formatMetricRuleValue(triggeredThreshold)), true
+}
+
+func formatMetricRuleValue(value any) string {
+	return strconv.FormatFloat(roundFloat(anyToFloat(value), 4), 'f', -1, 64)
 }

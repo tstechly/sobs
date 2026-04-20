@@ -162,7 +162,7 @@ func requiresV1APIKey(path string, method string) bool {
 }
 
 func requiresUIAuth(path string) bool {
-	if strings.HasPrefix(path, "/health") || strings.HasPrefix(path, "/readyz") {
+	if strings.HasPrefix(path, "/health") {
 		return false
 	}
 	if strings.HasPrefix(path, "/static/") || path == "/service-worker.js" {

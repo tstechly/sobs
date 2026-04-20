@@ -1,10 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
-	"strconv"
 	"strings"
+	"time"
+
+	"github.com/abartrim/sobs/internal/ingest/otlpreceiver"
 )
 
 type subscribeRequest struct {
@@ -34,42 +39,64 @@ func (s *Server) tail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	limit := 50
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			if parsed < 1 {
-				parsed = 1
+	source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	if source == "" {
+		source = "all"
+	}
+	serviceFilter := strings.TrimSpace(r.URL.Query().Get("service"))
+	subscriber, unsubscribe := s.tailBroker.Subscribe(otlpreceiverSSEQueueMax())
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "retry: 5000\n\n")
+	controller := http.NewResponseController(w)
+	_ = controller.Flush()
+
+	keepalive := time.NewTicker(otlpreceiverKeepaliveInterval())
+	defer keepalive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepalive.C:
+			_, _ = io.WriteString(w, ": keepalive\n\n")
+			_ = controller.Flush()
+		case event := <-subscriber:
+			if source != "all" && event.Source != source {
+				continue
 			}
-			if parsed > 200 {
-				parsed = 200
+			if serviceFilter != "" && event.Service != serviceFilter {
+				continue
 			}
-			limit = parsed
+			payload, err := marshalTailEvent(event)
+			if err != nil {
+				continue
+			}
+			_, _ = io.WriteString(w, fmt.Sprintf("data: %s\n\n", payload))
+			_ = controller.Flush()
 		}
 	}
-	store, err := s.storeFactory.Open(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
-		return
+}
+
+func marshalTailEvent(event otlpreceiver.TailEvent) (string, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(event); err != nil {
+		return "", err
 	}
-	defer func() { _ = store.Close() }()
-	rows, err := store.Query(r.Context(), "SELECT Timestamp, ServiceName, SeverityText, Body FROM otel_logs ORDER BY Timestamp DESC LIMIT ?", limit)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
-		return
-	}
-	defer func() { _ = rows.Close() }()
-	items := []map[string]any{}
-	for rows.Next() {
-		var ts string
-		var service string
-		var severity string
-		var body string
-		if err := rows.Scan(&ts, &service, &severity, &body); err != nil {
-			break
-		}
-		items = append(items, map[string]any{"ts": ts, "service": service, "severity": severity, "message": body})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	return strings.TrimSpace(buffer.String()), nil
+}
+
+func otlpreceiverSSEQueueMax() int {
+	return otlpreceiver.EnvSSEQueueMax()
+}
+
+func otlpreceiverKeepaliveInterval() time.Duration {
+	return otlpreceiver.KeepaliveInterval()
 }
 
 func (s *Server) apiNotificationsVAPIDKeygen(w http.ResponseWriter, r *http.Request) {
@@ -106,20 +133,4 @@ func (s *Server) apiNotificationsChannelSubroutes(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tested": true})
-}
-
-func (s *Server) apiNotificationsRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.notificationService.ListRules()})
-}
-
-func (s *Server) apiNotificationsSubscriptions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.notificationService.ListSubscriptions()})
 }

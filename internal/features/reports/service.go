@@ -3,26 +3,40 @@ package reports
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/extensionpoints"
+	"github.com/abartrim/sobs/internal/features/defaultstore"
 	"github.com/abartrim/sobs/internal/features/persist"
 )
 
 type Report struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Query     string `json:"query"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	PageType    string         `json:"page_type"`
+	Filters     map[string]any `json:"filters"`
+	CreatedAt   string         `json:"created_at"`
+	UpdatedAt   string         `json:"updated_at"`
+}
+
+var allowedPageTypes = map[string]struct{}{
+	"logs":        {},
+	"traces":      {},
+	"errors":      {},
+	"metrics":     {},
+	"rum":         {},
+	"ai":          {},
+	"work_items":  {},
+	"web_traffic": {},
 }
 
 type Service struct {
-	mu      sync.RWMutex
-	reports map[string]Report
-	nextID  int64
+	mu           sync.RWMutex
+	reports      map[string]Report
+	nextID       int64
 	storeFactory extensionpoints.StoreFactory
 	schemaOnce   sync.Once
 	schemaErr    error
@@ -47,17 +61,21 @@ func (s *Service) ensureSchema(ctx context.Context) error {
 			return
 		}
 		defer func() { _ = store.Close() }()
-		_, err = store.Exec(ctx, "CREATE TABLE IF NOT EXISTS sobs_reports (Id String, Name String, Description String, PageType String, FiltersJson String, IsDeleted UInt8 DEFAULT 0, Version UInt64 DEFAULT 0) ENGINE = ReplacingMergeTree(Version) ORDER BY Id")
+		_, err = store.Exec(ctx, "CREATE TABLE IF NOT EXISTS sobs_reports (Id String CODEC(ZSTD(1)), Name String CODEC(ZSTD(1)), Description String CODEC(ZSTD(1)), PageType LowCardinality(String) CODEC(ZSTD(1)), FiltersJson String CODEC(ZSTD(1)), IsDeleted UInt8 DEFAULT 0 CODEC(T64, ZSTD(1)), Version UInt64 DEFAULT 0 CODEC(T64, ZSTD(1))) ENGINE = ReplacingMergeTree(Version) ORDER BY Id SETTINGS index_granularity = 8192")
 		s.schemaErr = err
 	})
 	return s.schemaErr
 }
 
 func (s *Service) List() []Report {
-	return s.listStoreBacked(context.Background())
+	return s.listStoreBacked(context.Background(), "")
 }
 
-func (s *Service) listStoreBacked(ctx context.Context) []Report {
+func (s *Service) ListByPageType(pageType string) []Report {
+	return s.listStoreBacked(context.Background(), strings.TrimSpace(pageType))
+}
+
+func (s *Service) listStoreBacked(ctx context.Context, pageType string) []Report {
 	if err := s.ensureSchema(ctx); err != nil {
 		return nil
 	}
@@ -66,7 +84,16 @@ func (s *Service) listStoreBacked(ctx context.Context) []Report {
 		return nil
 	}
 	defer func() { _ = store.Close() }()
-	rows, err := store.Query(ctx, "SELECT Id, Name, Description, FiltersJson, Version FROM sobs_reports FINAL WHERE IsDeleted = 0 ORDER BY Name")
+	query := "SELECT Id, Name, Description, PageType, FiltersJson, Version FROM sobs_reports FINAL WHERE IsDeleted = 0"
+	args := []any{}
+	if pageType != "" {
+		query += " AND PageType = ?"
+		args = append(args, pageType)
+		query += " ORDER BY Name"
+	} else {
+		query += " ORDER BY PageType, Name"
+	}
+	rows, err := store.Query(ctx, query, args...)
 	if err != nil {
 		return nil
 	}
@@ -75,12 +102,15 @@ func (s *Service) listStoreBacked(ctx context.Context) []Report {
 	for rows.Next() {
 		var item Report
 		var description string
+		var pageTypeValue string
 		var filtersJSON string
 		var version uint64
-		if err := rows.Scan(&item.ID, &item.Name, &description, &filtersJSON, &version); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &description, &pageTypeValue, &filtersJSON, &version); err != nil {
 			return out
 		}
-		item.Query = filtersJSON
+		item.Description = description
+		item.PageType = pageTypeValue
+		item.Filters = parseReportFilters(filtersJSON)
 		item.CreatedAt = time.Unix(0, int64(version)).UTC().Format(time.RFC3339)
 		item.UpdatedAt = item.CreatedAt
 		out = append(out, item)
@@ -88,13 +118,19 @@ func (s *Service) listStoreBacked(ctx context.Context) []Report {
 	return out
 }
 
-func (s *Service) Create(name, query string) (Report, error) {
-	return s.createStoreBacked(context.Background(), name, query)
+func (s *Service) Create(report Report) (Report, error) {
+	return s.createStoreBacked(context.Background(), report)
 }
 
-func (s *Service) createStoreBacked(ctx context.Context, name string, query string) (Report, error) {
-	if name == "" {
+func (s *Service) createStoreBacked(ctx context.Context, report Report) (Report, error) {
+	if strings.TrimSpace(report.Name) == "" {
 		return Report{}, errors.New("name is required")
+	}
+	if _, ok := allowedPageTypes[strings.TrimSpace(report.PageType)]; !ok {
+		return Report{}, errors.New("page_type is invalid")
+	}
+	if report.Filters == nil {
+		report.Filters = map[string]any{}
 	}
 	if err := s.ensureSchema(ctx); err != nil {
 		return Report{}, err
@@ -107,10 +143,13 @@ func (s *Service) createStoreBacked(ctx context.Context, name string, query stri
 		return Report{}, err
 	}
 	defer func() { _ = store.Close() }()
-	if _, err := store.Exec(ctx, "INSERT INTO sobs_reports (Id, Name, Description, PageType, FiltersJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", id, name, "", "query", query, 0, version); err != nil {
+	if _, err := store.Exec(ctx, "INSERT INTO sobs_reports (Id, Name, Description, PageType, FiltersJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", id, strings.TrimSpace(report.Name), strings.TrimSpace(report.Description), strings.TrimSpace(report.PageType), persist.JSONString(report.Filters), 0, version); err != nil {
 		return Report{}, err
 	}
-	return Report{ID: id, Name: name, Query: query, CreatedAt: createdAt, UpdatedAt: createdAt}, nil
+	report.ID = id
+	report.CreatedAt = createdAt
+	report.UpdatedAt = createdAt
+	return report, nil
 }
 
 func (s *Service) Delete(id string) bool {
@@ -158,14 +197,37 @@ func (s *Service) replaceAllStoreBacked(ctx context.Context, in []Report) {
 		return
 	}
 	defer func() { _ = store.Close() }()
-	for _, item := range s.listStoreBacked(ctx) {
-		_, _ = store.Exec(ctx, "INSERT INTO sobs_reports (Id, Name, Description, PageType, FiltersJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", item.ID, item.Name, "", "query", item.Query, 1, persist.Version())
+	existingRows, err := store.Query(ctx, "SELECT Id, Name, Description, PageType, FiltersJson FROM sobs_reports FINAL WHERE IsDeleted = 0 ORDER BY PageType, Name")
+	if err == nil {
+		defer func() { _ = existingRows.Close() }()
+		for existingRows.Next() {
+			var id, name, description, pageType, filtersJSON string
+			if scanErr := existingRows.Scan(&id, &name, &description, &pageType, &filtersJSON); scanErr != nil {
+				continue
+			}
+			_, _ = store.Exec(ctx, "INSERT INTO sobs_reports (Id, Name, Description, PageType, FiltersJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", id, name, description, pageType, filtersJSON, 1, persist.Version())
+		}
 	}
 	for _, item := range in {
-		id := item.ID
+		if _, ok := allowedPageTypes[strings.TrimSpace(item.PageType)]; !ok {
+			continue
+		}
+		id := strings.TrimSpace(item.ID)
 		if id == "" {
 			id = persist.NewID()
 		}
-		_, _ = store.Exec(ctx, "INSERT INTO sobs_reports (Id, Name, Description, PageType, FiltersJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", id, item.Name, "", "query", item.Query, 0, persist.Version())
+		filters := item.Filters
+		if filters == nil {
+			filters = map[string]any{}
+		}
+		_, _ = store.Exec(ctx, "INSERT INTO sobs_reports (Id, Name, Description, PageType, FiltersJson, IsDeleted, Version) VALUES (?, ?, ?, ?, ?, ?, ?)", id, strings.TrimSpace(item.Name), strings.TrimSpace(item.Description), strings.TrimSpace(item.PageType), persist.JSONString(filters), 0, persist.Version())
 	}
+}
+
+func parseReportFilters(raw string) map[string]any {
+	parsed := persist.ParseJSONMap(raw)
+	if parsed == nil {
+		return map[string]any{}
+	}
+	return parsed
 }

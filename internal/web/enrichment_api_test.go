@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,6 +29,32 @@ func TestWebTrafficAndEnrichmentEndpoints(t *testing.T) {
 			t.Fatalf("expected 200 for %s, got %d", p, rec.Code)
 		}
 	}
+
+	assertTrafficShape := func(path string, key string) {
+		req := httptest.NewRequest(http.MethodGet, "http://example.com"+path, nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d", path, rec.Code)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal %s: %v", path, err)
+		}
+		if okVal, ok := payload["ok"].(bool); !ok || !okVal {
+			t.Fatalf("expected ok=true for %s, got %#v", path, payload["ok"])
+		}
+		if _, exists := payload[key]; !exists {
+			t.Fatalf("expected key %q in %s payload", key, path)
+		}
+	}
+
+	assertTrafficShape("/api/web-traffic/geo", "country_counts")
+	assertTrafficShape("/api/web-traffic/browsers", "browsers")
+	assertTrafficShape("/api/web-traffic/os", "operating_systems")
+	assertTrafficShape("/api/web-traffic/timezones", "timezones")
+	assertTrafficShape("/api/web-traffic/languages", "languages")
+	assertTrafficShape("/api/web-traffic/devices", "devices")
 
 	// Setting a disposition for a non-existent finding returns 404 — correct behaviour
 	// when no scan has been run and no findings exist.
