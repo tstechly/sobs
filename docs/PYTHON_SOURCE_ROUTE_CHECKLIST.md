@@ -62,8 +62,8 @@ Status legend:
 
 - `DONE | GET | /rum | app.py`
 - `DONE | GET | /rum/help | app.py`
-- `TODO | GET | /web-traffic | app.py`
-- `TODO | GET | /web-traffic/help | app.py`
+- `DONE | GET | /web-traffic | app.py`
+- `DONE | GET | /web-traffic/help | app.py`
 - `TODO | GET | /api/web-traffic/geo | app.py`
 - `TODO | GET | /api/web-traffic/browsers | app.py`
 - `TODO | GET | /api/web-traffic/os | app.py`
