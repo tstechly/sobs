@@ -274,7 +274,6 @@ func notificationsRedirect(w http.ResponseWriter, r *http.Request, msg string) {
 		target += "?msg=" + url.QueryEscape(msg)
 	}
 	http.Redirect(w, r, target, http.StatusSeeOther)
-	_ = r // suppress lint
 }
 
 func (s *Server) settingsNotificationsRulesActions(w http.ResponseWriter, r *http.Request) {

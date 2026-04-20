@@ -50,8 +50,10 @@ func (s *Server) settingsDataManagement(w http.ResponseWriter, r *http.Request) 
 			"request":               map[string]any{"endpoint": "settings/data-management"},
 			"dm_settings":           dmSettings,
 			"dm_secret_present": map[string]bool{
-				"s3_secret_access_key":       s.dataManagementService.GetSettings().S3SecretAccessKey != "",
-				"backup_encryption_password": s.dataManagementService.GetSettings().BackupEncryptionPassword != "",
+				// Sensitive fields are stored as-is (plaintext); show only
+				// whether a value is present, not the value itself.
+				"s3_secret_access_key":       st.S3SecretAccessKey != "",
+				"backup_encryption_password": st.BackupEncryptionPassword != "",
 			},
 			"flash_msg":  "",
 			"flash_type": "info",

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/abartrim/sobs/internal/features/defaultstore"
@@ -202,7 +203,7 @@ func (s *Service) createFullRuleStoreBacked(ctx context.Context, p RuleParams) (
 	}
 	channelIDsStr := ""
 	if len(p.ChannelIDs) > 0 {
-		channelIDsStr = joinStrings(p.ChannelIDs, ",")
+		channelIDsStr = strings.Join(p.ChannelIDs, ",")
 	}
 	if err := s.ensureSchema(ctx); err != nil {
 		return Rule{}, err
@@ -219,17 +220,6 @@ func (s *Service) createFullRuleStoreBacked(ctx context.Context, p RuleParams) (
 		return Rule{}, err
 	}
 	return Rule{ID: id, Name: p.Name, Enabled: true, CreatedAt: createdAt}, nil
-}
-
-func joinStrings(items []string, sep string) string {
-	result := ""
-	for i, s := range items {
-		if i > 0 {
-			result += sep
-		}
-		result += s
-	}
-	return result
 }
 
 func makeID() string {
