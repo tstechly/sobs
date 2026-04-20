@@ -118,14 +118,14 @@ Status legend:
 
 ## Reports
 
-- `TODO | GET | /reports | app.py`
-- `TODO | GET | /reports/help | app.py`
-- `TODO | POST | /reports/<report_id>/delete | app.py`
-- `TODO | GET | /api/reports | app.py`
-- `TODO | POST | /api/reports | app.py`
-- `TODO | DELETE | /api/reports/<report_id> | app.py`
-- `TODO | GET | /api/reports/export | app.py`
-- `TODO | POST | /api/reports/import | app.py`
+- `DONE | GET | /reports | app.py`
+- `DONE | GET | /reports/help | app.py`
+- `DONE | POST | /reports/<report_id>/delete | app.py`
+- `DONE | GET | /api/reports | app.py`
+- `DONE | POST | /api/reports | app.py`
+- `DONE | DELETE | /api/reports/<report_id> | app.py`
+- `DONE | GET | /api/reports/export | app.py`
+- `DONE | POST | /api/reports/import | app.py`
 
 ## Static And Core Settings
 
