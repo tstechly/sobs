@@ -86,11 +86,11 @@ Status legend:
 
 ## AI And Dashboards
 
-- `TODO | GET | /ai | app.py`
-- `TODO | GET | /ai/help | app.py`
-- `TODO | GET | /api/ai/span-attributes | app.py`
-- `TODO | GET | /api/ai/conversation | app.py`
-- `TODO | GET | /api/ai/export | app.py`
+- `DONE | GET | /ai | app.py`
+- `DONE | GET | /ai/help | app.py`
+- `DONE | GET | /api/ai/span-attributes | app.py`
+- `DONE | GET | /api/ai/conversation | app.py`
+- `DONE | GET | /api/ai/export | app.py`
 - `TODO | GET | /api/dashboards/list | app.py`
 - `TODO | POST | /api/query/add-to-dashboard | app.py`
 - `TODO | GET | /dashboards | app.py`

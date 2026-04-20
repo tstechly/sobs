@@ -11,8 +11,14 @@ import (
 func TestAIHelperEndpoints(t *testing.T) {
 	srv := newTestServer()
 
+	spanReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/ai/span-attributes", nil)
+	spanRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(spanRec, spanReq)
+	if spanRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for /api/ai/span-attributes without required params, got %d", spanRec.Code)
+	}
+
 	for _, p := range []string{
-		"/api/ai/span-attributes",
 		"/api/ai/helper/capabilities",
 		"/api/ai/helper/actions/manifest",
 		"/api/ai/helper/chats",
