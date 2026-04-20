@@ -13199,17 +13199,13 @@ class TestAISettingsAndAgentFlows:
             "extra": {"service": "svc", "err_type": "TestError", "message": "oops"},
         }
 
-        allowed_calls: list[tuple] = []
-
         async def _fake_check_guard(settings_arg, context, _hint):
             return True, "", {}
 
         monkeypatch.setattr(sobs_app, "_check_guard_model", _fake_check_guard)
 
         run_id = "test-run-noise-strip"
-        result = asyncio.get_event_loop().run_until_complete(
-            sobs_app._run_agent_flow(db, rule, settings, trigger_context, run_id)
-        )
+        result = asyncio.run(sobs_app._run_agent_flow(db, rule, settings, trigger_context, run_id))
         analysis = result.get("analysis", "")
         assert "NOISE_OR_IMPACT" not in analysis
         assert "transient network blip" in analysis
