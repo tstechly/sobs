@@ -2102,21 +2102,102 @@ func (s *Server) workItemsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
+	serviceFilter := strings.TrimSpace(r.URL.Query().Get("service"))
+	ruleFilter := strings.TrimSpace(r.URL.Query().Get("rule_name"))
+	actionTypeFilter := strings.TrimSpace(r.URL.Query().Get("action_type"))
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
+
+	items := []map[string]any{}
+	totalItems := 0
+	services := []map[string]any{}
+	rules := []map[string]any{}
+	limit := parseLimitParam(r, 100, 1, 1000)
+	offset := parseOffsetParam(r)
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err == nil {
+		defer func() { _ = store.Close() }()
+
+		conditions := []string{"IsDeleted = 0"}
+		params := []any{}
+		if serviceFilter != "" {
+			conditions = append(conditions, "ServiceName = ?")
+			params = append(params, serviceFilter)
+		}
+		if ruleFilter != "" {
+			conditions = append(conditions, "AgentRuleName = ?")
+			params = append(params, ruleFilter)
+		}
+		if actionTypeFilter != "" {
+			conditions = append(conditions, "AgentAction = ?")
+			params = append(params, actionTypeFilter)
+		}
+		if statusFilter != "" {
+			conditions = append(conditions, "IssueState = ?")
+			params = append(params, statusFilter)
+		}
+		if fromTS != "" {
+			conditions = append(conditions, "CreatedAt >= parseDateTime64BestEffort(?, 9)")
+			params = append(params, fromTS)
+		}
+		if toTS != "" {
+			conditions = append(conditions, "CreatedAt <= parseDateTime64BestEffort(?, 9)")
+			params = append(params, toTS)
+		}
+
+		whereSQL := ""
+		if len(conditions) > 0 {
+			whereSQL = " WHERE " + strings.Join(conditions, " AND ")
+		}
+
+		totalItems = summaryQuerySingleInt(r.Context(), store, "SELECT count() FROM sobs_github_work_items FINAL"+whereSQL, params...)
+		rows, queryErr := queryRows(r.Context(), store, "SELECT * FROM sobs_github_work_items FINAL"+whereSQL+" ORDER BY CreatedAt DESC LIMIT ? OFFSET ?", append(params, limit, offset)...)
+		if queryErr == nil {
+			for _, row := range rows {
+				items = append(items, serializeWorkItemRow(row))
+			}
+		}
+
+		serviceRows, serviceErr := queryRows(r.Context(), store, "SELECT DISTINCT ServiceName FROM sobs_github_work_items FINAL WHERE IsDeleted = 0 AND ServiceName != '' ORDER BY ServiceName")
+		if serviceErr == nil {
+			for _, row := range serviceRows {
+				serviceName := anyToString(incidentRowValue(row, "ServiceName"))
+				if serviceName == "" {
+					continue
+				}
+				services = append(services, map[string]any{"value": serviceName, "label": serviceName})
+			}
+		}
+
+		ruleRows, ruleErr := queryRows(r.Context(), store, "SELECT DISTINCT AgentRuleName FROM sobs_github_work_items FINAL WHERE IsDeleted = 0 AND AgentRuleName != '' ORDER BY AgentRuleName")
+		if ruleErr == nil {
+			for _, row := range ruleRows {
+				ruleName := anyToString(incidentRowValue(row, "AgentRuleName"))
+				if ruleName == "" {
+					continue
+				}
+				rules = append(rules, map[string]any{"value": ruleName, "label": ruleName})
+			}
+		}
+	}
 
 	ctx := pongo2.Context{
 		"title":                 "Work Items",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "work-items"},
-		"items":                 []any{},
-		"total_items":           0,
-		"services":              []any{},
-		"rules":                 []any{},
-		"service_filter":        strings.TrimSpace(r.URL.Query().Get("service")),
-		"rule_filter":           strings.TrimSpace(r.URL.Query().Get("rule_name")),
-		"action_type_filter":    strings.TrimSpace(r.URL.Query().Get("action_type")),
-		"status_filter":         strings.TrimSpace(r.URL.Query().Get("status")),
-		"from_ts":               strings.TrimSpace(r.URL.Query().Get("from_ts")),
-		"to_ts":                 strings.TrimSpace(r.URL.Query().Get("to_ts")),
+		"items":                 items,
+		"total_items":           totalItems,
+		"services":              services,
+		"rules":                 rules,
+		"service_filter":        serviceFilter,
+		"rule_filter":           ruleFilter,
+		"action_type_filter":    actionTypeFilter,
+		"status_filter":         statusFilter,
+		"from_ts":               fromTS,
+		"to_ts":                 toTS,
+		"time_error":            "",
 	}
 	s.renderTemplate(w, "work_items.html", ctx)
 }

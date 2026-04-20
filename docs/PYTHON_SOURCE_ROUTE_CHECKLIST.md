@@ -80,9 +80,9 @@ Status legend:
 - `DONE | GET | /api/enrichment/cve/findings | app.py`
 - `DONE | POST | /api/enrichment/cve/findings/<osv_id>/disposition | app.py`
 - `DONE | POST | /api/enrichment/cve/scan | app.py`
-- `TODO | GET | /work-items | app.py`
-- `TODO | GET | /work-items/help | app.py`
-- `TODO | GET | /api/work-items | app.py`
+- `DONE | GET | /work-items | app.py`
+- `DONE | GET | /work-items/help | app.py`
+- `DONE | GET | /api/work-items | app.py`
 
 ## AI And Dashboards
 
