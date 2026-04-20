@@ -60,6 +60,29 @@ var defaultSensitivePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(?:Authorization|X-Api-Key|X-Auth-Token)\s*:\s*[^\r\n]+`),
 }
 
+// DefaultSensitiveKeys returns the canonical built-in sensitive key names.
+func DefaultSensitiveKeys() []string {
+	keys := make([]string, 0, len(defaultSensitiveKeys))
+	for key := range defaultSensitiveKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// DefaultSensitivePatterns returns the canonical built-in sensitive regex patterns.
+func DefaultSensitivePatterns() []string {
+	patterns := make([]string, 0, len(defaultSensitivePatterns))
+	for _, re := range defaultSensitivePatterns {
+		if re == nil {
+			continue
+		}
+		patterns = append(patterns, re.String())
+	}
+	sort.Strings(patterns)
+	return patterns
+}
+
 type Service struct {
 	storeFactory extensionpoints.StoreFactory
 }

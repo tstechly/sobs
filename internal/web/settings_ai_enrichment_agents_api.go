@@ -264,9 +264,85 @@ func githubTokenExpiryStatus(values map[string]string) (string, map[string]any) 
 
 func defaultAIPricing() map[string]map[string]float64 {
 	return map[string]map[string]float64{
-		"gpt-4o":      {"in": 5.0, "out": 15.0},
-		"gpt-4o-mini": {"in": 0.15, "out": 0.6},
+		"gpt-4o":                            {"in": 2.50, "out": 10.00},
+		"gpt-4o-mini":                       {"in": 0.15, "out": 0.60},
+		"gpt-4-turbo":                       {"in": 10.00, "out": 30.00},
+		"gpt-4":                             {"in": 30.00, "out": 60.00},
+		"gpt-3.5-turbo":                     {"in": 0.50, "out": 1.50},
+		"o1":                                {"in": 15.00, "out": 60.00},
+		"o1-mini":                           {"in": 3.00, "out": 12.00},
+		"o3-mini":                           {"in": 1.10, "out": 4.40},
+		"claude-3-5-sonnet-20241022":       {"in": 3.00, "out": 15.00},
+		"claude-3-5-sonnet":                 {"in": 3.00, "out": 15.00},
+		"claude-3-5-haiku":                  {"in": 0.80, "out": 4.00},
+		"claude-3-opus":                     {"in": 15.00, "out": 75.00},
+		"claude-3-sonnet":                   {"in": 3.00, "out": 15.00},
+		"claude-3-haiku":                    {"in": 0.25, "out": 1.25},
+		"gemini-1.5-pro":                    {"in": 1.25, "out": 5.00},
+		"gemini-1.5-flash":                  {"in": 0.075, "out": 0.30},
+		"gemini-2.0-flash":                  {"in": 0.10, "out": 0.40},
+		"llama-3.1-70b":                     {"in": 0.90, "out": 0.90},
+		"llama-3.1-8b":                      {"in": 0.20, "out": 0.20},
+		"mistral-large":                     {"in": 3.00, "out": 9.00},
+		"mistral-small":                     {"in": 0.20, "out": 0.60},
 	}
+}
+
+var aiPricingInferenceRules = []struct {
+	needles []string
+	baseKey string
+}{
+	{needles: []string{"4o-mini"}, baseKey: "gpt-4o-mini"},
+	{needles: []string{"4o"}, baseKey: "gpt-4o"},
+	{needles: []string{"3.5"}, baseKey: "gpt-3.5-turbo"},
+	{needles: []string{"turbo"}, baseKey: "gpt-4-turbo"},
+	{needles: []string{"o3-mini"}, baseKey: "o3-mini"},
+	{needles: []string{"o1-mini"}, baseKey: "o1-mini"},
+	{needles: []string{"o1"}, baseKey: "o1"},
+	{needles: []string{"haiku"}, baseKey: "claude-3-5-haiku"},
+	{needles: []string{"sonnet"}, baseKey: "claude-3-5-sonnet"},
+	{needles: []string{"opus"}, baseKey: "claude-3-opus"},
+	{needles: []string{"claude"}, baseKey: "claude-3-5-sonnet"},
+	{needles: []string{"2.0-flash", "2-flash"}, baseKey: "gemini-2.0-flash"},
+	{needles: []string{"1.5-flash", "flash-lite", "flash"}, baseKey: "gemini-1.5-flash"},
+	{needles: []string{"1.5-pro", "pro"}, baseKey: "gemini-1.5-pro"},
+	{needles: []string{"gemini"}, baseKey: "gemini-1.5-flash"},
+	{needles: []string{"70b"}, baseKey: "llama-3.1-70b"},
+	{needles: []string{"8b"}, baseKey: "llama-3.1-8b"},
+	{needles: []string{"llama"}, baseKey: "llama-3.1-8b"},
+	{needles: []string{"large"}, baseKey: "mistral-large"},
+	{needles: []string{"small"}, baseKey: "mistral-small"},
+	{needles: []string{"mistral"}, baseKey: "mistral-small"},
+}
+
+func inferAIPricingForModel(model string) map[string]float64 {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	defaults := defaultAIPricing()
+	fallback := map[string]float64{"in": 2.50, "out": 10.00}
+	if row, ok := defaults["gpt-4o"]; ok {
+		fallback = map[string]float64{"in": row["in"], "out": row["out"]}
+	}
+	if normalized == "" {
+		return fallback
+	}
+	if row, ok := defaults[normalized]; ok {
+		return map[string]float64{"in": row["in"], "out": row["out"]}
+	}
+	for knownKey, row := range defaults {
+		if strings.Contains(normalized, knownKey) || strings.Contains(knownKey, normalized) {
+			return map[string]float64{"in": row["in"], "out": row["out"]}
+		}
+	}
+	for _, rule := range aiPricingInferenceRules {
+		for _, needle := range rule.needles {
+			if strings.Contains(normalized, needle) {
+				if row, ok := defaults[rule.baseKey]; ok {
+					return map[string]float64{"in": row["in"], "out": row["out"]}
+				}
+			}
+		}
+	}
+	return fallback
 }
 
 func aiPricingForTemplate(values map[string]string) (map[string]map[string]float64, map[string]string, []string) {

@@ -41,6 +41,7 @@ func TestAIHelpPageParity(t *testing.T) {
 
 func TestAIPageParity(t *testing.T) {
 	srv := newRenderedAITestServer()
+	seedAITracesTable(t, srv)
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/ai", nil)
 	rec := httptest.NewRecorder()
@@ -50,6 +51,15 @@ func TestAIPageParity(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "AI Transparency") {
 		t.Fatalf("expected ai page to render transparency header")
+	}
+	if !strings.Contains(rec.Body.String(), "svc-ai") {
+		t.Fatalf("expected ai page filters to include observed service")
+	}
+	if !strings.Contains(rec.Body.String(), "gpt-4o-mini") {
+		t.Fatalf("expected ai page filters/pricing to include observed model")
+	}
+	if strings.Contains(rec.Body.String(), `var AI_PRICING = "{}"`) {
+		t.Fatalf("expected ai pricing context object, got placeholder string")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/abartrim/sobs/internal/features/masking"
 	"github.com/abartrim/sobs/internal/features/tags"
 )
 
@@ -29,9 +30,8 @@ func (s *Server) settingsMaskingPage(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(customKeys)
 	sort.Strings(customPatterns)
 
-	// Keep defaults empty until masking service exposes canonical defaults.
-	defaultKeys := []string{}
-	defaultPatterns := []string{}
+	defaultKeys := masking.DefaultSensitiveKeys()
+	defaultPatterns := masking.DefaultSensitivePatterns()
 
 	outputMode := strings.TrimSpace(anyString(rules["output_mode"]))
 	if outputMode == "" {
@@ -58,6 +58,14 @@ func (s *Server) settingsMaskingPage(w http.ResponseWriter, r *http.Request) {
 	s.renderTemplate(w, "settings_masking.html", ctx)
 }
 
+func (s *Server) writeMaskingMutationResponse(w http.ResponseWriter, r *http.Request, status int, payload map[string]any) {
+	if wantsJSONResponse(r) {
+		writeJSON(w, status, payload)
+		return
+	}
+	http.Redirect(w, r, "/settings/masking", http.StatusSeeOther)
+}
+
 func (s *Server) settingsMaskingKeysCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -69,10 +77,10 @@ func (s *Server) settingsMaskingKeysCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !s.maskingService.AddKey(vals["key"]) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
+		s.writeMaskingMutationResponse(w, r, http.StatusBadRequest, map[string]any{"ok": false, "error": "key is required"})
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
+	s.writeMaskingMutationResponse(w, r, http.StatusCreated, map[string]any{"ok": true})
 }
 
 func (s *Server) settingsMaskingKeysDelete(w http.ResponseWriter, r *http.Request) {
@@ -86,10 +94,10 @@ func (s *Server) settingsMaskingKeysDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !s.maskingService.DeleteKey(vals["key"]) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		s.writeMaskingMutationResponse(w, r, http.StatusNotFound, map[string]any{"ok": false, "error": "not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.writeMaskingMutationResponse(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) settingsMaskingPatternsCreate(w http.ResponseWriter, r *http.Request) {
@@ -103,10 +111,10 @@ func (s *Server) settingsMaskingPatternsCreate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !s.maskingService.AddPattern(vals["pattern"]) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pattern is required"})
+		s.writeMaskingMutationResponse(w, r, http.StatusBadRequest, map[string]any{"ok": false, "error": "pattern is required"})
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
+	s.writeMaskingMutationResponse(w, r, http.StatusCreated, map[string]any{"ok": true})
 }
 
 func (s *Server) settingsMaskingPatternsDelete(w http.ResponseWriter, r *http.Request) {
@@ -120,10 +128,10 @@ func (s *Server) settingsMaskingPatternsDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !s.maskingService.DeletePattern(vals["pattern"]) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		s.writeMaskingMutationResponse(w, r, http.StatusNotFound, map[string]any{"ok": false, "error": "not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.writeMaskingMutationResponse(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) settingsMaskingOutput(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +153,7 @@ func (s *Server) settingsMaskingOutput(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.maskingService.SetOutputMode(mode)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.writeMaskingMutationResponse(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) settingsMaskingSQLOutput(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +175,7 @@ func (s *Server) settingsMaskingSQLOutput(w http.ResponseWriter, r *http.Request
 		}
 	}
 	s.maskingService.SetSQLOutput(mode)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.writeMaskingMutationResponse(w, r, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) apiSettingsMaskingPreview(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +196,45 @@ func (s *Server) apiSettingsMaskingRules(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.maskingService.ListRules())
+	rules := s.maskingService.ListRules()
+	customKeys := toStringSliceAny(rules["keys"])
+	customPatterns := toStringSliceAny(rules["patterns"])
+	defaultKeys := masking.DefaultSensitiveKeys()
+	defaultPatterns := masking.DefaultSensitivePatterns()
+	effectiveKeys := uniqueSortedStrings(append(append([]string{}, defaultKeys...), customKeys...))
+	effectivePatterns := uniqueSortedStrings(append(append([]string{}, defaultPatterns...), customPatterns...))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"keys":                       customKeys,
+		"patterns":                   customPatterns,
+		"default_keys":               defaultKeys,
+		"default_patterns":           defaultPatterns,
+		"effective_keys":             effectiveKeys,
+		"effective_patterns":         effectivePatterns,
+		"effective_key_count":        len(effectiveKeys),
+		"effective_pattern_count":    len(effectivePatterns),
+		"output_mode":                rules["output_mode"],
+		"sql_output":                 rules["sql_output"],
+		"output_masking_enabled":     isMaskingOutputEnabled(anyString(rules["output_mode"])),
+		"sql_output_masking_enabled": isMaskingOutputEnabled(anyString(rules["sql_output"])),
+	})
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		item := strings.TrimSpace(value)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {

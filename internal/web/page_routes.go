@@ -2251,6 +2251,123 @@ func (s *Server) aiPage(w http.ResponseWriter, r *http.Request) {
 		offset = parsed
 	}
 
+	selectedServices := uniqueSortedStrings(q["service"])
+	selectedModels := uniqueSortedStrings(q["model"])
+	selectedOperations := uniqueSortedStrings(q["operation"])
+	selectedSpanNames := uniqueSortedStrings(q["span_name"])
+	selectedRowTypes := uniqueSortedStrings(q["row_type"])
+	fromTS := strings.TrimSpace(q.Get("from_ts"))
+	toTS := strings.TrimSpace(q.Get("to_ts"))
+
+	services := []string{}
+	models := []string{}
+	operations := []string{}
+	spanNames := []string{}
+	totalCalls := 0
+	totalTokensIn := 0
+	totalTokensOut := 0
+	totalErrors := 0
+	errorMsg := ""
+
+	pricing, pricingSources, _ := aiPricingForTemplate(buildAISettingsForTemplate(s.settingsService.AI()))
+
+	if store, err := s.storeFactory.Open(r.Context()); err == nil {
+		defer store.Close()
+
+		baseConditions := []string{summaryAISpanCondition}
+		timeConditions, timeParams := incidentTimeWindowConditions("Timestamp", fromTS, toTS)
+		baseConditions = append(baseConditions, timeConditions...)
+		baseWhere := "WHERE " + strings.Join(baseConditions, " AND ")
+
+		servicesRows, servicesErr := queryRows(r.Context(), store,
+			"SELECT DISTINCT ServiceName FROM otel_traces "+baseWhere+" AND ServiceName != '' ORDER BY ServiceName LIMIT 500",
+			timeParams...,
+		)
+		if servicesErr == nil {
+			for _, row := range servicesRows {
+				serviceName := strings.TrimSpace(anyToString(incidentRowValue(row, "ServiceName")))
+				if serviceName != "" {
+					services = append(services, serviceName)
+				}
+			}
+		} else {
+			errorMsg = "Some AI metadata failed to load"
+		}
+
+		modelsRows, modelsErr := queryRows(r.Context(), store,
+			"SELECT DISTINCT SpanAttributes['gen_ai.request.model'] AS model FROM otel_traces "+baseWhere+" AND SpanAttributes['gen_ai.request.model'] != '' ORDER BY model LIMIT 500",
+			timeParams...,
+		)
+		if modelsErr == nil {
+			for _, row := range modelsRows {
+				modelName := strings.TrimSpace(anyToString(incidentRowValue(row, "model")))
+				if modelName == "" {
+					modelName = strings.TrimSpace(anyToString(incidentRowValue(row, "SpanAttributes['gen_ai.request.model']")))
+				}
+				if modelName == "" {
+					continue
+				}
+				normalizedModel := strings.ToLower(modelName)
+				models = append(models, modelName)
+				if _, exists := pricing[normalizedModel]; !exists {
+					pricing[normalizedModel] = inferAIPricingForModel(normalizedModel)
+					pricingSources[normalizedModel] = "inferred"
+				}
+			}
+		} else if errorMsg == "" {
+			errorMsg = "Some AI metadata failed to load"
+		}
+
+		operationsRows, operationsErr := queryRows(r.Context(), store,
+			"SELECT DISTINCT SpanAttributes['gen_ai.operation.name'] AS operation FROM otel_traces "+baseWhere+" AND SpanAttributes['gen_ai.operation.name'] != '' ORDER BY operation LIMIT 500",
+			timeParams...,
+		)
+		if operationsErr == nil {
+			for _, row := range operationsRows {
+				operationName := strings.TrimSpace(anyToString(incidentRowValue(row, "operation")))
+				if operationName == "" {
+					operationName = strings.TrimSpace(anyToString(incidentRowValue(row, "SpanAttributes['gen_ai.operation.name']")))
+				}
+				if operationName != "" {
+					operations = append(operations, operationName)
+				}
+			}
+		} else if errorMsg == "" {
+			errorMsg = "Some AI metadata failed to load"
+		}
+
+		spanRows, spanErr := queryRows(r.Context(), store,
+			"SELECT DISTINCT SpanName FROM otel_traces "+baseWhere+" AND SpanName != '' ORDER BY SpanName LIMIT 500",
+			timeParams...,
+		)
+		if spanErr == nil {
+			for _, row := range spanRows {
+				spanName := strings.TrimSpace(anyToString(incidentRowValue(row, "SpanName")))
+				if spanName != "" {
+					spanNames = append(spanNames, spanName)
+				}
+			}
+		} else if errorMsg == "" {
+			errorMsg = "Some AI metadata failed to load"
+		}
+
+		totalsRows, totalsErr := queryRows(r.Context(), store,
+			"SELECT SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])) AS tokens_in, SUM(toUInt64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])) AS tokens_out, COUNT(*) AS total_calls, countIf(SpanAttributes['error.type'] != '') AS total_errors FROM otel_traces "+baseWhere,
+			timeParams...,
+		)
+		if totalsErr == nil && len(totalsRows) > 0 {
+			totalTokensIn = anyToInt(totalsRows[0]["tokens_in"])
+			totalTokensOut = anyToInt(totalsRows[0]["tokens_out"])
+			totalCalls = anyToInt(totalsRows[0]["total_calls"])
+			totalErrors = anyToInt(totalsRows[0]["total_errors"])
+		}
+	}
+
+	services = uniqueSortedStrings(services)
+	models = uniqueSortedStrings(models)
+	operations = uniqueSortedStrings(operations)
+	spanNames = uniqueSortedStrings(spanNames)
+
 	ctx := pongo2.Context{
 		"title":                   "AI",
 		"mobile_breakpoint_max":   "575.98px",
@@ -2262,32 +2379,32 @@ func (s *Server) aiPage(w http.ResponseWriter, r *http.Request) {
 		"span_name":               strings.TrimSpace(q.Get("span_name")),
 		"row_type":                strings.TrimSpace(q.Get("row_type")),
 		"sql_where":               strings.TrimSpace(q.Get("sql")),
-		"from_ts":                 strings.TrimSpace(q.Get("from_ts")),
-		"to_ts":                   strings.TrimSpace(q.Get("to_ts")),
+		"from_ts":                 fromTS,
+		"to_ts":                   toTS,
 		"sort_by":                 strings.TrimSpace(q.Get("sort_by")),
 		"sort_dir":                strings.TrimSpace(q.Get("sort_dir")),
 		"limit":                   limit,
 		"offset":                  offset,
-		"total":                   0,
+		"total":                   totalCalls,
 		"next_offset":             offset + limit,
-		"services":                []any{},
-		"models":                  []any{},
-		"operations":              []any{},
-		"span_names":              []any{},
-		"selected_services":       []any{},
-		"selected_models":         []any{},
-		"selected_operations":     []any{},
-		"selected_row_types":      []any{},
-		"selected_span_names":     []any{},
+		"services":                services,
+		"models":                  models,
+		"operations":              operations,
+		"span_names":              spanNames,
+		"selected_services":       selectedServices,
+		"selected_models":         selectedModels,
+		"selected_operations":     selectedOperations,
+		"selected_row_types":      selectedRowTypes,
+		"selected_span_names":     selectedSpanNames,
 		"ai_items":                []any{},
 		"trace_groups":            []any{},
-		"total_calls":             0,
-		"total_tokens_in":         0,
-		"total_tokens_out":        0,
-		"total_errors":            0,
-		"error_msg":               "",
-		"ai_pricing_json":         "{}",
-		"ai_pricing_sources_json": "[]",
+		"total_calls":             totalCalls,
+		"total_tokens_in":         totalTokensIn,
+		"total_tokens_out":        totalTokensOut,
+		"total_errors":            totalErrors,
+		"error_msg":               errorMsg,
+		"ai_pricing_json":         pricing,
+		"ai_pricing_sources_json": pricingSources,
 	}
 	s.renderTemplate(w, "ai.html", ctx)
 }
