@@ -33,7 +33,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
-from typing import Any, Callable, cast
+from typing import Any, Callable, cast, overload
 
 import chdb.dbapi as chdb_driver
 import httpx
@@ -6764,9 +6764,7 @@ async def _run_agent_flow(
         elif extra_raw:
             extra_for_body = _safe_json_loads(str(extra_raw or ""), {})
         additional_context = str(extra_for_body.get("additional_context") or "").strip()
-        additional_context_section = (
-            f"\n### Additional Context\n{additional_context}\n" if additional_context else ""
-        )
+        additional_context_section = f"\n### Additional Context\n{additional_context}\n" if additional_context else ""
 
         issue_body = (
             f"## SOBS Automated Agent Report\n\n"
@@ -8688,7 +8686,15 @@ def _safe_json_dumps(value: Any) -> str:
     return "{}"
 
 
-def _safe_json_loads(value: object, default: object) -> object:
+@overload
+def _safe_json_loads(value: object, default: dict[str, Any]) -> dict[str, Any]: ...
+
+
+@overload
+def _safe_json_loads(value: object, default: list[Any]) -> list[Any]: ...
+
+
+def _safe_json_loads(value: object, default: Any) -> Any:
     raw = str(value or "").strip()
     if not raw:
         return default
@@ -8697,9 +8703,9 @@ def _safe_json_loads(value: object, default: object) -> object:
     except Exception:
         return default
     if isinstance(default, dict) and isinstance(parsed, dict):
-        return parsed
+        return cast(dict[str, Any], parsed)
     if isinstance(default, list) and isinstance(parsed, list):
-        return parsed
+        return cast(list[Any], parsed)
     return default
 
 
