@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type cveDispositionRequest struct {
@@ -329,7 +330,42 @@ func (s *Server) apiEnrichmentLibraries(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.Libraries()})
+	items := s.enrichmentService.Libraries()
+	libraries := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		pkg := strings.TrimSpace(anyToString(item["package"]))
+		if pkg == "" {
+			pkg = strings.TrimSpace(anyToString(item["name"]))
+		}
+		version := strings.TrimSpace(anyToString(item["version"]))
+		ecosystem := strings.TrimSpace(anyToString(item["ecosystem"]))
+		status := "clean"
+		if ecosystem == "" {
+			status = "unknown_ecosystem"
+		}
+		libraries = append(libraries, map[string]any{
+			"package":         pkg,
+			"ecosystem":       ecosystem,
+			"version":         version,
+			"service":         strings.TrimSpace(anyToString(item["service"])),
+			"source":          strings.TrimSpace(anyToString(item["source"])),
+			"app_name":        strings.TrimSpace(anyToString(item["app_name"])),
+			"release_version": strings.TrimSpace(anyToString(item["release_version"])),
+			"environment":     strings.TrimSpace(anyToString(item["environment"])),
+			"cve_count":       anyToInt(item["cve_count"]),
+			"status":          status,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"libraries": libraries,
+		"scanned_at": strings.TrimSpace(pickSetting(
+			s.settingsService.Enrichment(),
+			"cve_last_scan",
+			"enrichment.cve_last_scan",
+		)),
+	})
 }
 
 func (s *Server) apiEnrichmentGitHubRepoHealth(w http.ResponseWriter, r *http.Request) {
@@ -337,7 +373,20 @@ func (s *Server) apiEnrichmentGitHubRepoHealth(w http.ResponseWriter, r *http.Re
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.enrichmentService.GitHubRepoHealth())
+	health := s.enrichmentService.GitHubRepoHealth()
+	totalRepos := anyToInt(health["repos"])
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                     true,
+		"scanned_repos":          totalRepos,
+		"total_repos_considered": totalRepos,
+		"open_issues":            anyToInt(health["open_issues"]),
+		"open_prs":               anyToInt(health["open_prs"]),
+		"security_items":         anyToInt(health["security_items"]),
+		"version_scoped":         true,
+		"last_synced_at":         time.Now().UTC().Format(time.RFC3339),
+		"repos":                  []any{},
+	})
 }
 
 func (s *Server) apiEnrichmentCVEFindings(w http.ResponseWriter, r *http.Request) {
@@ -345,7 +394,34 @@ func (s *Server) apiEnrichmentCVEFindings(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": s.enrichmentService.ListFindings()})
+	raw := s.enrichmentService.ListFindings()
+	findings := make([]map[string]any, 0, len(raw))
+	for _, f := range raw {
+		findings = append(findings, map[string]any{
+			"package":             f.Package,
+			"ecosystem":           "",
+			"version":             "",
+			"service":             "",
+			"osv_id":              f.OSVID,
+			"cve_ids":             []string{},
+			"summary":             "",
+			"severity":            f.Severity,
+			"published":           f.UpdatedAt,
+			"disposition":         f.Disposition,
+			"raw_disposition":     f.Disposition,
+			"disposition_expired": false,
+			"disposition_note":    "",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"findings": findings,
+		"last_scan": strings.TrimSpace(pickSetting(
+			s.settingsService.Enrichment(),
+			"cve_last_scan",
+			"enrichment.cve_last_scan",
+		)),
+	})
 }
 
 func (s *Server) apiEnrichmentCVEFindingsSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -369,7 +445,16 @@ func (s *Server) apiEnrichmentCVEFindingsSubroutes(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	writeJSON(w, http.StatusOK, f)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"osv_id":      f.OSVID,
+		"package":     f.Package,
+		"ecosystem":   "",
+		"version":     "",
+		"disposition": f.Disposition,
+		"note":        "",
+		"updated_at":  f.UpdatedAt,
+	})
 }
 
 func (s *Server) apiEnrichmentCVEScan(w http.ResponseWriter, r *http.Request) {

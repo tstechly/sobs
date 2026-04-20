@@ -73,13 +73,13 @@ Status legend:
 
 ## Enrichment And Work Items
 
-- `TODO | GET | /api/enrichment/libraries | app.py`
-- `TODO | GET | /api/enrichment/github/repo-health | app.py`
-- `TODO | GET | /enrichment/cve | app.py`
-- `TODO | GET | /cve/help | app.py`
-- `TODO | GET | /api/enrichment/cve/findings | app.py`
-- `TODO | POST | /api/enrichment/cve/findings/<osv_id>/disposition | app.py`
-- `TODO | POST | /api/enrichment/cve/scan | app.py`
+- `DONE | GET | /api/enrichment/libraries | app.py`
+- `DONE | GET | /api/enrichment/github/repo-health | app.py`
+- `DONE | GET | /enrichment/cve | app.py`
+- `DONE | GET | /cve/help | app.py`
+- `DONE | GET | /api/enrichment/cve/findings | app.py`
+- `DONE | POST | /api/enrichment/cve/findings/<osv_id>/disposition | app.py`
+- `DONE | POST | /api/enrichment/cve/scan | app.py`
 - `TODO | GET | /work-items | app.py`
 - `TODO | GET | /work-items/help | app.py`
 - `TODO | GET | /api/work-items | app.py`
