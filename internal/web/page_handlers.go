@@ -325,6 +325,10 @@ func (s *Server) pageTracesHandler(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if s.renderErr != nil || s.renderer == nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return

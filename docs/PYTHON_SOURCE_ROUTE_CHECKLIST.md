@@ -52,9 +52,9 @@ Status legend:
 - `DONE | GET | /errors | app.py`
 - `DONE | GET | /errors/help | app.py`
 - `DONE | POST | /errors/<string:error_id>/resolve | app.py`
-- `TODO | GET | /traces | app.py`
-- `TODO | GET | /traces/help | app.py`
-- `TODO | GET | /api/traces/span/<span_id> | app.py`
+- `DONE | GET | /traces | app.py`
+- `DONE | GET | /traces/help | app.py`
+- `DONE | GET | /api/traces/span/<span_id> | app.py`
 - `TODO | GET | /incident | app.py`
 - `TODO | GET | /incident/help | app.py`
 
