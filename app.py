@@ -6489,44 +6489,38 @@ def _build_agent_context_summary(db: ChDbConnection, trigger_context: dict) -> s
     if additional_context:
         lines.append(f"\nUser-provided context: {additional_context}")
 
-    # Event frequency / noise analysis for the triggering service + error type
+    # Event frequency / noise analysis — only when we have enough scope (service + err_type).
+    # Without both, the counts would represent "all errors for this service" which is too
+    # broad to be a meaningful noise indicator and can mislead the LLM.
     service = str(extra_dict.get("service") or trigger_context.get("service") or "").strip()
     err_type = str(extra_dict.get("err_type") or "").strip()
-    try:
-        freq_params: list[Any] = []
-        freq_where = "SeverityText IN ('ERROR','FATAL')"
-        if service:
-            freq_where += " AND ServiceName = ?"
-            freq_params.append(service)
-        if err_type:
-            # exception.type is stored in LogAttributes map, not a top-level column.
-            freq_where += " AND LogAttributes['exception.type'] = ?"
-            freq_params.append(err_type)
-        # Use without FINAL for counting — exact dedup is not required for frequency estimation.
-        freq_1h = db.execute(
-            f"SELECT count() AS c FROM otel_logs "
-            f"WHERE Timestamp >= now() - INTERVAL 1 HOUR AND {freq_where}",
-            freq_params,
-        ).fetchone()
-        freq_24h = db.execute(
-            f"SELECT count() AS c FROM otel_logs "
-            f"WHERE Timestamp >= now() - INTERVAL 24 HOUR AND {freq_where}",
-            freq_params,
-        ).fetchone()
-        count_1h = int(freq_1h["c"]) if freq_1h else 0
-        count_24h = int(freq_24h["c"]) if freq_24h else 0
-        scope = f"{service or 'all services'}" + (f" / {err_type}" if err_type else "")
-        lines.append(f"\nEvent frequency ({scope}):")
-        lines.append(f"  Last 1h:  {count_1h} occurrence(s)")
-        lines.append(f"  Last 24h: {count_24h} occurrence(s)")
-        if count_1h <= 1 and count_24h <= 2:
-            lines.append("  Noise indicator: LOW recurrence — may be an isolated event")
-        elif count_1h >= 10 or count_24h >= 50:
-            lines.append("  Noise indicator: HIGH recurrence — persistent or systemic pattern")
-        else:
-            lines.append("  Noise indicator: MODERATE recurrence — monitor for escalation")
-    except Exception:
-        pass
+    if service and err_type:
+        try:
+            # Single query with countIf for both windows to halve DB round-trips.
+            freq_row = db.execute(
+                "SELECT "
+                "  countIf(Timestamp >= now() - INTERVAL 1 HOUR) AS c_1h, "
+                "  count() AS c_24h "
+                "FROM otel_logs "
+                "WHERE Timestamp >= now() - INTERVAL 24 HOUR "
+                "  AND SeverityText IN ('ERROR','FATAL') "
+                "  AND ServiceName = ? "
+                "  AND LogAttributes['exception.type'] = ?",
+                [service, err_type],
+            ).fetchone()
+            count_1h = int(freq_row["c_1h"]) if freq_row else 0
+            count_24h = int(freq_row["c_24h"]) if freq_row else 0
+            lines.append(f"\nEvent frequency ({service} / {err_type}):")
+            lines.append(f"  Last 1h:  {count_1h} occurrence(s)")
+            lines.append(f"  Last 24h: {count_24h} occurrence(s)")
+            if count_1h <= 1 and count_24h <= 2:
+                lines.append("  Noise indicator: LOW recurrence — may be an isolated event")
+            elif count_1h >= 10 or count_24h >= 50:
+                lines.append("  Noise indicator: HIGH recurrence — persistent or systemic pattern")
+            else:
+                lines.append("  Noise indicator: MODERATE recurrence — monitor for escalation")
+        except Exception:
+            pass
 
     # Recent errors (broader context across all services)
     try:
@@ -6719,6 +6713,11 @@ async def _run_agent_flow(
             suggestion = parts[1].strip()
         else:
             analysis = reply.strip()
+        # Strip the NOISE_OR_IMPACT classification line from analysis so it doesn't
+        # appear as raw header text in the generated GitHub issue.
+        if analysis.startswith("NOISE_OR_IMPACT:"):
+            first_newline = analysis.find("\n")
+            analysis = analysis[first_newline:].strip() if first_newline != -1 else ""
 
     # 3. Optional DLP check before GitHub issue creation
     dlp_result = "skipped"

@@ -13158,6 +13158,62 @@ class TestAISettingsAndAgentFlows:
         r = await client.post("/api/agent/runs/nonexistent-run-id/dismiss")
         assert r.status_code == 404
 
+    # ── Noise/Impact response parsing ─────────────────────────────────────────
+
+    def test_noise_or_impact_header_stripped_from_analysis(self, monkeypatch):
+        """NOISE_OR_IMPACT: header must not leak into the analysis field."""
+        import asyncio
+
+        import app as sobs_app
+
+        db = sobs_app.get_db()
+
+        llm_reply = (
+            "NOISE_OR_IMPACT: NOISE\n"
+            "ROOT CAUSE: The error is a transient network blip.\n"
+            "SUGGESTED FIX: Add retry logic."
+        )
+
+        async def _fake_call_llm(*args, **kwargs):
+            return llm_reply, {}
+
+        monkeypatch.setattr(sobs_app, "_call_llm_endpoint", _fake_call_llm)
+
+        rule = {
+            "id": "test-rule",
+            "name": "Test Rule",
+            "actions": ["analyze"],
+            "rate_limit_minutes": 0,
+        }
+        settings = {
+            "ai.endpoint_url": "https://ai.example.com/v1",
+            "ai.model": "gpt-test",
+            "ai.api_key": "",
+        }
+        trigger_context = {
+            "rule_name": "Test Rule",
+            "trigger_state": "critical",
+            "trigger_type": "manual",
+            "trigger_ref_id": "err-1",
+            "service": "svc",
+            "extra": {"service": "svc", "err_type": "TestError", "message": "oops"},
+        }
+
+        allowed_calls: list[tuple] = []
+
+        async def _fake_check_guard(settings_arg, context, _hint):
+            return True, "", {}
+
+        monkeypatch.setattr(sobs_app, "_check_guard_model", _fake_check_guard)
+
+        run_id = "test-run-noise-strip"
+        result = asyncio.get_event_loop().run_until_complete(
+            sobs_app._run_agent_flow(db, rule, settings, trigger_context, run_id)
+        )
+        analysis = result.get("analysis", "")
+        assert "NOISE_OR_IMPACT" not in analysis
+        assert "transient network blip" in analysis
+
     # ── Heuristic guard checks ────────────────────────────────────────────────
 
     def test_heuristic_guard_blocks_known_injections(self):
@@ -20000,6 +20056,34 @@ class TestIncidentView:
         # No matching rows → count 0 → LOW recurrence
         assert "Event frequency" in summary
         assert "LOW recurrence" in summary
+
+    def test_build_agent_context_summary_no_frequency_without_err_type(self):
+        """Frequency section is omitted when err_type is missing (avoids misleading broad counts)."""
+        trigger_context = {
+            "rule_name": "test-rule",
+            "trigger_state": "critical",
+            "extra": {
+                "service": "some-service",
+                # no err_type
+            },
+        }
+        db = sobs_app.get_db()
+        summary = sobs_app._build_agent_context_summary(db, trigger_context)
+        assert "Event frequency" not in summary
+
+    def test_build_agent_context_summary_no_frequency_without_service(self):
+        """Frequency section is omitted when service is missing (avoids unscoped table scan)."""
+        trigger_context = {
+            "rule_name": "test-rule",
+            "trigger_state": "critical",
+            "extra": {
+                "err_type": "SomeError",
+                # no service
+            },
+        }
+        db = sobs_app.get_db()
+        summary = sobs_app._build_agent_context_summary(db, trigger_context)
+        assert "Event frequency" not in summary
 
 
 class TestSetupWizard:
