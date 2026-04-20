@@ -171,24 +171,24 @@ Status legend:
 
 ## Notifications And Health
 
-- `TODO | GET | /settings/notifications | app.py`
-- `TODO | GET | /settings/help/notifications | app.py`
-- `TODO | POST | /settings/notifications/channels | app.py`
-- `TODO | POST | /settings/notifications/channels/<channel_id>/delete | app.py`
-- `TODO | POST | /settings/notifications/channels/<channel_id>/toggle | app.py`
-- `TODO | POST | /api/notifications/channels/<channel_id>/test | app.py`
-- `TODO | POST | /settings/notifications/rules | app.py`
-- `TODO | POST | /settings/notifications/rules/<rule_id>/toggle | app.py`
-- `TODO | POST | /settings/notifications/rules/<rule_id>/delete | app.py`
-- `TODO | POST | /api/notifications/rules/auto-generate | app.py`
-- `TODO | POST | /api/notifications/check | app.py`
-- `TODO | GET | /api/notifications/vapid-public-key | app.py`
-- `TODO | GET | /service-worker.js | app.py`
-- `TODO | POST | /api/notifications/subscribe | app.py`
-- `TODO | POST | /api/notifications/vapid-keygen | app.py`
-- `TODO | DELETE | /api/notifications/vapid-keys | app.py`
-- `TODO | GET | /health | app.py`
-- `TODO | GET | /health/db | app.py`
+- `DONE | GET | /settings/notifications | app.py`
+- `DONE | GET | /settings/help/notifications | app.py`
+- `DONE | POST | /settings/notifications/channels | app.py`
+- `DONE | POST | /settings/notifications/channels/<channel_id>/delete | app.py`
+- `DONE | POST | /settings/notifications/channels/<channel_id>/toggle | app.py`
+- `DONE | POST | /api/notifications/channels/<channel_id>/test | app.py`
+- `DONE | POST | /settings/notifications/rules | app.py`
+- `DONE | POST | /settings/notifications/rules/<rule_id>/toggle | app.py`
+- `DONE | POST | /settings/notifications/rules/<rule_id>/delete | app.py`
+- `DONE | POST | /api/notifications/rules/auto-generate | app.py`
+- `DONE | POST | /api/notifications/check | app.py`
+- `DONE | GET | /api/notifications/vapid-public-key | app.py`
+- `DONE | GET | /service-worker.js | app.py`
+- `DONE | POST | /api/notifications/subscribe | app.py`
+- `DONE | POST | /api/notifications/vapid-keygen | app.py`
+- `DONE | DELETE | /api/notifications/vapid-keys | app.py`
+- `DONE | GET | /health | app.py`
+- `DONE | GET | /health/db | app.py`
 
 ## AI Settings And Repositories
 
