@@ -149,24 +149,24 @@ Status legend:
 
 ## Tags And Validation Helpers
 
-- `TODO | GET | /settings/tags | app.py`
-- `TODO | GET | /settings/help/tags | app.py`
-- `TODO | GET | /api/settings/tags/condition-suggestions | app.py`
-- `TODO | POST | /settings/tags/auto | app.py`
-- `TODO | POST | /settings/tags | app.py`
-- `TODO | POST | /settings/tags/<rule_id>/delete | app.py`
-- `TODO | GET | /api/tags/<record_type>/<record_id> | app.py`
-- `TODO | POST | /api/tags/<record_type>/<record_id> | app.py`
-- `TODO | DELETE | /api/tags/<record_type>/<record_id>/<tag_key> | app.py`
+- `DONE | GET | /settings/tags | app.py`
+- `DONE | GET | /settings/help/tags | app.py`
+- `DONE | GET | /api/settings/tags/condition-suggestions | app.py`
+- `DONE | POST | /settings/tags/auto | app.py`
+- `DONE | POST | /settings/tags | app.py`
+- `DONE | POST | /settings/tags/<rule_id>/delete | app.py`
+- `DONE | GET | /api/tags/<record_type>/<record_id> | app.py`
+- `DONE | POST | /api/tags/<record_type>/<record_id> | app.py`
+- `DONE | DELETE | /api/tags/<record_type>/<record_id>/<tag_key> | app.py`
 - `DONE | GET | /api/logs/field-hints | app.py`
 - `DONE | POST | /api/logs/validate-filter | app.py`
 - `DONE | POST | /api/logs/validate-regex | app.py`
-- `TODO | POST | /api/errors/validate-regex | app.py`
-- `TODO | POST | /api/traces/validate-regex | app.py`
-- `TODO | POST | /api/metrics/validate-regex | app.py`
-- `TODO | POST | /api/rum/validate-regex | app.py`
-- `TODO | GET | /api/ai/field-hints | app.py`
-- `TODO | POST | /api/ai/validate-filter | app.py`
+- `DONE | POST | /api/errors/validate-regex | app.py`
+- `DONE | POST | /api/traces/validate-regex | app.py`
+- `DONE | POST | /api/metrics/validate-regex | app.py`
+- `DONE | POST | /api/rum/validate-regex | app.py`
+- `DONE | GET | /api/ai/field-hints | app.py`
+- `DONE | POST | /api/ai/validate-filter | app.py`
 - `DONE | GET | /tail | app.py`
 
 ## Notifications And Health
