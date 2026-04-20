@@ -1507,6 +1507,7 @@ class TestErrorsIngest:
         assert "data-err-service" in body
         assert "raiseIssueModal" in body  # Bootstrap modal replaces window.confirm
         assert "window.confirm" not in body
+        assert "raiseIssueAdditionalContext" in body  # additional context textarea
 
     async def test_errors_page_raise_issue_mask_toggle_is_disabled_when_global_masking_enabled(self, client):
         db = sobs_app.get_db()
@@ -13063,6 +13064,96 @@ class TestAISettingsAndAgentFlows:
         assert "resource not accessible" in str(data["error"]).lower()
         assert data["run_id"] == "run-user-raise-403"
 
+    async def test_raise_user_issue_propagates_additional_context(self, client, monkeypatch):
+        """additional_context from the request payload is included in the trigger context extra."""
+        from app import _save_ai_setting, get_db
+
+        db = get_db()
+        _save_ai_setting(db, "ai.endpoint_url", "https://analysis.example.com/v1")
+        _save_ai_setting(db, "ai.model", "analysis-model")
+
+        captured: dict[str, object] = {}
+
+        async def _fake_run_agent_rule_instance(db_arg, rule, settings, trigger_context):
+            captured["trigger_context"] = trigger_context
+            return {
+                "ok": True,
+                "run_id": "run-user-raise-ctx",
+                "result": {
+                    "status": "completed",
+                    "github_issue_url": "https://github.com/acme/demo/issues/55",
+                    "dedup_decision": "new_issue",
+                },
+            }
+
+        monkeypatch.setattr(sobs_app, "_run_agent_rule_instance", _fake_run_agent_rule_instance)
+        monkeypatch.setattr(
+            sobs_app, "_resolve_agent_github_target", lambda *_args, **_kwargs: ("acme/demo", "ghp-test")
+        )
+
+        r = await client.post(
+            "/api/issues/raise",
+            json={
+                "source_page": "errors",
+                "service": "checkout-api",
+                "err_type": "RuntimeError",
+                "message": "something broke",
+                "error_id": "err-ctx-1",
+                "additional_context": "Happened right after we deployed version 2.3.1.",
+            },
+        )
+        assert r.status_code == 200
+
+        trigger = captured["trigger_context"]
+        assert isinstance(trigger, dict)
+        extra = trigger.get("extra")
+        assert isinstance(extra, dict)
+        assert extra.get("additional_context") == "Happened right after we deployed version 2.3.1."
+
+    async def test_raise_user_issue_additional_context_truncated_at_2000_chars(self, client, monkeypatch):
+        """additional_context is silently truncated to 2000 characters."""
+        from app import _save_ai_setting, get_db
+
+        db = get_db()
+        _save_ai_setting(db, "ai.endpoint_url", "https://analysis.example.com/v1")
+        _save_ai_setting(db, "ai.model", "analysis-model")
+
+        captured: dict[str, object] = {}
+
+        async def _fake_run_agent_rule_instance(db_arg, rule, settings, trigger_context):
+            captured["trigger_context"] = trigger_context
+            return {
+                "ok": True,
+                "run_id": "run-user-raise-trunc",
+                "result": {
+                    "status": "completed",
+                    "github_issue_url": "https://github.com/acme/demo/issues/56",
+                    "dedup_decision": "new_issue",
+                },
+            }
+
+        monkeypatch.setattr(sobs_app, "_run_agent_rule_instance", _fake_run_agent_rule_instance)
+        monkeypatch.setattr(
+            sobs_app, "_resolve_agent_github_target", lambda *_args, **_kwargs: ("acme/demo", "ghp-test")
+        )
+
+        long_context = "x" * 3000
+        r = await client.post(
+            "/api/issues/raise",
+            json={
+                "source_page": "errors",
+                "service": "checkout-api",
+                "err_type": "RuntimeError",
+                "message": "something broke",
+                "error_id": "err-trunc-1",
+                "additional_context": long_context,
+            },
+        )
+        assert r.status_code == 200
+
+        extra = captured["trigger_context"]["extra"]
+        assert len(extra.get("additional_context", "")) == 2000
+
     async def test_dismiss_agent_run_not_found(self, client):
         r = await client.post("/api/agent/runs/nonexistent-run-id/dismiss")
         assert r.status_code == 404
@@ -19855,6 +19946,60 @@ class TestIncidentView:
         assert ctx["extra"]["source_page"] == "incident"
         assert ctx["extra"]["source"] == "incident"
         assert ctx["extra"]["message"] == "packet summary"
+
+    def test_issue_trigger_context_includes_additional_context(self):
+        """additional_context from the payload is stored in extra and truncated."""
+        payload = {
+            "service": "svc",
+            "err_type": "SomeError",
+            "message": "oops",
+            "additional_context": "deployed v1.2 ten minutes ago",
+        }
+        ctx = sobs_app._build_user_issue_trigger_context("errors", payload)
+        assert ctx["extra"]["additional_context"] == "deployed v1.2 ten minutes ago"
+
+    def test_issue_trigger_context_additional_context_truncated(self):
+        """additional_context longer than 2000 chars is silently truncated."""
+        payload = {
+            "service": "svc",
+            "err_type": "SomeError",
+            "message": "oops",
+            "additional_context": "a" * 3000,
+        }
+        ctx = sobs_app._build_user_issue_trigger_context("errors", payload)
+        assert len(ctx["extra"]["additional_context"]) == 2000
+
+    def test_build_agent_context_summary_includes_additional_context(self):
+        """_build_agent_context_summary should emit user-provided additional context."""
+        trigger_context = {
+            "rule_name": "test-rule",
+            "trigger_state": "critical",
+            "extra": {
+                "service": "ctx-svc",
+                "err_type": "TestError",
+                "additional_context": "This started after the database failover.",
+            },
+        }
+        db = sobs_app.get_db()
+        summary = sobs_app._build_agent_context_summary(db, trigger_context)
+        assert "This started after the database failover." in summary
+        assert "User-provided context" in summary
+
+    def test_build_agent_context_summary_noise_indicator_low(self):
+        """Low-recurrence events should be marked as LOW noise indicator in the summary."""
+        trigger_context = {
+            "rule_name": "test-rule",
+            "trigger_state": "critical",
+            "extra": {
+                "service": "no-such-service-xyz-unique",
+                "err_type": "NoSuchErrorXyzUnique",
+            },
+        }
+        db = sobs_app.get_db()
+        summary = sobs_app._build_agent_context_summary(db, trigger_context)
+        # No matching rows → count 0 → LOW recurrence
+        assert "Event frequency" in summary
+        assert "LOW recurrence" in summary
 
 
 class TestSetupWizard:

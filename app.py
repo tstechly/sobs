@@ -6477,7 +6477,58 @@ def _build_agent_context_summary(db: ChDbConnection, trigger_context: dict) -> s
     trigger_state = trigger_context.get("trigger_state", "")
     lines.append(f"Triggered by: {rule_name} ({trigger_state})")
 
-    # Recent errors
+    # Additional context from trigger (user-provided or automated)
+    extra = trigger_context.get("extra", "")
+    extra_dict: dict[str, Any] = {}
+    if isinstance(extra, dict):
+        extra_dict = extra
+    elif extra:
+        extra_dict = _safe_json_loads(str(extra), {})
+
+    additional_context = str(extra_dict.get("additional_context") or "").strip()
+    if additional_context:
+        lines.append(f"\nUser-provided context: {additional_context}")
+
+    # Event frequency / noise analysis for the triggering service + error type
+    service = str(extra_dict.get("service") or trigger_context.get("service") or "").strip()
+    err_type = str(extra_dict.get("err_type") or "").strip()
+    try:
+        freq_params: list[Any] = []
+        freq_where = "SeverityText IN ('ERROR','FATAL')"
+        if service:
+            freq_where += " AND ServiceName = ?"
+            freq_params.append(service)
+        if err_type:
+            # exception.type is stored in LogAttributes map, not a top-level column.
+            freq_where += " AND LogAttributes['exception.type'] = ?"
+            freq_params.append(err_type)
+        # Use without FINAL for counting — exact dedup is not required for frequency estimation.
+        freq_1h = db.execute(
+            f"SELECT count() AS c FROM otel_logs "
+            f"WHERE Timestamp >= now() - INTERVAL 1 HOUR AND {freq_where}",
+            freq_params,
+        ).fetchone()
+        freq_24h = db.execute(
+            f"SELECT count() AS c FROM otel_logs "
+            f"WHERE Timestamp >= now() - INTERVAL 24 HOUR AND {freq_where}",
+            freq_params,
+        ).fetchone()
+        count_1h = int(freq_1h["c"]) if freq_1h else 0
+        count_24h = int(freq_24h["c"]) if freq_24h else 0
+        scope = f"{service or 'all services'}" + (f" / {err_type}" if err_type else "")
+        lines.append(f"\nEvent frequency ({scope}):")
+        lines.append(f"  Last 1h:  {count_1h} occurrence(s)")
+        lines.append(f"  Last 24h: {count_24h} occurrence(s)")
+        if count_1h <= 1 and count_24h <= 2:
+            lines.append("  Noise indicator: LOW recurrence — may be an isolated event")
+        elif count_1h >= 10 or count_24h >= 50:
+            lines.append("  Noise indicator: HIGH recurrence — persistent or systemic pattern")
+        else:
+            lines.append("  Noise indicator: MODERATE recurrence — monitor for escalation")
+    except Exception:
+        pass
+
+    # Recent errors (broader context across all services)
     try:
         err_rows = db.execute(
             "SELECT ServiceName, ExceptionType, count() AS c "
@@ -6486,7 +6537,7 @@ def _build_agent_context_summary(db: ChDbConnection, trigger_context: dict) -> s
             "GROUP BY ServiceName, ExceptionType ORDER BY c DESC LIMIT 5"
         ).fetchall()
         if err_rows:
-            lines.append("\nRecent errors (last 1h):")
+            lines.append("\nRecent errors (last 1h, all services):")
             for r in err_rows:
                 lines.append(f"  {r['ServiceName']} | {r['ExceptionType']} x{r['c']}")
     except Exception:
@@ -6508,9 +6559,13 @@ def _build_agent_context_summary(db: ChDbConnection, trigger_context: dict) -> s
     except Exception:
         pass
 
-    # Additional context from trigger
-    extra = trigger_context.get("extra", "")
-    if extra:
+    # Remaining extra fields (exclude already-rendered keys)
+    _RENDERED_EXTRA_KEYS = {"additional_context", "mask_output", "initiated_by"}
+    if extra_dict:
+        remaining = {k: v for k, v in extra_dict.items() if k not in _RENDERED_EXTRA_KEYS}
+        if remaining:
+            lines.append(f"\nTrigger details: {remaining}")
+    elif extra:
         lines.append(f"\nAdditional context: {extra}")
 
     return "\n".join(lines)
@@ -6641,7 +6696,15 @@ async def _run_agent_flow(
             "You are an expert SRE and observability engineer. "
             "Analyse the provided telemetry context and provide a concise root cause analysis "
             "and a specific, actionable suggested fix. "
-            "Format your response as:\nROOT CAUSE: <text>\nSUGGESTED FIX: <text>"
+            "Before concluding, assess whether this event is NOISE (transient, self-resolving, "
+            "e.g. a single reconnection attempt that succeeded, a brief timeout that did not recur) "
+            "or IMPACT (persistent fault, exhausted retries, service degradation, user-facing error). "
+            "If the event frequency is low (≤2 occurrences) and there are no active anomalies or related "
+            "errors, note that this may be noise and recommend monitoring rather than immediate escalation. "
+            "Format your response as:\n"
+            "NOISE_OR_IMPACT: <NOISE|IMPACT|UNCERTAIN>\n"
+            "ROOT CAUSE: <text>\n"
+            "SUGGESTED FIX: <text>"
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -6693,6 +6756,19 @@ async def _run_agent_flow(
         allow_new_issue = issues_this_hour < max_issues
         trigger_fields = _extract_agent_trigger_fields(trigger_context)
         issue_title = _build_agent_issue_title(rule, trigger_fields)
+
+        # Include user-provided additional context in the issue body when present.
+        extra_raw = trigger_context.get("extra")
+        extra_for_body: dict[str, Any] = {}
+        if isinstance(extra_raw, dict):
+            extra_for_body = extra_raw
+        elif extra_raw:
+            extra_for_body = _safe_json_loads(str(extra_raw or ""), {})
+        additional_context = str(extra_for_body.get("additional_context") or "").strip()
+        additional_context_section = (
+            f"\n### Additional Context\n{additional_context}\n" if additional_context else ""
+        )
+
         issue_body = (
             f"## SOBS Automated Agent Report\n\n"
             f"**Rule:** {rule.get('name', 'Agent Rule')}  \n"
@@ -6701,7 +6777,8 @@ async def _run_agent_flow(
             f"**Signal:** {trigger_fields.get('signal_source', '')}/{trigger_fields.get('signal_name', '')}  \n\n"
             f"### Telemetry Context\n```\n{context_summary}\n```\n\n"
             f"### Root Cause Analysis\n{analysis}\n\n"
-            f"### Suggested Fix\n{suggestion}\n\n"
+            f"### Suggested Fix\n{suggestion}\n"
+            f"{additional_context_section}\n"
             f"---\n*Generated automatically by [SOBS](https://github.com/abartrim/sobs). "
             f"Please review before acting.*"
         )
@@ -28040,6 +28117,7 @@ def _build_user_issue_trigger_context(source_page: str, payload: dict[str, Any])
         "stack": stack[:3000],
         "url": str(payload.get("url") or "").strip(),
         "timestamp": str(payload.get("timestamp") or "").strip(),
+        "additional_context": str(payload.get("additional_context") or "").strip()[:2000],
     }
 
     return {
