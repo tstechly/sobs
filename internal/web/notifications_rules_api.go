@@ -3,7 +3,6 @@ package web
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -264,16 +263,6 @@ func getIndex(sl []string, i int, def string) string {
 		return sl[i]
 	}
 	return def
-}
-
-// notificationsRedirect redirects to the notifications settings page with an
-// optional flash query param (best-effort; real flash sessions need server-side storage).
-func notificationsRedirect(w http.ResponseWriter, r *http.Request, msg string) {
-	target := "/settings/notifications"
-	if msg != "" {
-		target += "?msg=" + url.QueryEscape(msg)
-	}
-	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 func (s *Server) settingsNotificationsRulesActions(w http.ResponseWriter, r *http.Request) {

@@ -133,6 +133,8 @@ func (s *Service) createChannelStoreBacked(ctx context.Context, name, channelTyp
 	}
 	id := persist.NewID()
 	createdAt := persist.RFC3339Now()
+	// TODO: encrypt sensitive config fields (smtp_password, webhook credentials) to match
+	// Python's Fernet-based secret encryption before persisting.
 	configJSON := persist.JSONString(config)
 	store, err := persist.Open(ctx, s.storeFactory)
 	if err != nil {

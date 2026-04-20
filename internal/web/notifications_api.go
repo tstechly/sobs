@@ -168,7 +168,7 @@ func dispatchTestNotification(ch notifications.Channel) string {
 		if err != nil {
 			return "dispatch failed: " + err.Error()
 		}
-		_ = resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 400 {
 			return fmt.Sprintf("webhook returned HTTP %d", resp.StatusCode)
 		}
@@ -188,7 +188,7 @@ func dispatchTestNotification(ch notifications.Channel) string {
 		if err != nil {
 			return "dispatch failed: " + err.Error()
 		}
-		_ = resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode >= 400 {
 			return fmt.Sprintf("slack webhook returned HTTP %d", resp.StatusCode)
 		}

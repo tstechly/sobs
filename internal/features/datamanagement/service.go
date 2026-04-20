@@ -92,14 +92,16 @@ func (s *Service) saveSettingsStoreBacked(ctx context.Context, st Settings) Sett
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.backup_enabled", boolString(st.BackupEnabled))
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_bucket", st.S3Bucket)
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_access_key_id", st.S3AccessKeyID)
-	// Sensitive: only overwrite if a new value is provided; empty string = keep existing
+	// Sensitive: only overwrite if a new value is provided; empty string = keep existing.
+	// TODO: port Python's Fernet-based secret encryption; currently stored as plaintext.
 	if st.S3SecretAccessKey != "" {
 		_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_secret_access_key", st.S3SecretAccessKey)
 	}
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_region", st.S3Region)
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_path_prefix", st.S3PathPrefix)
 	_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.s3_encrypt_backup", boolString(st.S3EncryptBackup))
-	// Sensitive: only overwrite if a new value is provided
+	// Sensitive: only overwrite if a new value is provided.
+	// TODO: port Python's Fernet-based secret encryption; currently stored as plaintext.
 	if st.BackupEncryptionPassword != "" {
 		_ = persist.SetAppSetting(ctx, s.storeFactory, "data_management.backup_encryption_password", st.BackupEncryptionPassword)
 	}
