@@ -95,8 +95,8 @@ func TestAPIAISpanAttributesAndConversationGetParity(t *testing.T) {
 	if convRec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", convRec.Code, convRec.Body.String())
 	}
-	if !containsAll(convRec.Body.String(), "Prompt", "Response", "How many errors") {
-		t.Fatalf("expected conversation html to include prompt/response content, got %s", convRec.Body.String())
+	if !containsAll(convRec.Body.String(), "Response", "How many errors", "There were 5 errors") {
+		t.Fatalf("expected conversation html to include conversation content, got %s", convRec.Body.String())
 	}
 }
 

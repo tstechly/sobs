@@ -22,7 +22,6 @@ func TestAIHelperEndpoints(t *testing.T) {
 		"/api/ai/helper/capabilities",
 		"/api/ai/helper/actions/manifest",
 		"/api/ai/helper/chats",
-		"/api/ai/export",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "http://example.com"+p, nil)
 		rec := httptest.NewRecorder()
@@ -30,6 +29,13 @@ func TestAIHelperEndpoints(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200 for %s, got %d", p, rec.Code)
 		}
+	}
+
+	exportReq := httptest.NewRequest(http.MethodGet, "http://example.com/api/ai/export", nil)
+	exportRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(exportRec, exportReq)
+	if exportRec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for /api/ai/export without traces table, got %d", exportRec.Code)
 	}
 
 	helperReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/ai/helper", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hello"}]}`)))

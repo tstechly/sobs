@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,12 +22,26 @@ func TestHealthAliases(t *testing.T) {
 	if w1.Code != http.StatusOK {
 		t.Fatalf("expected status 200 for /health, got %d", w1.Code)
 	}
+	var healthBody map[string]any
+	if err := json.Unmarshal(w1.Body.Bytes(), &healthBody); err != nil {
+		t.Fatalf("expected /health json body, got error: %v", err)
+	}
+	if status, _ := healthBody["status"].(string); status != "ok" {
+		t.Fatalf("expected /health status ok, got %#v", healthBody["status"])
+	}
 
 	r2 := httptest.NewRequest("GET", "http://example.com/health/db", nil)
 	w2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w2, r2)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("expected status 200 for /health/db, got %d", w2.Code)
+	}
+	var readyBody map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &readyBody); err != nil {
+		t.Fatalf("expected /health/db json body, got error: %v", err)
+	}
+	if status, _ := readyBody["status"].(string); status != "ok" {
+		t.Fatalf("expected /health/db status ok, got %#v", readyBody["status"])
 	}
 }
 

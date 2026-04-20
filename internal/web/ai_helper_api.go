@@ -121,20 +121,15 @@ func (s *Server) apiAIExport(w http.ResponseWriter, r *http.Request) {
 	whereSQL := " WHERE " + strings.Join(conditions, " AND ")
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
-		if format == "json" {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "records": []any{}})
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"ai_export.jsonl\"")
-		w.WriteHeader(http.StatusOK)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Failed to export AI training data"})
 		return
 	}
 	defer func() { _ = store.Close() }()
 
 	rows, queryErr := queryRows(r.Context(), store, "SELECT Timestamp, ServiceName, TraceId, Duration, toJSONString(SpanAttributes) AS SpanAttributesJSON FROM otel_traces"+whereSQL+" ORDER BY Timestamp DESC LIMIT ?", append(params, limit)...)
 	if queryErr != nil {
-		rows = []map[string]any{}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Failed to export AI training data"})
+		return
 	}
 
 	records := make([]map[string]any, 0, len(rows))

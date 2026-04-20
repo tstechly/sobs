@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/extensionpoints"
@@ -295,8 +296,7 @@ func resolveAssetRoot(root string, requiredFile string) string {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": "1.0.0"})
 }
 
 func (s *Server) root(w http.ResponseWriter, r *http.Request) {
@@ -308,20 +308,38 @@ func (s *Server) root(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	store, err := s.storeFactory.Open(context.Background())
 	if err != nil {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":            "degraded",
+			"db":                "error",
+			"error":             "database unavailable",
+			"write_queue_depth": 0,
+			"version":           "1.0.0",
+		})
 		return
 	}
 	defer func() {
 		_ = store.Close()
 	}()
 	if err := store.Ping(r.Context()); err != nil {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":            "degraded",
+			"db":                "error",
+			"error":             "database unavailable",
+			"write_queue_depth": 0,
+			"version":           "1.0.0",
+		})
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ready"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":            "ok",
+		"db":                "ok",
+		"latency_ms":        float64(time.Since(started).Microseconds()) / 1000.0,
+		"write_queue_depth": 0,
+		"version":           "1.0.0",
+	})
 }
 
 func (s *Server) notificationsCheck(w http.ResponseWriter, r *http.Request) {

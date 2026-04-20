@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -23,10 +22,7 @@ func TestAIConversationAPI(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/ai/conversation", bytes.NewReader([]byte(`{"messages":[{"role":"user","content":"hello"}]}`)))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "help") {
-		t.Fatalf("expected assistant guidance reply, got %q", rec.Body.String())
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
 	}
 }

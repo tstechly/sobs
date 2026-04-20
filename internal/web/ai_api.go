@@ -2,100 +2,151 @@ package web
 
 import (
 	"encoding/json"
-	"html"
 	"net/http"
 	"strings"
 
-	"github.com/abartrim/sobs/internal/features/ai"
+	"github.com/flosch/pongo2/v6"
 )
 
 func (s *Server) apiAIConversation(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		ts := strings.TrimSpace(r.URL.Query().Get("ts"))
-		service := strings.TrimSpace(r.URL.Query().Get("service"))
-		traceID := strings.TrimSpace(r.URL.Query().Get("trace_id"))
-		spanName := strings.TrimSpace(r.URL.Query().Get("span_name"))
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 
-		if ts == "" || service == "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("<p class='text-danger small'>Missing required params: ts and service.</p>"))
-			return
-		}
+	ts := strings.TrimSpace(r.URL.Query().Get("ts"))
+	service := strings.TrimSpace(r.URL.Query().Get("service"))
+	traceID := strings.TrimSpace(r.URL.Query().Get("trace_id"))
+	spanName := strings.TrimSpace(r.URL.Query().Get("span_name"))
+	fromTS := strings.TrimSpace(r.URL.Query().Get("from_ts"))
+	toTS := strings.TrimSpace(r.URL.Query().Get("to_ts"))
 
-		conditions := []string{"Timestamp = ?", "ServiceName = ?", "(SpanAttributes['gen_ai.request.model'] != '' OR SpanAttributes['gen_ai.system'] != '' OR SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.operation.name'] != '' OR SpanName ILIKE '%ai%')"}
-		params := []any{ts, service}
-		if traceID != "" {
-			conditions = append(conditions, "TraceId = ?")
-			params = append(params, traceID)
-		}
-		if spanName != "" {
-			conditions = append(conditions, "SpanName = ?")
-			params = append(params, spanName)
-		}
-
-		store, err := s.storeFactory.Open(r.Context())
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte("<p class='text-danger small'>Error loading conversation.</p>"))
-			return
-		}
-		defer func() { _ = store.Close() }()
-
-		rows, queryErr := queryRows(r.Context(), store, "SELECT toJSONString(SpanAttributes) AS SpanAttributesJSON FROM otel_traces WHERE "+strings.Join(conditions, " AND ")+" ORDER BY Timestamp DESC LIMIT 1", params...)
-		if queryErr != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte("<p class='text-danger small'>Error loading conversation.</p>"))
-			return
-		}
-		if len(rows) == 0 {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte("<p class='text-danger small'>Span not found.</p>"))
-			return
-		}
-
-		attrs := spanAttributesFromAny(incidentRowValue(rows[0], "SpanAttributesJSON"))
-		inputMessagesRaw := anyToString(attrs["gen_ai.input.messages"])
-		outputMessagesRaw := anyToString(attrs["gen_ai.output.messages"])
-		systemInstructions := anyToString(attrs["gen_ai.system_instructions"])
-		prompt := extractMessagesText(inputMessagesRaw)
-		if prompt == "" {
-			prompt = anyToString(attrs["sobs.gen_ai.prompt"])
-		}
-		response := extractMessagesText(outputMessagesRaw)
-		if response == "" {
-			response = anyToString(attrs["sobs.gen_ai.response"])
-		}
-
-		htmlBody := "<div class='small'>" +
-			"<div class='mb-2'><strong>Operation:</strong> " + html.EscapeString(defaultString(anyToString(attrs["gen_ai.operation.name"]), "chat")) + "</div>" +
-			"<div class='mb-2'><strong>Prompt:</strong><pre class='mb-0'>" + html.EscapeString(prompt) + "</pre></div>" +
-			"<div class='mb-2'><strong>Response:</strong><pre class='mb-0'>" + html.EscapeString(response) + "</pre></div>"
-		if strings.TrimSpace(systemInstructions) != "" {
-			htmlBody += "<div class='mb-2'><strong>System Instructions:</strong><pre class='mb-0'>" + html.EscapeString(systemInstructions) + "</pre></div>"
-		}
-		htmlBody += "</div>"
-
+	if ts == "" || service == "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(htmlBody))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("<p class='text-danger small'>Missing required params: ts and service.</p>"))
 		return
 	}
 
-	if r.Method == http.MethodPost {
-		var req ai.ConversationRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-			return
+	conditions := []string{"Timestamp = ?", "ServiceName = ?", "(SpanAttributes['gen_ai.request.model'] != '' OR SpanAttributes['gen_ai.system'] != '' OR SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.operation.name'] != '' OR SpanName ILIKE '%ai%')"}
+	params := []any{ts, service}
+	if traceID != "" {
+		conditions = append(conditions, "TraceId = ?")
+		params = append(params, traceID)
+	}
+	if spanName != "" {
+		conditions = append(conditions, "SpanName = ?")
+		params = append(params, spanName)
+	}
+
+	store, err := s.storeFactory.Open(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("<p class='text-danger small'>Error loading conversation.</p>"))
+		return
+	}
+	defer func() { _ = store.Close() }()
+
+	rows, queryErr := queryRows(r.Context(), store, "SELECT toJSONString(SpanAttributes) AS SpanAttributesJSON FROM otel_traces WHERE "+strings.Join(conditions, " AND ")+" ORDER BY Timestamp DESC LIMIT 1", params...)
+	if queryErr != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("<p class='text-danger small'>Error loading conversation.</p>"))
+		return
+	}
+	if len(rows) == 0 {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<p class='text-danger small'>Span not found.</p>"))
+		return
+	}
+
+	attrs := spanAttributesFromAny(incidentRowValue(rows[0], "SpanAttributesJSON"))
+	inputMessagesRaw := anyToString(attrs["gen_ai.input.messages"])
+	outputMessagesRaw := anyToString(attrs["gen_ai.output.messages"])
+	systemInstructions := anyToString(attrs["gen_ai.system_instructions"])
+	prompt := extractMessagesText(inputMessagesRaw)
+	if prompt == "" {
+		prompt = anyToString(attrs["sobs.gen_ai.prompt"])
+	}
+	response := extractMessagesText(outputMessagesRaw)
+	if response == "" {
+		response = anyToString(attrs["sobs.gen_ai.response"])
+	}
+
+	item := map[string]any{
+		"service":                     service,
+		"trace_id":                    traceID,
+		"error_type":                  anyToString(attrs["error.type"]),
+		"error_message":               anyToString(attrs["exception.message"]),
+		"system_instructions":         systemInstructions,
+		"system_message_deduped_count": 0,
+		"input_messages":              parseMessagesForDisplay(inputMessagesRaw),
+		"output_messages":             parseMessagesForDisplay(outputMessagesRaw),
+		"prompt":                      prompt,
+		"response":                    response,
+		"operation":                   defaultString(anyToString(attrs["gen_ai.operation.name"]), "chat"),
+		"finish_reason":               anyToString(attrs["gen_ai.response.finish_reason"]),
+	}
+
+	body, renderErr := s.renderer.Render("_ai_conversation_partial.html", pongo2.Context{
+		"item":    item,
+		"from_ts": fromTS,
+		"to_ts":   toTS,
+	})
+	if renderErr != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("<p class='text-danger small'>Error loading conversation.</p>"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body))
+}
+
+func parseMessagesForDisplay(raw string) []map[string]any {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return []map[string]any{}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0)
+	if rows, ok := parsed.([]any); ok {
+		for _, row := range rows {
+			msg, ok := row.(map[string]any)
+			if !ok {
+				continue
+			}
+			role := anyToString(msg["role"])
+			content := msg["content"]
+			if blocks, ok := content.([]any); ok {
+				chunks := make([]string, 0, len(blocks))
+				for _, block := range blocks {
+					if m, ok := block.(map[string]any); ok {
+						if txt := strings.TrimSpace(anyToString(m["text"])); txt != "" {
+							chunks = append(chunks, txt)
+						}
+					}
+				}
+				content = strings.Join(chunks, "\n")
+			}
+			entry := map[string]any{
+				"role":    role,
+				"content": content,
+			}
+			if role == "system" {
+				entry["role_label"] = "system"
+			}
+			out = append(out, entry)
 		}
-		writeJSON(w, http.StatusOK, s.aiService.Converse(req))
-		return
 	}
-
-	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	return out
 }
 
 func extractMessagesText(raw string) string {
