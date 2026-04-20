@@ -129,23 +129,23 @@ Status legend:
 
 ## Static And Core Settings
 
-- `TODO | GET | /static/rum.js | app.py`
-- `TODO | GET | /static/rum.js.map | app.py`
-- `TODO | GET | /static/rum.min.js | app.py`
-- `TODO | GET | /static/rum.min.js.map | app.py`
-- `TODO | GET | /static/rum.d.ts | app.py`
-- `TODO | GET | /settings | app.py`
-- `TODO | GET | /settings/help | app.py`
-- `TODO | GET | /settings/masking | app.py`
-- `TODO | GET | /settings/help/masking | app.py`
-- `TODO | POST | /settings/masking/keys | app.py`
-- `TODO | POST | /settings/masking/keys/delete | app.py`
-- `TODO | POST | /settings/masking/patterns | app.py`
-- `TODO | POST | /settings/masking/patterns/delete | app.py`
-- `TODO | POST | /settings/masking/output | app.py`
-- `TODO | POST | /settings/masking/sql-output | app.py`
-- `TODO | POST | /api/settings/masking/preview | app.py`
-- `TODO | GET | /api/settings/masking/rules | app.py`
+- `DONE | GET | /static/rum.js | app.py`
+- `DONE | GET | /static/rum.js.map | app.py`
+- `DONE | GET | /static/rum.min.js | app.py`
+- `DONE | GET | /static/rum.min.js.map | app.py`
+- `DONE | GET | /static/rum.d.ts | app.py`
+- `DONE | GET | /settings | app.py`
+- `DONE | GET | /settings/help | app.py`
+- `DONE | GET | /settings/masking | app.py`
+- `DONE | GET | /settings/help/masking | app.py`
+- `DONE | POST | /settings/masking/keys | app.py`
+- `DONE | POST | /settings/masking/keys/delete | app.py`
+- `DONE | POST | /settings/masking/patterns | app.py`
+- `DONE | POST | /settings/masking/patterns/delete | app.py`
+- `DONE | POST | /settings/masking/output | app.py`
+- `DONE | POST | /settings/masking/sql-output | app.py`
+- `DONE | POST | /api/settings/masking/preview | app.py`
+- `DONE | GET | /api/settings/masking/rules | app.py`
 
 ## Tags And Validation Helpers
 
