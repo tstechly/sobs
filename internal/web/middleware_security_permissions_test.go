@@ -29,3 +29,25 @@ func TestV1AppsRequireAPIKeyWhenConfigured(t *testing.T) {
 		t.Fatalf("expected 200, got %d", withKeyRec.Code)
 	}
 }
+
+func TestV1RUMRequiresAPIKeyWhenConfiguredEvenIfToggleDisabled(t *testing.T) {
+	t.Setenv("SOBS_API_KEY", "test-key")
+	cfg := config.Default()
+	cfg.EnforceAPIAuth = false
+	srv := NewServer(cfg, store.NewNoopStoreFactory())
+
+	noKeyReq := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum", nil)
+	noKeyRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(noKeyRec, noKeyReq)
+	if noKeyRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", noKeyRec.Code)
+	}
+
+	withKeyReq := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum", nil)
+	withKeyReq.Header.Set("X-API-Key", "test-key")
+	withKeyRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(withKeyRec, withKeyReq)
+	if withKeyRec.Code == http.StatusUnauthorized {
+		t.Fatalf("expected non-401, got %d", withKeyRec.Code)
+	}
+}

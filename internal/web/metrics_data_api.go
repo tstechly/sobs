@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/abartrim/sobs/internal/extensionpoints"
-	"github.com/flosch/pongo2/v6"
 )
 
 func (s *Server) metricsPage(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +185,7 @@ func metricsPageContext(
 	signals []string,
 	sources []string,
 	errorMsg string,
-) pongo2.Context {
+) renderContext {
 	if services == nil {
 		services = []string{}
 	}
@@ -196,7 +195,7 @@ func metricsPageContext(
 	if sources == nil {
 		sources = []string{}
 	}
-	return pongo2.Context{
+	return renderContext{
 		"title":             "Metrics",
 		"rows":              rows,
 		"total":             total,

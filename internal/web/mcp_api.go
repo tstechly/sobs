@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/flosch/pongo2/v6"
 )
 
 type mcpRequest struct {
@@ -154,7 +153,7 @@ func (s *Server) settingsMCPPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	body, err := s.renderer.Render("settings_mcp.html", pongo2.Context{"mcp_keys": keys, "mcp_enabled": enabled, "now_iso": time.Now().UTC().Format(time.RFC3339), "title": "settings-mcp", "message": "Go runtime active."})
+	body, err := s.renderer.Render("settings_mcp.html", renderContext{"mcp_keys": keys, "mcp_enabled": enabled, "now_iso": time.Now().UTC().Format(time.RFC3339), "title": "settings-mcp", "message": "Go runtime active."})
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return

@@ -137,6 +137,31 @@ func TestBuildRUMEventItemDerivesFlagsAndSessionFields(t *testing.T) {
 	}
 }
 
+func TestBuildRUMEventItemDerivesSessionKeyFromNativeMapAttrs(t *testing.T) {
+	item := buildRUMEventItem(
+		"2026-04-20 10:11:12",
+		"error",
+		map[string]any{"message": "boom", "traceId": "trace-native"},
+		map[string]any{"session.id": "session-native-123456", "url": "/native"},
+		"",
+		"",
+		"",
+	)
+
+	if got := anyToString(item["session_key"]); got != "session-native-123456" {
+		t.Fatalf("expected session_key from native attrs, got %q", got)
+	}
+	if got := anyToString(item["session_id"]); got != "session-" {
+		t.Fatalf("expected truncated session_id, got %q", got)
+	}
+	if got := anyToString(item["url"]); got != "/native" {
+		t.Fatalf("expected url from native attrs, got %q", got)
+	}
+	if got := anyToString(item["trace_id"]); got != "trace-native" {
+		t.Fatalf("expected trace_id from body when column is empty, got %q", got)
+	}
+}
+
 func TestRUMEventCapabilityHelpers(t *testing.T) {
 	events := []map[string]any{
 		{"trace_id": "", "has_replay": false, "has_artifact": false},

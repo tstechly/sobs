@@ -9,10 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/flosch/pongo2/v6"
 	minijinja "github.com/mitsuhiko/minijinja/minijinja-go/v2"
 	"github.com/mitsuhiko/minijinja/minijinja-go/v2/value"
 )
+
+type Context map[string]any
 
 type Renderer struct {
 	env *minijinja.Environment
@@ -494,7 +495,7 @@ func applyTemplateCompatibilityShims(name string, src string) string {
 	return src
 }
 
-func (r *Renderer) Render(name string, context pongo2.Context) (string, error) {
+func (r *Renderer) Render(name string, context Context) (string, error) {
 	tpl, err := r.env.GetTemplate(filepath.Clean(name))
 	if err != nil {
 		return "", err

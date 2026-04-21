@@ -2,25 +2,36 @@ package otlpreceiver
 
 import (
 	"encoding/json"
+	"os"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-sourcemap/sourcemap"
 	rumfeature "github.com/abartrim/sobs/internal/features/rum"
 )
 
 var rumTraceparentRegex = regexp.MustCompile(`^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-([0-9a-fA-F]{2})$`)
+var stackFrameRegex = regexp.MustCompile(`^(.*?)(https?://[^\s\)]+|/[^\s\):]+\.js(?:\?[^\s\)]*)?)(?::(\d+))(?::(\d+))(.*)$`)
 
 var (
 	rumBrowserContextCache   = map[string]map[string]any{}
 	rumBrowserContextCacheMu sync.Mutex
 	rumBrowserContextMax     = 10000
+	sourceMapCache           = map[string]sourceMapCacheEntry{}
+	sourceMapCacheMu         sync.Mutex
 )
+
+type sourceMapCacheEntry struct {
+	modTime  time.Time
+	consumer *sourcemap.Consumer
+}
 
 func parseRUMEventsLenient(body []byte) []map[string]any {
 	trimmed := strings.TrimSpace(string(body))
@@ -246,7 +257,119 @@ func handleBrowserContextDelta(event map[string]any) map[string]string {
 }
 
 func maybeDemangleJSStack(stackText string) string {
-	return stackText
+	text := strings.TrimSpace(stackText)
+	if text == "" || !sourceMapEnabled() {
+		return stackText
+	}
+	mappedLines := make([]string, 0)
+	for _, rawLine := range strings.Split(stackText, "\n") {
+		match := stackFrameRegex.FindStringSubmatch(rawLine)
+		if match == nil {
+			mappedLines = append(mappedLines, rawLine)
+			continue
+		}
+		line, err := strconv.Atoi(match[3])
+		if err != nil {
+			mappedLines = append(mappedLines, rawLine)
+			continue
+		}
+		col, err := strconv.Atoi(match[4])
+		if err != nil {
+			mappedLines = append(mappedLines, rawLine)
+			continue
+		}
+		src, srcLine, srcCol, name, ok := sourceMapLookupForFile(match[2], line, col)
+		if !ok {
+			mappedLines = append(mappedLines, rawLine)
+			continue
+		}
+		mappedTarget := src + ":" + strconv.Itoa(srcLine) + ":" + strconv.Itoa(srcCol)
+		if src == "" {
+			mappedTarget = match[2] + ":" + strconv.Itoa(line) + ":" + strconv.Itoa(col)
+		}
+		if name != "" {
+			mappedTarget = name + " (" + mappedTarget + ")"
+		}
+		mappedLines = append(mappedLines, match[1]+"[mapped] "+mappedTarget+match[5])
+	}
+	return strings.Join(mappedLines, "\n")
+}
+
+func sourceMapEnabled() bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("SOBS_SOURCE_MAP_ENABLE")))
+	if err != nil {
+		return false
+	}
+	return enabled && strings.TrimSpace(os.Getenv("SOBS_SOURCE_MAP_DIR")) != ""
+}
+
+func sourceMapLookupForFile(jsURL string, line int, col int) (source string, sourceLine int, sourceCol int, name string, ok bool) {
+	sourceMapDir := strings.TrimSpace(os.Getenv("SOBS_SOURCE_MAP_DIR"))
+	if sourceMapDir == "" {
+		return "", 0, 0, "", false
+	}
+	if info, err := os.Stat(sourceMapDir); err != nil || !info.IsDir() {
+		return "", 0, 0, "", false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(jsURL))
+	if err != nil {
+		return "", 0, 0, "", false
+	}
+	relPath := strings.TrimLeft(parsed.Path, "/")
+	baseName := filepath.Base(parsed.Path)
+	candidates := make([]string, 0, 4)
+	if relPath != "" {
+		candidates = append(candidates, filepath.Join(sourceMapDir, relPath+".map"))
+	}
+	if baseName != "" {
+		candidates = append(candidates, filepath.Join(sourceMapDir, baseName+".map"))
+		if strings.HasSuffix(baseName, ".min.js") {
+			candidates = append(candidates, filepath.Join(sourceMapDir, strings.TrimSuffix(baseName, ".min.js")+".js.map"))
+		}
+		if strings.HasSuffix(baseName, ".js") {
+			candidates = append(candidates, filepath.Join(sourceMapDir, strings.TrimSuffix(baseName, ".js")+".js.map"))
+		}
+	}
+	mapPath := ""
+	var modTime time.Time
+	for _, candidate := range candidates {
+		info, statErr := os.Stat(candidate)
+		if statErr == nil && !info.IsDir() {
+			mapPath = candidate
+			modTime = info.ModTime()
+			break
+		}
+	}
+	if mapPath == "" {
+		return "", 0, 0, "", false
+	}
+	consumer, err := loadSourceMapConsumer(mapPath, jsURL, modTime)
+	if err != nil || consumer == nil {
+		return "", 0, 0, "", false
+	}
+	source, name, sourceLine, sourceCol, ok = consumer.Source(line, col)
+	if ok {
+		sourceCol++
+	}
+	return source, sourceLine, sourceCol, name, ok
+}
+
+func loadSourceMapConsumer(mapPath string, jsURL string, modTime time.Time) (*sourcemap.Consumer, error) {
+	sourceMapCacheMu.Lock()
+	defer sourceMapCacheMu.Unlock()
+	if cached, ok := sourceMapCache[mapPath]; ok && cached.modTime.Equal(modTime) && cached.consumer != nil {
+		return cached.consumer, nil
+	}
+	raw, err := os.ReadFile(mapPath)
+	if err != nil {
+		return nil, err
+	}
+	consumer, err := sourcemap.Parse(jsURL, raw)
+	if err != nil {
+		return nil, err
+	}
+	sourceMapCache[mapPath] = sourceMapCacheEntry{modTime: modTime, consumer: consumer}
+	return consumer, nil
 }
 
 func remapRUMConsoleStacks(event map[string]any) {
@@ -377,4 +500,10 @@ func resetRUMBrowserContextCache() {
 	rumBrowserContextCacheMu.Lock()
 	defer rumBrowserContextCacheMu.Unlock()
 	rumBrowserContextCache = map[string]map[string]any{}
+}
+
+func resetSourceMapCache() {
+	sourceMapCacheMu.Lock()
+	defer sourceMapCacheMu.Unlock()
+	sourceMapCache = map[string]sourceMapCacheEntry{}
 }

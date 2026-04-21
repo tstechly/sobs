@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,6 +288,36 @@ func TestHTTPAcceptRUMReturnsAcceptedCount(t *testing.T) {
 	}
 }
 
+func TestHTTPAcceptRUMPersistsRowsThroughRealPipelinePath(t *testing.T) {
+	t.Setenv("SOBS_INGEST_WAIT_FOR_RESULT", "1")
+	resetRUMBrowserContextCache()
+	store := &captureStore{}
+	factory := &captureStoreFactory{store: store}
+	pipeline := NewAsyncLogPipeline(NewStorePipeline(factory))
+	srv := NewHTTPServerWithPipeline(pipeline)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum", bytes.NewReader([]byte(`{"events":[{"type":"pageview","timestamp":"2024-01-01T00:00:00Z","sessionId":"sess-http-1","url":"https://example.com/"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	joined := strings.Join(store.execs, "\n")
+	for _, expected := range []string{
+		"CREATE TABLE IF NOT EXISTS hyperdx_sessions",
+		"INSERT INTO hyperdx_sessions",
+		`"sessionId":"sess-http-1"`,
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected query containing %q, got:\n%s", expected, joined)
+		}
+	}
+}
+
 func TestHTTPAcceptRUMReturns503WhenWriteQueueIsFull(t *testing.T) {
 	pipeline := &capturePipeline{rumErr: WriteQueueFullError{}}
 	srv := NewHTTPServerWithPipeline(pipeline)
@@ -306,6 +337,29 @@ func TestHTTPAcceptRUMReturns503WhenWriteQueueIsFull(t *testing.T) {
 	}
 	if got := payload["error"]; got != "write queue is full" {
 		t.Fatalf("expected queue full error, got %v payload=%v", got, payload)
+	}
+}
+
+func TestHTTPAcceptRUMReturns500WhenAsyncWorkerFailsAndWaitIsEnabled(t *testing.T) {
+	t.Setenv("SOBS_INGEST_WAIT_FOR_RESULT", "1")
+	pipeline := NewAsyncLogPipeline(&capturePipeline{rumErr: errors.New("boom")})
+	srv := NewHTTPServerWithPipeline(pipeline)
+	mux := http.NewServeMux()
+	srv.Register(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/rum", bytes.NewReader([]byte(`[ {"type":"pageview","sessionId":"sess-1"} ]`)))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", w.Code, w.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if got := payload["error"]; got != "rum ingest write failed" {
+		t.Fatalf("expected worker failure error, got %v payload=%v", got, payload)
 	}
 }
 

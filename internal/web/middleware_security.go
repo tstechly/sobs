@@ -73,9 +73,6 @@ func (s *Server) wrapSecurity(next http.Handler) http.Handler {
 }
 
 func (s *Server) allowV1APIKey(r *http.Request) bool {
-	if !s.cfg.EnforceAPIAuth {
-		return true
-	}
 	if !requiresV1APIKey(r.URL.Path, r.Method) {
 		return true
 	}
@@ -83,6 +80,9 @@ func (s *Server) allowV1APIKey(r *http.Request) bool {
 	expected := strings.TrimSpace(os.Getenv("SOBS_API_KEY"))
 	staticOK := expected != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 	managedConfigured, managedOK := s.managedV1KeyStatus(r.URL.Path, provided)
+	if expected == "" && !managedConfigured {
+		return true
+	}
 
 	if expected != "" {
 		return staticOK || managedOK

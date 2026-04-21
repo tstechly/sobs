@@ -81,3 +81,12 @@ func TestLogsExport(t *testing.T) {
 		t.Fatal("expected non-nil response")
 	}
 }
+
+func TestAsyncLogPipelineSurfacesWorkerErrorsWhenRequested(t *testing.T) {
+	t.Setenv("SOBS_INGEST_WAIT_FOR_RESULT", "1")
+	pipeline := NewAsyncLogPipeline(&stubPipeline{tracesErr: errors.New("boom")})
+	err := pipeline.ConsumeTraces(context.Background(), &coltracepb.ExportTraceServiceRequest{})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected boom error, got %v", err)
+	}
+}

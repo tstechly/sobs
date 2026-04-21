@@ -2,6 +2,7 @@ package otlpreceiver
 
 import (
 	"context"
+	"log"
 	"os"
 	"strconv"
 	"sync"
@@ -19,6 +20,7 @@ var (
 	writeBatchWait    = time.Duration(envInt("SOBS_WRITE_BATCH_WAIT_MS", 20)) * time.Millisecond
 	sseQueueMax       = envInt("SOBS_SSE_QUEUE_MAX", 200)
 	maxEnqueueWait    = time.Second
+	asyncResultWait   = 15 * time.Second
 	keepaliveInterval = 15 * time.Second
 )
 
@@ -35,7 +37,9 @@ type queuedPipeline struct {
 }
 
 type queuedRequest struct {
-	run func(context.Context) error
+	name string
+	run  func(context.Context) error
+	done chan error
 }
 
 func NewAsyncLogPipeline(base Pipeline) Pipeline {
@@ -45,7 +49,7 @@ func NewAsyncLogPipeline(base Pipeline) Pipeline {
 func (p *queuedPipeline) ConsumeTraces(_ context.Context, req *coltracepb.ExportTraceServiceRequest) error {
 	p.ensureWorker()
 	cloned, _ := proto.Clone(req).(*coltracepb.ExportTraceServiceRequest)
-	return p.enqueue(func(ctx context.Context) error {
+	return p.enqueue("traces", func(ctx context.Context) error {
 		return p.base.ConsumeTraces(ctx, cloned)
 	})
 }
@@ -86,16 +90,21 @@ func (p *queuedPipeline) worker() {
 func (p *queuedPipeline) runBatch(batch []queuedRequest) {
 	for _, item := range batch {
 		if item.run == nil {
+			item.signal(nil)
 			continue
 		}
-		_ = item.run(context.Background())
+		err := item.run(context.Background())
+		if err != nil {
+			log.Printf("sobs async ingest %s failed: %v", item.name, err)
+		}
+		item.signal(err)
 	}
 }
 
 func (p *queuedPipeline) ConsumeMetrics(ctx context.Context, req *colmetricpb.ExportMetricsServiceRequest) error {
 	p.ensureWorker()
 	cloned, _ := proto.Clone(req).(*colmetricpb.ExportMetricsServiceRequest)
-	return p.enqueue(func(ctx context.Context) error {
+	return p.enqueue("metrics", func(ctx context.Context) error {
 		return p.base.ConsumeMetrics(ctx, cloned)
 	})
 }
@@ -103,7 +112,7 @@ func (p *queuedPipeline) ConsumeMetrics(ctx context.Context, req *colmetricpb.Ex
 func (p *queuedPipeline) ConsumeLogs(_ context.Context, req *collogspb.ExportLogsServiceRequest) error {
 	p.ensureWorker()
 	cloned, _ := proto.Clone(req).(*collogspb.ExportLogsServiceRequest)
-	return p.enqueue(func(ctx context.Context) error {
+	return p.enqueue("logs", func(ctx context.Context) error {
 		return p.base.ConsumeLogs(ctx, cloned)
 	})
 }
@@ -111,7 +120,7 @@ func (p *queuedPipeline) ConsumeLogs(_ context.Context, req *collogspb.ExportLog
 func (p *queuedPipeline) ConsumeRUM(_ context.Context, req *RUMIngestRequest) error {
 	p.ensureWorker()
 	cloned := cloneRUMIngestRequest(req)
-	return p.enqueue(func(ctx context.Context) error {
+	return p.enqueue("rum", func(ctx context.Context) error {
 		if consumer, ok := p.base.(RUMConsumer); ok {
 			return consumer.ConsumeRUM(ctx, cloned)
 		}
@@ -122,7 +131,7 @@ func (p *queuedPipeline) ConsumeRUM(_ context.Context, req *RUMIngestRequest) er
 func (p *queuedPipeline) ConsumeAI(_ context.Context, req *AIIngestRequest) error {
 	p.ensureWorker()
 	cloned := cloneAIIngestRequest(req)
-	return p.enqueue(func(ctx context.Context) error {
+	return p.enqueue("ai", func(ctx context.Context) error {
 		if consumer, ok := p.base.(AIConsumer); ok {
 			return consumer.ConsumeAI(ctx, cloned)
 		}
@@ -133,7 +142,7 @@ func (p *queuedPipeline) ConsumeAI(_ context.Context, req *AIIngestRequest) erro
 func (p *queuedPipeline) ConsumeErrorsV1(_ context.Context, req *ErrorIngestRequest) error {
 	p.ensureWorker()
 	cloned := cloneErrorIngestRequest(req)
-	return p.enqueue(func(ctx context.Context) error {
+	return p.enqueue("errors", func(ctx context.Context) error {
 		if consumer, ok := p.base.(ErrorConsumer); ok {
 			return consumer.ConsumeErrorsV1(ctx, cloned)
 		}
@@ -141,16 +150,52 @@ func (p *queuedPipeline) ConsumeErrorsV1(_ context.Context, req *ErrorIngestRequ
 	})
 }
 
-func (p *queuedPipeline) enqueue(run func(context.Context) error) error {
-	queued := queuedRequest{run: run}
+func (p *queuedPipeline) enqueue(name string, run func(context.Context) error) error {
+	queued := queuedRequest{name: name, run: run}
+	if asyncWaitForResultEnabled() {
+		queued.done = make(chan error, 1)
+	}
 	timer := time.NewTimer(maxEnqueueWait)
 	defer timer.Stop()
 	select {
 	case p.queue <- queued:
-		return nil
+		if queued.done == nil {
+			return nil
+		}
+		resultTimer := time.NewTimer(asyncResultWait)
+		defer resultTimer.Stop()
+		select {
+		case err := <-queued.done:
+			return err
+		case <-resultTimer.C:
+			return context.DeadlineExceeded
+		}
 	case <-timer.C:
 		return WriteQueueFullError{}
 	}
+}
+
+func (r queuedRequest) signal(err error) {
+	if r.done == nil {
+		return
+	}
+	select {
+	case r.done <- err:
+	default:
+	}
+	close(r.done)
+}
+
+func asyncWaitForResultEnabled() bool {
+	raw := os.Getenv("SOBS_INGEST_WAIT_FOR_RESULT")
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false
+	}
+	return enabled
 }
 
 func envInt(name string, fallback int) int {

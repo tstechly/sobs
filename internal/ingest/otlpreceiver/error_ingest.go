@@ -18,10 +18,7 @@ type ErrorIngestRequest struct {
 }
 
 func normalizeErrorIngestRequest(payload map[string]any) *ErrorIngestRequest {
-	ts := stringAny(payload["timestamp"])
-	if ts == "" {
-		ts = nowISO()
-	}
+	ts := normalizeIngestTimestamp(stringAny(payload["timestamp"]))
 	attrs, _ := payload["attributes"].(map[string]any)
 	stringAttrs := stringifyAttrs(attrs)
 	exceptionType := firstNonEmptyString(stringAny(payload["type"]), "Error")

@@ -3,7 +3,6 @@ package web
 import (
 	"net/http"
 
-	"github.com/flosch/pongo2/v6"
 )
 
 func (s *Server) tableExplorerPage(w http.ResponseWriter, r *http.Request) {
@@ -15,7 +14,7 @@ func (s *Server) tableExplorerPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	body, err := s.renderer.Render("table_explorer.html", pongo2.Context{"title": "table-explorer", "message": "Go runtime active."})
+	body, err := s.renderer.Render("table_explorer.html", renderContext{"title": "table-explorer", "message": "Go runtime active."})
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
@@ -38,7 +37,7 @@ func (s *Server) tableExplorerHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	body, err := s.renderer.Render("table_explorer_help.html", pongo2.Context{"title": "table-explorer-help", "message": "Go runtime active."})
+	body, err := s.renderer.Render("table_explorer_help.html", renderContext{"title": "table-explorer-help", "message": "Go runtime active."})
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return

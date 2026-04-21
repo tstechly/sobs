@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/abartrim/sobs/internal/features/dashboards"
-	"github.com/flosch/pongo2/v6"
 )
 
 type dashboardCreateRequest struct {
@@ -118,7 +117,7 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 		}
 		charts := s.listDashboardCharts(r, dashboardID)
 		templates := s.dashboardTemplateContext()
-		ctx := pongo2.Context{
+		ctx := renderContext{
 			"title":                 d.Name,
 			"mobile_breakpoint_max": "575.98px",
 			"request":               map[string]any{"endpoint": "dashboards"},

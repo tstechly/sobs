@@ -59,7 +59,7 @@ func TestReadRoutesRequireUIAuthInBasicMode(t *testing.T) {
 	}
 }
 
-func TestV1APIKeyCanBeDisabledViaConfig(t *testing.T) {
+func TestV1APIKeyStillAppliesWhenConfiguredAndToggleDisabled(t *testing.T) {
 	t.Setenv("SOBS_API_KEY", "test-key")
 	cfg := config.Default()
 	cfg.EnforceAPIAuth = false
@@ -68,8 +68,8 @@ func TestV1APIKeyCanBeDisabledViaConfig(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/traces", nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code == http.StatusUnauthorized {
-		t.Fatalf("expected non-401 when EnforceAPIAuth=false, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when API key is configured, got %d", rec.Code)
 	}
 }
 

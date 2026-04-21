@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -431,6 +432,26 @@ func nowISO() string {
 	return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
 }
 
+func normalizeIngestTimestamp(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nowISO()
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+	} {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed.UTC().Format("2006-01-02 15:04:05.000000")
+		}
+	}
+	return trimmed
+}
+
 func recordIDForLog(ts string, service string, traceID string, spanID string) string {
 	sum := md5.Sum([]byte(service + "|" + ts + "|" + traceID + "|" + spanID)) //nolint:gosec
 	return hex.EncodeToString(sum[:])
@@ -556,6 +577,14 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
+func eventStringValueWithDefault(event map[string]any, key string, defaultValue string) string {
+	value, ok := event[key]
+	if !ok {
+		return defaultValue
+	}
+	return stringAny(value)
+}
+
 // attrFingerprint produces a stable 16-char hex fingerprint of data-point
 // attributes, matching Python's _attr_fingerprint exactly.
 func attrFingerprint(attrs map[string]string) string {
@@ -671,7 +700,7 @@ func (p *StorePipeline) ConsumeTraces(ctx context.Context, req *coltracepb.Expor
 	}
 	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "SpanAttributes"), "span")
 	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "ResourceAttributes"), "resource")
-	_ = p.applyTagRules(ctx, "trace", rows)
+	p.logTagRuleFailure(ctx, "trace", rows)
 	if len(errorRows) == 0 {
 		return nil
 	}
@@ -679,7 +708,7 @@ func (p *StorePipeline) ConsumeTraces(ctx context.Context, req *coltracepb.Expor
 		return err
 	}
 	p.rememberAttrKeys(ctx, extractAttrMaps(errorRows, "LogAttributes"), "log")
-	_ = p.applyTagRules(ctx, "error", errorRows)
+	p.logTagRuleFailure(ctx, "error", errorRows)
 	return nil
 }
 
@@ -739,8 +768,14 @@ func (p *StorePipeline) ConsumeLogs(ctx context.Context, req *collogspb.ExportLo
 	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "LogAttributes"), "log")
 	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "ResourceAttributes"), "resource")
 	p.rememberAttrKeys(ctx, extractAttrMaps(rows, "ScopeAttributes"), "scope")
-	_ = p.applyTagRules(ctx, "log", rows)
+	p.logTagRuleFailure(ctx, "log", rows)
 	return nil
+}
+
+func (p *StorePipeline) logTagRuleFailure(ctx context.Context, recordType string, rows []map[string]any) {
+	if err := p.applyTagRules(ctx, recordType, rows); err != nil {
+		log.Printf("sobs auto-tag application failed for %s: %v", recordType, err)
+	}
 }
 
 func (p *StorePipeline) applyTagRules(ctx context.Context, recordType string, rows []map[string]any) error {
@@ -1047,8 +1082,9 @@ func (p *StorePipeline) ConsumeErrorsV1(ctx context.Context, req *ErrorIngestReq
 	if err := p.ensureSchema(ctx); err != nil {
 		return err
 	}
+	ts := normalizeIngestTimestamp(req.Timestamp)
 	row := map[string]any{
-		"Timestamp":          req.Timestamp,
+		"Timestamp":          ts,
 		"TraceId":            req.TraceID,
 		"SpanId":             req.SpanID,
 		"TraceFlags":         req.TraceFlags,
@@ -1069,7 +1105,7 @@ func (p *StorePipeline) ConsumeErrorsV1(ctx context.Context, req *ErrorIngestReq
 		return err
 	}
 	p.rememberAttrKeys(ctx, extractAttrMaps([]map[string]any{row}, "LogAttributes"), "log")
-	_ = p.applyTagRules(ctx, "error", []map[string]any{row})
+	p.logTagRuleFailure(ctx, "error", []map[string]any{row})
 	return nil
 }
 
@@ -1077,8 +1113,9 @@ func (p *StorePipeline) ConsumeAI(ctx context.Context, req *AIIngestRequest) err
 	if err := p.ensureSchema(ctx); err != nil {
 		return err
 	}
+	ts := normalizeIngestTimestamp(req.Timestamp)
 	row := map[string]any{
-		"Timestamp":          req.Timestamp,
+		"Timestamp":          ts,
 		"TraceId":            req.TraceID,
 		"SpanId":             req.SpanID,
 		"ParentSpanId":       "",
@@ -1099,7 +1136,7 @@ func (p *StorePipeline) ConsumeAI(ctx context.Context, req *AIIngestRequest) err
 	if err := p.insertJSONEachRow(ctx, "otel_traces", []map[string]any{row}); err != nil {
 		return err
 	}
-	_ = p.applyTagRules(ctx, "ai", []map[string]any{row})
+	p.logTagRuleFailure(ctx, "ai", []map[string]any{row})
 	return nil
 }
 
@@ -1116,10 +1153,7 @@ func (p *StorePipeline) ConsumeRUM(ctx context.Context, req *RUMIngestRequest) e
 			event["stack"] = maybeDemangleJSStack(stack)
 		}
 		remapRUMConsoleStacks(event)
-		ts := strings.TrimSpace(stringAny(event["timestamp"]))
-		if ts == "" {
-			ts = nowISO()
-		}
+		ts := normalizeIngestTimestamp(stringAny(event["timestamp"]))
 		sessionID := stringAny(event["sessionId"])
 		eventType := strings.TrimSpace(stringAny(event["type"]))
 		if eventType == "" {
@@ -1145,7 +1179,7 @@ func (p *StorePipeline) ConsumeRUM(ctx context.Context, req *RUMIngestRequest) e
 			"TraceFlags":         traceFlags,
 			"SeverityText":       severityText,
 			"SeverityNumber":     severityNumber(severityText),
-			"ServiceName":        firstNonEmptyString(stringAny(event["service"]), "browser"),
+			"ServiceName":        eventStringValueWithDefault(event, "service", "browser"),
 			"Body":               persist.JSONString(event),
 			"ResourceSchemaUrl":  "",
 			"ResourceAttributes": map[string]string{},
@@ -1160,7 +1194,7 @@ func (p *StorePipeline) ConsumeRUM(ctx context.Context, req *RUMIngestRequest) e
 			continue
 		}
 		errAttrs := map[string]string{
-			"exception.type":    firstNonEmptyString(stringAny(event["errorType"]), "JSError"),
+			"exception.type":    eventStringValueWithDefault(event, "errorType", "JSError"),
 			"exception.message": stringAny(event["message"]),
 			"url.full":          url,
 			"session.id":        sessionID,
@@ -1224,8 +1258,8 @@ func (p *StorePipeline) ConsumeRUM(ctx context.Context, req *RUMIngestRequest) e
 		return err
 	}
 	p.rememberAttrKeys(ctx, extractAttrMaps(errorRows, "LogAttributes"), "log")
-	_ = p.applyTagRules(ctx, "rum", sessionRows)
-	_ = p.applyTagRules(ctx, "error", errorRows)
+	p.logTagRuleFailure(ctx, "rum", sessionRows)
+	p.logTagRuleFailure(ctx, "error", errorRows)
 	return nil
 }
 

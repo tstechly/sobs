@@ -1,8 +1,10 @@
 package otlpreceiver
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 
@@ -259,6 +261,8 @@ func TestStorePipelineRUMIngestPersistsSessionsErrorsAndTags(t *testing.T) {
 	for _, expected := range []string{
 		"CREATE TABLE IF NOT EXISTS hyperdx_sessions",
 		"INSERT INTO hyperdx_sessions",
+		`"Timestamp":"2024-01-01 00:00:00.000000"`,
+		`"Timestamp":"2024-01-01 00:00:01.000000"`,
 		`"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"`,
 		`"SpanId":"00f067aa0ba902b7"`,
 		`"TraceFlags":1`,
@@ -284,6 +288,71 @@ func TestStorePipelineRUMIngestPersistsSessionsErrorsAndTags(t *testing.T) {
 	}
 	if strings.Contains(joined, "clientAuthToken") {
 		t.Fatalf("expected client auth token to be stripped from stored payloads, got:\n%s", joined)
+	}
+}
+
+func TestStorePipelineRUMIngestPreservesExplicitEmptyServiceAndErrorType(t *testing.T) {
+	resetRUMBrowserContextCache()
+	store := &captureStore{}
+	factory := &captureStoreFactory{store: store}
+	pipeline := NewStorePipeline(factory).(*StorePipeline)
+	req := &RUMIngestRequest{
+		Events: []map[string]any{
+			{
+				"type":      "pageview",
+				"timestamp": "2024-01-01T00:00:00Z",
+				"sessionId": "sess-rum-empty-1",
+				"service":   "",
+			},
+			{
+				"type":      "error",
+				"timestamp": "2024-01-01T00:00:01Z",
+				"sessionId": "sess-rum-empty-1",
+				"message":   "boom",
+				"errorType": "",
+			},
+		},
+	}
+
+	if err := pipeline.ConsumeRUM(context.Background(), req); err != nil {
+		t.Fatalf("consume rum: %v", err)
+	}
+
+	joined := strings.Join(store.execs, "\n")
+	if !strings.Contains(joined, `"ServiceName":""`) {
+		t.Fatalf("expected explicit empty service name to be preserved, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, `"exception.type":""`) {
+		t.Fatalf("expected explicit empty errorType to be preserved, got:\n%s", joined)
+	}
+	if strings.Contains(joined, `"exception.type":"JSError"`) {
+		t.Fatalf("expected JSError fallback only when errorType key is absent, got:\n%s", joined)
+	}
+}
+
+func TestStorePipelineRUMIngestLogsTagRuleFailures(t *testing.T) {
+	resetRUMBrowserContextCache()
+	store := &captureStore{}
+	store.queryFunc = func(query string, _ ...any) (extensionpoints.RowIterator, error) {
+		if strings.Contains(query, "FROM sobs_tag_rules") {
+			return nil, fmt.Errorf("tag rules unavailable")
+		}
+		return &captureRows{}, nil
+	}
+	factory := &captureStoreFactory{store: store}
+	pipeline := NewStorePipeline(factory).(*StorePipeline)
+	var buf bytes.Buffer
+	prevWriter := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevWriter)
+
+	req := &RUMIngestRequest{Events: []map[string]any{{"type": "pageview", "sessionId": "sess-rum-log-1"}}}
+	if err := pipeline.ConsumeRUM(context.Background(), req); err != nil {
+		t.Fatalf("consume rum: %v", err)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "sobs auto-tag application failed for rum") {
+		t.Fatalf("expected tag-rule failure log, got %q", logged)
 	}
 }
 
@@ -330,6 +399,7 @@ func TestStorePipelineAIIngestPersistsTraceAndTags(t *testing.T) {
 	joined := strings.Join(store.execs, "\n")
 	for _, expected := range []string{
 		"INSERT INTO otel_traces",
+		`"Timestamp":"2024-01-01 00:00:00.000000"`,
 		`"SpanName":"chat gpt-5"`,
 		`"SpanKind":"CLIENT"`,
 		`"ScopeName":"sobs-ai"`,
@@ -386,6 +456,7 @@ func TestStorePipelineErrorsV1PersistsLogsAndTags(t *testing.T) {
 	joined := strings.Join(store.execs, "\n")
 	for _, expected := range []string{
 		"INSERT INTO otel_logs",
+		`"Timestamp":"2024-01-01 00:00:00.000000"`,
 		`"SeverityText":"ERROR"`,
 		`"ServiceName":"svc-errors"`,
 		`"Body":"boom"`,

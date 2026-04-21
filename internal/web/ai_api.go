@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/flosch/pongo2/v6"
 )
 
 func (s *Server) apiAIConversation(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +89,7 @@ func (s *Server) apiAIConversation(w http.ResponseWriter, r *http.Request) {
 		"finish_reason":               anyToString(attrs["gen_ai.response.finish_reason"]),
 	}
 
-	body, renderErr := s.renderer.Render("_ai_conversation_partial.html", pongo2.Context{
+	body, renderErr := s.renderer.Render("_ai_conversation_partial.html", renderContext{
 		"item":    item,
 		"from_ts": fromTS,
 		"to_ts":   toTS,

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,12 +13,22 @@ import (
 	"time"
 
 	"github.com/abartrim/sobs/internal/extensionpoints"
-	"github.com/flosch/pongo2/v6"
 )
 
 const summaryAISpanCondition = "(SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '' OR SpanAttributes['gen_ai.operation.name'] != '')"
 
-var summarySeverityRanks = map[string]int{"normal": 0, "warning": 1, "outlier": 2}
+var (
+	summarySeverityRanks          = map[string]int{"normal": 0, "warning": 1, "outlier": 2}
+	rumSessionDetailEventCap      = 200 // RUM_SESSION_DETAIL_EVENT_CAP from Python
+)
+
+func init() {
+	if cap := os.Getenv("SOBS_RUM_SESSION_DETAIL_EVENT_CAP"); cap != "" {
+		if v, err := strconv.Atoi(cap); err == nil && v > 0 {
+			rumSessionDetailEventCap = v
+		}
+	}
+}
 
 type summaryPageData struct {
 	Stats        map[string]any
@@ -122,7 +133,7 @@ func (s *Server) summaryPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := s.summaryData(r)
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                 "Summary",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "summary"},
@@ -681,7 +692,7 @@ func (s *Server) summaryHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "summary_help.html", pongo2.Context{"title": "Summary Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "summary/help"}})
+	s.renderTemplate(w, "summary_help.html", renderContext{"title": "Summary Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "summary/help"}})
 }
 func (s *Server) logsHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/logs/help" {
@@ -696,7 +707,7 @@ func (s *Server) logsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "logs_help.html", pongo2.Context{"title": "Logs Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "logs/help"}})
+	s.renderTemplate(w, "logs_help.html", renderContext{"title": "Logs Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "logs/help"}})
 }
 func (s *Server) errorsHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/errors/help" {
@@ -711,7 +722,7 @@ func (s *Server) errorsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "errors_help.html", pongo2.Context{"title": "Errors Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "errors/help"}})
+	s.renderTemplate(w, "errors_help.html", renderContext{"title": "Errors Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "errors/help"}})
 }
 func (s *Server) tracesHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/traces/help" {
@@ -726,7 +737,7 @@ func (s *Server) tracesHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "traces_help.html", pongo2.Context{"title": "Traces Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "traces/help"}})
+	s.renderTemplate(w, "traces_help.html", renderContext{"title": "Traces Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "traces/help"}})
 }
 func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/incident" {
@@ -788,7 +799,7 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if traceID == "" && errorID == "" && rumSession == "" {
-		s.renderTemplate(w, "incident.html", pongo2.Context{
+		s.renderTemplate(w, "incident.html", renderContext{
 			"title":                    "Incident",
 			"mobile_breakpoint_max":    "575.98px",
 			"request":                  map[string]any{"endpoint": "incident"},
@@ -896,16 +907,18 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 
 		if rumSession != "" {
 			sessionKeyExpr := "coalesce(nullIf(LogAttributes['session.id'], ''), nullIf(JSONExtractString(Body, 'sessionId'), ''), TraceId)"
+			urlExpr := "if(LogAttributes['url'] != '', LogAttributes['url'], LogAttributes['url.full'])"
+			traceExpr := "if(TraceId != '', TraceId, JSONExtractString(Body, 'traceId'))"
+			spanExpr := "if(SpanId != '', SpanId, JSONExtractString(Body, 'spanId'))"
 			rumWhere := []string{sessionKeyExpr + " = ?"}
 			rumParams := []any{rumSession}
 			if rumTS != "" {
 				rumWhere = append(rumWhere, "Timestamp <= parseDateTime64BestEffort(?, 9)")
 				rumParams = append(rumParams, rumTS)
 			}
-			rumSQL := "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, ServiceName, " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions WHERE " + strings.Join(rumWhere, " AND ") + " ORDER BY Timestamp DESC LIMIT 1"
+			rumSQL := "SELECT Timestamp, EventName, Body, " + urlExpr + " AS url, " + traceExpr + " AS trace_id, " + spanExpr + " AS span_id, ServiceName AS service, " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions WHERE " + strings.Join(rumWhere, " AND ") + " ORDER BY Timestamp DESC LIMIT 1"
 			if rumRows, queryErr := queryRows(r.Context(), store, rumSQL, rumParams...); queryErr == nil && len(rumRows) > 0 {
-				row := rumRows[0]
-				primaryRUM = buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], row["TraceId"], row["SpanId"], anyToString(row["session_key"]))
+				primaryRUM = buildRUMEventItemFromRow(rumRows[0])
 			}
 		}
 
@@ -1003,6 +1016,9 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		rumWhereParts := make([]string, 0)
 		rumWhereParams := make([]any, 0)
 		sessionKeyExpr := "coalesce(nullIf(LogAttributes['session.id'], ''), nullIf(JSONExtractString(Body, 'sessionId'), ''), TraceId)"
+		urlExpr := "if(LogAttributes['url'] != '', LogAttributes['url'], LogAttributes['url.full'])"
+		traceExpr := "if(TraceId != '', TraceId, JSONExtractString(Body, 'traceId'))"
+		spanExpr := "if(SpanId != '', SpanId, JSONExtractString(Body, 'spanId'))"
 		if traceID != "" {
 			rumWhereParts = append(rumWhereParts, "TraceId = ?")
 			rumWhereParams = append(rumWhereParams, traceID)
@@ -1022,9 +1038,9 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 			relatedRUMSessions = anyToInt(summaryRows[0]["session_count"])
 			relatedRUMErrorCount = anyToInt(summaryRows[0]["err_count"])
 		}
-		if rumRows, queryErr := queryRows(r.Context(), store, "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, ServiceName, "+sessionKeyExpr+" AS session_key FROM hyperdx_sessions"+rumWhereSQL+" ORDER BY Timestamp DESC LIMIT ?", append(rumWhereParams, 20)...); queryErr == nil {
+		if rumRows, queryErr := queryRows(r.Context(), store, "SELECT Timestamp, EventName, Body, "+urlExpr+" AS url, "+traceExpr+" AS trace_id, "+spanExpr+" AS span_id, ServiceName AS service, "+sessionKeyExpr+" AS session_key FROM hyperdx_sessions"+rumWhereSQL+" ORDER BY Timestamp DESC LIMIT ?", append(rumWhereParams, 20)...); queryErr == nil {
 			for _, row := range rumRows {
-				relatedRUMEvents = append(relatedRUMEvents, buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], row["TraceId"], row["SpanId"], anyToString(row["session_key"])))
+				relatedRUMEvents = append(relatedRUMEvents, buildRUMEventItemFromRow(row))
 			}
 		}
 
@@ -1066,7 +1082,7 @@ func (s *Server) incidentPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                    "Incident",
 		"mobile_breakpoint_max":    "575.98px",
 		"request":                  map[string]any{"endpoint": "incident"},
@@ -1415,6 +1431,46 @@ func (s *Server) loadWorkItemLinksForRefIDs(ctx context.Context, store extension
 	return out
 }
 
+// unescapeRegexFilterTerm interprets \\&& as literal && within a regex term.
+func unescapeRegexFilterTerm(term string) string {
+	return strings.ReplaceAll(term, `\&&`, "&&")
+}
+
+// parseRegexFilterExpression parses `include && !exclude` style regex expressions from filter inputs.
+func parseRegexFilterExpression(raw string) ([]string, []string, string) {
+	expression := strings.TrimSpace(raw)
+	if expression == "" {
+		return []string{}, []string{}, ""
+	}
+	
+	parts := splitRegexFilterExpressionTerms(expression)
+	for _, part := range parts {
+		if part == "" {
+			return []string{}, []string{}, "Regex error: invalid expression around '&&'"
+		}
+	}
+	
+	var includePatterns, excludePatterns []string
+	for _, part := range parts {
+		negate := strings.HasPrefix(part, "!")
+		token := part
+		if negate {
+			token = strings.TrimSpace(part[1:])
+		}
+		token = unescapeRegexFilterTerm(token)
+		if token == "" {
+			return []string{}, []string{}, "Regex error: expected a pattern after '!'"
+		}
+		if negate {
+			excludePatterns = append(excludePatterns, token)
+		} else {
+			includePatterns = append(includePatterns, token)
+		}
+	}
+	
+	return includePatterns, excludePatterns, ""
+}
+
 func (s *Server) incidentHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/incident/help" {
 		http.NotFound(w, r)
@@ -1428,7 +1484,7 @@ func (s *Server) incidentHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "incident_help.html", pongo2.Context{"title": "Incident Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "incident/help"}})
+	s.renderTemplate(w, "incident_help.html", renderContext{"title": "Incident Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "incident/help"}})
 }
 func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/rum" {
@@ -1481,25 +1537,59 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	where, params := rumTimeWhereAndParams(fromTS, toTS)
+	// Parse regex patterns from q parameter (include && !exclude syntax)
+	var includePatterns, excludePatterns []string
+	qError := ""
+	if q != "" {
+		var parseErr string
+		includePatterns, excludePatterns, parseErr = parseRegexFilterExpression(q)
+		if parseErr != "" {
+			qError = parseErr
+		}
+	}
+
+	// Build WHERE clause with time window and filters
+	where := ""
+	var params []any
+	
+	// Time window filter
+	timeWhere, timeParams := rumTimeWhereAndParams(fromTS, toTS)
+	if timeWhere != "" {
+		where = timeWhere
+		params = append(params, timeParams...)
+	}
+	
+	// Event type filter
 	if eventType != "" {
 		where = appendWhereClause(where, "EventName = ?")
 		params = append(params, eventType)
 	}
+	
+	// Error source filter
 	if errorSource != "" {
 		where = appendWhereClause(where, "LogAttributes['errorSource'] = ?")
 		params = append(params, errorSource)
 	}
-	if q != "" {
-		like := "%" + q + "%"
-		where = appendWhereClause(where, "(Body ILIKE ? OR LogAttributes['url'] ILIKE ? OR LogAttributes['session.id'] ILIKE ? OR LogAttributes['errorSource'] ILIKE ? OR TraceId ILIKE ?)")
-		params = append(params, like, like, like, like, like)
+	
+	// Regex filter - build regex conditions
+	if q != "" && qError == "" {
+		for _, pattern := range includePatterns {
+			where = appendWhereClause(where, "match(Body, ?)")
+			params = append(params, pattern)
+		}
+		for _, pattern := range excludePatterns {
+			where = appendWhereClause(where, "NOT match(Body, ?)")
+			params = append(params, pattern)
+		}
 	}
 
 	total := 0
 	events := []map[string]any{}
 	sessionGroups := []map[string]any{}
 	sessionKeyExpr := "coalesce(nullIf(LogAttributes['session.id'], ''), nullIf(JSONExtractString(Body, 'sessionId'), ''), TraceId)"
+	urlExpr := "if(LogAttributes['url'] != '', LogAttributes['url'], LogAttributes['url.full'])"
+	traceExpr := "if(TraceId != '', TraceId, JSONExtractString(Body, 'traceId'))"
+	spanExpr := "if(SpanId != '', SpanId, JSONExtractString(Body, 'spanId'))"
 	vitalsSummary := map[string]map[string]any{}
 	vitalsSparklines := map[string][]map[string]any{}
 	vitalsHotspot := map[string][]map[string]any{}
@@ -1519,8 +1609,26 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = store.Close() }()
 
 		if viewMode == "sessions" {
-			total = summaryQuerySingleInt(r.Context(), store, "SELECT count() FROM (SELECT "+sessionKeyExpr+" AS session_key FROM hyperdx_sessions "+where+" GROUP BY session_key)", params...)
-			summarySQL := "SELECT " + sessionKeyExpr + " AS session_key, max(Timestamp) AS last_ts, count() AS event_count, countIf(EventName IN ('error','unhandledrejection')) AS error_count, countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'poor') AS poor_vital_count, countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'needs-improvement') AS warn_vital_count, greatest(if(countIf(EventName IN ('error','unhandledrejection')) > 0, 3, 0), if(countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'poor') > 0, 2, 0), if(countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'needs-improvement') > 0, 1, 0)) AS severity_rank, argMax(EventName, Timestamp) AS last_event_type, argMax(LogAttributes['url'], Timestamp) AS last_url, argMax(if(TraceId != '', TraceId, JSONExtractString(Body, 'traceId')), Timestamp) AS trace_id FROM hyperdx_sessions " + where + " GROUP BY session_key ORDER BY " + sortCol + " " + strings.ToUpper(sortDir) + " LIMIT ? OFFSET ?"
+			// Count distinct sessions
+			countSQL := "SELECT count() FROM (SELECT " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions " + where + " GROUP BY session_key)"
+			if where == "" {
+				countSQL = "SELECT count() FROM (SELECT " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions GROUP BY session_key)"
+			}
+			total = summaryQuerySingleInt(r.Context(), store, countSQL, params...)
+			
+			// Get session summary rows
+			summarySQL := "SELECT " + sessionKeyExpr + " AS session_key," +
+				" max(Timestamp) AS last_ts," +
+				" count() AS event_count," +
+				" countIf(EventName IN ('error','unhandledrejection')) AS error_count," +
+				" countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'poor') AS poor_vital_count," +
+				" countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'needs-improvement') AS warn_vital_count," +
+				" countIf(TraceId != '') AS traced_count," +
+				" greatest(if(countIf(EventName IN ('error','unhandledrejection')) > 0, 3, 0), if(countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'poor') > 0, 2, 0), if(countIf(EventName = 'web-vital' AND JSONExtractString(Body, 'rating') = 'needs-improvement') > 0, 1, 0)) AS severity_rank," +
+				" argMax(if(LogAttributes['url'] != '', LogAttributes['url'], LogAttributes['url.full']), Timestamp) AS last_url," +
+				" argMax(EventName, Timestamp) AS last_event_type" +
+				" FROM hyperdx_sessions " + where + " GROUP BY session_key" +
+				" ORDER BY " + sortCol + " " + strings.ToUpper(sortDir) + ", last_ts DESC LIMIT ? OFFSET ?"
 			summaryParams := append(append([]any{}, params...), limit, offset)
 			rows, queryErr := queryRows(r.Context(), store, summarySQL, summaryParams...)
 			if queryErr == nil {
@@ -1541,30 +1649,45 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 						"poor_vital_count": anyToInt(row["poor_vital_count"]),
 						"warn_vital_count": anyToInt(row["warn_vital_count"]),
 						"severity_rank":    anyToInt(row["severity_rank"]),
+						"traced_count":     anyToInt(row["traced_count"]),
 						"last_event_type":  anyToString(row["last_event_type"]),
 						"last_url":         anyToString(row["last_url"]),
-						"trace_id":         anyToString(row["trace_id"]),
-						"events_list":      []map[string]any{},
+						"trace_id":         "",
 						"has_replay":       false,
 						"has_artifact":     false,
+						"events_list":      []map[string]any{},
 					})
 				}
 
+				// Get detail events with row_rank pagination per session
 				if len(sessionKeys) > 0 {
 					placeholders := strings.TrimSuffix(strings.Repeat("?,", len(sessionKeys)), ",")
-					detailWhere := where
-					detailWhere = appendWhereClause(detailWhere, sessionKeyExpr+" IN ("+placeholders+")")
+					
+					// Build detail conditions (without WHERE keyword)
+					var detailConditions []string
+					if where != "" {
+						// Strip "WHERE " prefix if present to get just the conditions
+						condText := strings.TrimPrefix(where, "WHERE ")
+						detailConditions = append(detailConditions, condText)
+					}
+					detailConditions = append(detailConditions, sessionKeyExpr+" IN ("+placeholders+")")
+					detailWhere := "WHERE " + strings.Join(detailConditions, " AND ")
+					
 					detailParams := append(append([]any{}, params...), make([]any, 0, len(sessionKeys))...)
 					for _, sessionKey := range sessionKeys {
 						detailParams = append(detailParams, sessionKey)
 					}
-					detailSQL := "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions " + detailWhere + " ORDER BY Timestamp DESC"
+					
+					detailSQL := "SELECT Timestamp, EventName, Body, " + urlExpr + " AS url, " + traceExpr + " AS trace_id, " + spanExpr + " AS span_id, " + sessionKeyExpr + " AS session_key " +
+						"FROM hyperdx_sessions " + detailWhere + " ORDER BY session_key ASC, Timestamp DESC LIMIT ? BY session_key"
+					
+					detailParams = append(detailParams, rumSessionDetailEventCap)
 					detailRows, detailErr := queryRows(r.Context(), store, detailSQL, detailParams...)
 					if detailErr == nil {
 						eventsBySession := map[string][]map[string]any{}
 						for _, row := range detailRows {
-							sessionKey := anyToString(row["session_key"])
-							item := buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], row["TraceId"], row["SpanId"], sessionKey)
+							item := buildRUMEventItemFromRow(row)
+							sessionKey := anyToString(item["session_key"])
 							eventsBySession[sessionKey] = append(eventsBySession[sessionKey], item)
 						}
 						for i := range sessionGroups {
@@ -1581,18 +1704,24 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			total = summaryQuerySingleInt(r.Context(), store, "SELECT count() FROM hyperdx_sessions "+where, params...)
-			eventSQL := "SELECT Timestamp, EventName, Body, LogAttributes, TraceId, SpanId, " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions " + where + " ORDER BY " + sortCol + " " + strings.ToUpper(sortDir) + " LIMIT ? OFFSET ?"
+			// Events view mode
+			if where == "" {
+				total = 0 // _active_part_rows fallback for empty where
+			} else {
+				total = summaryQuerySingleInt(r.Context(), store, "SELECT COUNT(*) FROM hyperdx_sessions "+where, params...)
+			}
+			eventSQL := "SELECT Timestamp, EventName, Body, " + urlExpr + " AS url, " + traceExpr + " AS trace_id, " + spanExpr + " AS span_id, " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions " + where + " ORDER BY " + sortCol + " " + strings.ToUpper(sortDir) + " LIMIT ? OFFSET ?"
 			eventParams := append(append([]any{}, params...), limit, offset)
 			rows, queryErr := queryRows(r.Context(), store, eventSQL, eventParams...)
 			if queryErr == nil {
 				events = make([]map[string]any, 0, len(rows))
 				for _, row := range rows {
-					events = append(events, buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], row["TraceId"], row["SpanId"], anyToString(row["session_key"])))
+					events = append(events, buildRUMEventItemFromRow(row))
 				}
 			}
 		}
 
+		// Get event types
 		eventTypeRows, eventTypeErr := store.Query(r.Context(), "SELECT DISTINCT EventName FROM hyperdx_sessions ORDER BY EventName")
 		eventTypes := []string{}
 		if eventTypeErr == nil {
@@ -1607,6 +1736,7 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Get error sources
 		errorSourceRows, errorSourceErr := store.Query(r.Context(), "SELECT DISTINCT LogAttributes['errorSource'] FROM hyperdx_sessions WHERE LogAttributes['errorSource'] != '' ORDER BY LogAttributes['errorSource']")
 		errorSources := []string{}
 		if errorSourceErr == nil {
@@ -1621,39 +1751,81 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		vitalRows, vitalErr := store.Query(r.Context(), "SELECT JSONExtractString(Body, 'name') AS metric, quantileExact(0.75)(JSONExtractFloat(Body, 'value')) AS p75, count() AS cnt, countIf(JSONExtractString(Body, 'rating')='poor') AS poor_cnt, countIf(JSONExtractString(Body, 'rating')='needs-improvement') AS warn_cnt FROM hyperdx_sessions WHERE EventName='web-vital' AND Timestamp >= now() - INTERVAL 60 MINUTE GROUP BY metric")
+		// Get vitals summary from derived signals (Python uses v_derived_signals_anomaly)
+		vitalRows, vitalErr := store.Query(r.Context(), 
+			"SELECT SignalName, argMax(value, time) AS latest_value, argMax(anomaly_state, time) AS latest_state, "+
+			"toUInt64(argMax(SampleCount, time)) AS latest_count "+
+			"FROM v_derived_signals_anomaly "+
+			"WHERE SignalSource = 'rum_vitals' AND time >= now() - INTERVAL 60 MINUTE "+
+			"GROUP BY SignalName")
 		if vitalErr == nil {
 			defer vitalRows.Close()
 			for vitalRows.Next() {
-				var metric, p75, cnt, poorCnt, warnCnt any
-				if scanErr := vitalRows.Scan(&metric, &p75, &cnt, &poorCnt, &warnCnt); scanErr != nil {
+				var signalName, latestValue, latestState, latestCount any
+				if scanErr := vitalRows.Scan(&signalName, &latestValue, &latestState, &latestCount); scanErr != nil {
 					continue
 				}
-				n := anyToString(metric)
-				state := "normal"
-				if anyToInt(poorCnt) > 0 {
-					state = "outlier"
-				} else if anyToInt(warnCnt) > 0 {
-					state = "warning"
+				nm := anyToString(signalName)
+				val := anyToFloat(latestValue)
+				state := anyToString(latestState)
+				cnt := anyToInt(latestCount)
+				precision := 3
+				if nm == "CLS" {
+					precision = 3
+				} else {
+					precision = 0
 				}
-				vitalsSummary[n] = map[string]any{"p75": anyToString(p75), "count": anyToInt(cnt), "anomaly_state": state}
+				var p75Val float64
+				if precision == 3 {
+					p75Val = val
+				} else {
+					p75Val = float64(int(val))
+				}
+				vitalsSummary[nm] = map[string]any{"p75": p75Val, "count": cnt, "anomaly_state": state}
 			}
 		}
 
-		sparkRows, sparkErr := store.Query(r.Context(), "SELECT JSONExtractString(Body, 'name') AS metric, toStartOfMinute(Timestamp) AS bucket, avg(JSONExtractFloat(Body, 'value')) AS avg_val FROM hyperdx_sessions WHERE EventName='web-vital' AND Timestamp >= now() - INTERVAL 60 MINUTE GROUP BY metric, bucket ORDER BY metric, bucket")
+		// Get vitals sparklines from derived signals (Python uses v_derived_signals_1m)
+		sparkRows, sparkErr := store.Query(r.Context(),
+			"SELECT SignalName, MinuteBucket, Value, SampleCount "+
+			"FROM v_derived_signals_1m "+
+			"WHERE SignalSource = 'rum_vitals' AND MinuteBucket >= now() - INTERVAL 60 MINUTE "+
+			"ORDER BY SignalName, MinuteBucket")
 		if sparkErr == nil {
 			defer sparkRows.Close()
 			for sparkRows.Next() {
-				var metric, bucket, avgVal any
-				if scanErr := sparkRows.Scan(&metric, &bucket, &avgVal); scanErr != nil {
+				var signalName, minuteBucket, value, sampleCount any
+				if scanErr := sparkRows.Scan(&signalName, &minuteBucket, &value, &sampleCount); scanErr != nil {
 					continue
 				}
-				n := anyToString(metric)
-				vitalsSparklines[n] = append(vitalsSparklines[n], map[string]any{"t": anyToString(bucket), "v": anyToString(avgVal)})
+				nm := anyToString(signalName)
+				val := anyToFloat(value)
+				precision := 3
+				if nm == "CLS" {
+					precision = 3
+				} else {
+					precision = 1
+				}
+				var rounded float64
+				if precision == 3 {
+					rounded = val
+				} else {
+					rounded = float64(int(val*10)) / 10
+				}
+				vitalsSparklines[nm] = append(vitalsSparklines[nm], map[string]any{"t": anyToString(minuteBucket), "v": rounded})
 			}
 		}
 
-		hotspotRows, hotspotErr := store.Query(r.Context(), "SELECT JSONExtractString(Body, 'name') AS metric, LogAttributes['url'] AS url, count() AS total, countIf(JSONExtractString(Body, 'rating') = 'poor') AS poor_count, round(toFloat64(poor_count) / toFloat64(total), 3) AS poor_rate, round(quantileExact(0.75)(JSONExtractFloat(Body, 'value')), 1) AS p75 FROM hyperdx_sessions WHERE EventName = 'web-vital' AND Timestamp >= now() - INTERVAL 24 HOUR GROUP BY metric, url HAVING total >= 3 ORDER BY metric ASC, poor_rate DESC, total DESC LIMIT 60")
+		// Get vitals hotspot
+		hotspotRows, hotspotErr := store.Query(r.Context(),
+			"SELECT JSONExtractString(Body, 'name') AS metric, LogAttributes['url'] AS url, count() AS total, "+
+			"countIf(JSONExtractString(Body, 'rating') = 'poor') AS poor_count, "+
+			"round(toFloat64(poor_count) / toFloat64(total), 3) AS poor_rate, "+
+			"round(quantileExact(0.75)(JSONExtractFloat(Body, 'value')), 1) AS p75 "+
+			"FROM hyperdx_sessions "+
+			"WHERE EventName = 'web-vital' AND Timestamp >= now() - INTERVAL 24 HOUR "+
+			"GROUP BY metric, url HAVING total >= 3 "+
+			"ORDER BY metric ASC, poor_rate DESC, total DESC LIMIT 60")
 		if hotspotErr == nil {
 			defer hotspotRows.Close()
 			for hotspotRows.Next() {
@@ -1680,7 +1852,12 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		trendRows, trendErr := store.Query(r.Context(), "SELECT countIf(Timestamp >= now() - INTERVAL 30 MINUTE) AS recent, countIf(Timestamp >= now() - INTERVAL 60 MINUTE AND Timestamp < now() - INTERVAL 30 MINUTE) AS prior FROM hyperdx_sessions WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 60 MINUTE")
+		// Get error trend
+		trendRows, trendErr := store.Query(r.Context(),
+			"SELECT countIf(Timestamp >= now() - INTERVAL 30 MINUTE) AS recent, "+
+			"countIf(Timestamp >= now() - INTERVAL 60 MINUTE AND Timestamp < now() - INTERVAL 30 MINUTE) AS prior "+
+			"FROM hyperdx_sessions "+
+			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 60 MINUTE")
 		if trendErr == nil {
 			defer trendRows.Close()
 			if trendRows.Next() {
@@ -1703,7 +1880,12 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		typeRows, typeErr := store.Query(r.Context(), "SELECT EventName, count() AS cnt FROM hyperdx_sessions WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR GROUP BY EventName")
+		// Get error type counts
+		typeRows, typeErr := store.Query(r.Context(),
+			"SELECT EventName, count() AS cnt "+
+			"FROM hyperdx_sessions "+
+			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
+			"GROUP BY EventName")
 		if typeErr == nil {
 			defer typeRows.Close()
 			totalErr := 0
@@ -1721,7 +1903,15 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			errorStats["by_type"] = byType
 		}
 
-		sparkErrRows, sparkErrQuery := store.Query(r.Context(), "SELECT mb, cnt FROM (SELECT toStartOfMinute(Timestamp) AS mb, count() AS cnt FROM hyperdx_sessions WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 180 MINUTE GROUP BY mb) ORDER BY mb WITH FILL FROM toStartOfMinute(now() - INTERVAL 180 MINUTE) TO toStartOfMinute(now()) STEP toIntervalMinute(1)")
+		// Get error sparkline
+		sparkErrRows, sparkErrQuery := store.Query(r.Context(),
+			"SELECT mb, cnt FROM "+
+			"(SELECT toStartOfMinute(Timestamp) AS mb, count() AS cnt "+
+			"FROM hyperdx_sessions "+
+			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 180 MINUTE "+
+			"GROUP BY mb) "+
+			"ORDER BY mb "+
+			"WITH FILL FROM toStartOfMinute(now() - INTERVAL 180 MINUTE) TO toStartOfMinute(now()) STEP toIntervalMinute(1)")
 		if sparkErrQuery == nil {
 			defer sparkErrRows.Close()
 			errSpark := []map[string]any{}
@@ -1735,7 +1925,13 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			errorStats["sparkline"] = errSpark
 		}
 
-		topMsgRows, topMsgErr := store.Query(r.Context(), "SELECT JSONExtractString(Body, 'message') AS message, count() AS cnt FROM hyperdx_sessions WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR AND JSONExtractString(Body, 'message') != '' GROUP BY message ORDER BY cnt DESC LIMIT 8")
+		// Get top error messages
+		topMsgRows, topMsgErr := store.Query(r.Context(),
+			"SELECT JSONExtractString(Body, 'message') AS message, count() AS cnt "+
+			"FROM hyperdx_sessions "+
+			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
+			"AND JSONExtractString(Body, 'message') != '' "+
+			"GROUP BY message ORDER BY cnt DESC LIMIT 8")
 		if topMsgErr == nil {
 			defer topMsgRows.Close()
 			msgs := []map[string]any{}
@@ -1749,7 +1945,13 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			errorStats["top_messages"] = msgs
 		}
 
-		topURLRows, topURLErr := store.Query(r.Context(), "SELECT LogAttributes['url'] AS url, count() AS cnt FROM hyperdx_sessions WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR AND LogAttributes['url'] != '' GROUP BY url ORDER BY cnt DESC LIMIT 5")
+		// Get top error URLs
+		topURLRows, topURLErr := store.Query(r.Context(),
+			"SELECT LogAttributes['url'] AS url, count() AS cnt "+
+			"FROM hyperdx_sessions "+
+			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
+			"AND LogAttributes['url'] != '' "+
+			"GROUP BY url ORDER BY cnt DESC LIMIT 5")
 		if topURLErr == nil {
 			defer topURLRows.Close()
 			urls := []map[string]any{}
@@ -1763,7 +1965,7 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			errorStats["top_urls"] = urls
 		}
 
-		ctx := pongo2.Context{
+		ctx := renderContext{
 			"title":                 "RUM",
 			"mobile_breakpoint_max": "575.98px",
 			"request":               map[string]any{"endpoint": "rum"},
@@ -1786,13 +1988,14 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 			"from_ts":               fromTS,
 			"to_ts":                 toTS,
 			"q":                     q,
-			"error_msg":             "",
+			"error_msg":             qError,
 		}
 		s.renderTemplate(w, "rum.html", ctx)
 		return
 	}
 
-	ctx := pongo2.Context{
+	// Error opening store - render with empty data
+	ctx := renderContext{
 		"title":                 "RUM",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "rum"},
@@ -1824,7 +2027,7 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		"from_ts":   fromTS,
 		"to_ts":     toTS,
 		"q":         q,
-		"error_msg": "",
+		"error_msg": qError,
 	}
 	s.renderTemplate(w, "rum.html", ctx)
 }
@@ -1841,7 +2044,7 @@ func (s *Server) rumHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "rum_help.html", pongo2.Context{"title": "RUM Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "rum/help"}})
+	s.renderTemplate(w, "rum_help.html", renderContext{"title": "RUM Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "rum/help"}})
 }
 func (s *Server) webTrafficPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/web-traffic" {
@@ -1899,7 +2102,7 @@ func (s *Server) webTrafficPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	enrichmentSettings := s.settingsService.Enrichment()
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                 "Web Traffic",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "web-traffic", "args": map[string]any{"from_ts": fromTS, "to_ts": toTS}},
@@ -1939,20 +2142,13 @@ func appendWhereClause(where string, clause string) string {
 }
 
 func parseJSONMap(raw string) map[string]any {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return map[string]any{}
-	}
-	out := map[string]any{}
-	if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
-		return out
-	}
-	return map[string]any{"message": raw}
+	return parseJSONValue(raw)
 }
 
 func buildRUMEventItem(ts any, eventName any, body any, logAttrs any, traceID any, spanID any, sessionKey string) map[string]any {
-	data := parseJSONMap(anyToString(body))
-	attrs := parseStringMap(anyToString(logAttrs))
+	bodyRaw := anyToString(body)
+	data := parseJSONValue(body)
+	attrs := parseStringMap(logAttrs)
 	trace := anyToString(traceID)
 	if trace == "" {
 		trace = anyToString(data["traceId"])
@@ -1970,6 +2166,10 @@ func buildRUMEventItem(ts any, eventName any, body any, logAttrs any, traceID an
 	url := strings.TrimSpace(attrs["url"])
 	if url == "" {
 		url = strings.TrimSpace(attrs["url.full"])
+	}
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		sessionKey = rumSessionKeyFromAttrs(attrs, anyToString(ts), bodyRaw, data)
 	}
 	service := anyToString(data["service"])
 	hasArtifact := nestedHasIDOrURL(data["artifact"])
@@ -1989,16 +2189,104 @@ func buildRUMEventItem(ts any, eventName any, body any, logAttrs any, traceID an
 	}
 }
 
-func parseStringMap(raw string) map[string]string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return map[string]string{}
+func buildRUMEventItemFromRow(row map[string]any) map[string]any {
+	traceID := row["TraceId"]
+	if traceID == nil {
+		traceID = row["trace_id"]
 	}
-	out := map[string]string{}
-	if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+	spanID := row["SpanId"]
+	if spanID == nil {
+		spanID = row["span_id"]
+	}
+	item := buildRUMEventItem(row["Timestamp"], row["EventName"], row["Body"], row["LogAttributes"], traceID, spanID, anyToString(row["session_key"]))
+	if url := strings.TrimSpace(anyToString(row["url"])); url != "" {
+		item["url"] = url
+	}
+	service := strings.TrimSpace(anyToString(row["ServiceName"]))
+	if service == "" {
+		service = strings.TrimSpace(anyToString(row["service"]))
+	}
+	if service != "" {
+		item["service"] = service
+		if data, ok := item["data"].(map[string]any); ok {
+			if strings.TrimSpace(anyToString(data["service"])) == "" {
+				data["service"] = service
+			}
+		}
+	}
+	return item
+}
+
+func parseStringMap(raw any) map[string]string {
+	switch typed := raw.(type) {
+	case nil:
+		return map[string]string{}
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, value := range typed {
+			out[key] = value
+		}
 		return out
+	case map[string]any:
+		out := make(map[string]string, len(typed))
+		for key, value := range typed {
+			out[key] = anyToString(value)
+		}
+		return out
+	case []byte:
+		return parseStringMap(string(typed))
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return map[string]string{}
+		}
+		out := map[string]string{}
+		if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+			return out
+		}
 	}
 	return map[string]string{}
+}
+
+func parseJSONValue(raw any) map[string]any {
+	switch typed := raw.(type) {
+	case nil:
+		return map[string]any{}
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, value := range typed {
+			out[key] = value
+		}
+		return out
+	case []byte:
+		return parseJSONValue(string(typed))
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return map[string]any{}
+		}
+		out := map[string]any{}
+		if err := json.Unmarshal([]byte(trimmed), &out); err == nil {
+			return out
+		}
+		return map[string]any{"message": typed}
+	default:
+		return map[string]any{"message": anyToString(raw)}
+	}
+}
+
+func rumSessionKeyFromAttrs(attrs map[string]string, ts string, bodyRaw string, data map[string]any) string {
+	if sessionID := strings.TrimSpace(attrs["sessionId"]); sessionID != "" {
+		return sessionID
+	}
+	if sessionID := strings.TrimSpace(attrs["session.id"]); sessionID != "" {
+		return sessionID
+	}
+	if sessionID := strings.TrimSpace(anyToString(data["sessionId"])); sessionID != "" {
+		return sessionID
+	}
+	hash := md5.Sum([]byte(ts + "|" + bodyRaw))
+	return "anon:" + fmt.Sprintf("%x", hash)[:16]
 }
 
 func nestedHasIDOrURL(value any) bool {
@@ -2087,7 +2375,7 @@ func (s *Server) webTrafficHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "web_traffic_help.html", pongo2.Context{"title": "Web Traffic Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "web-traffic/help"}})
+	s.renderTemplate(w, "web_traffic_help.html", renderContext{"title": "Web Traffic Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "web-traffic/help"}})
 }
 func (s *Server) workItemsPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/work-items" {
@@ -2183,7 +2471,7 @@ func (s *Server) workItemsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                 "Work Items",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "work-items"},
@@ -2214,7 +2502,7 @@ func (s *Server) workItemsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "work_items_help.html", pongo2.Context{"title": "Work Items Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "work-items/help"}})
+	s.renderTemplate(w, "work_items_help.html", renderContext{"title": "Work Items Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "work-items/help"}})
 }
 func (s *Server) aiPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/ai" {
@@ -2368,7 +2656,7 @@ func (s *Server) aiPage(w http.ResponseWriter, r *http.Request) {
 	operations = uniqueSortedStrings(operations)
 	spanNames = uniqueSortedStrings(spanNames)
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                   "AI",
 		"mobile_breakpoint_max":   "575.98px",
 		"request":                 map[string]any{"endpoint": "ai"},
@@ -2421,7 +2709,7 @@ func (s *Server) aiHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "ai_help.html", pongo2.Context{"title": "AI Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "ai/help"}})
+	s.renderTemplate(w, "ai_help.html", renderContext{"title": "AI Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "ai/help"}})
 }
 func (s *Server) reportsPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/reports" {
@@ -2449,7 +2737,7 @@ func (s *Server) reportsPage(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                 "Reports",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "reports"},
@@ -2470,7 +2758,7 @@ func (s *Server) reportsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "reports_help.html", pongo2.Context{"title": "Reports Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "reports/help"}})
+	s.renderTemplate(w, "reports_help.html", renderContext{"title": "Reports Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "reports/help"}})
 }
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings" {
@@ -2493,7 +2781,7 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	dmSettings := s.dataManagementService.GetSettings()
 	k8sSettings := s.kubernetesService.GetSettings()
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                        "Settings",
 		"mobile_breakpoint_max":        "575.98px",
 		"request":                      map[string]any{"endpoint": "settings"},
@@ -2524,7 +2812,7 @@ func (s *Server) settingsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_help.html", pongo2.Context{"title": "Settings Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help"}})
+	s.renderTemplate(w, "settings_help.html", renderContext{"title": "Settings Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help"}})
 }
 func (s *Server) settingsAIHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/ai" {
@@ -2539,7 +2827,7 @@ func (s *Server) settingsAIHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_ai_help.html", pongo2.Context{"title": "Settings AI Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/ai"}})
+	s.renderTemplate(w, "settings_ai_help.html", renderContext{"title": "Settings AI Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/ai"}})
 }
 func (s *Server) settingsAgentsHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/agents" {
@@ -2554,7 +2842,7 @@ func (s *Server) settingsAgentsHelpPage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_agents_help.html", pongo2.Context{"title": "Settings Agents Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/agents"}})
+	s.renderTemplate(w, "settings_agents_help.html", renderContext{"title": "Settings Agents Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/agents"}})
 }
 func (s *Server) settingsDataManagementHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/data-management" {
@@ -2569,7 +2857,7 @@ func (s *Server) settingsDataManagementHelpPage(w http.ResponseWriter, r *http.R
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "data_management_help.html", pongo2.Context{"title": "Data Management Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/data-management"}})
+	s.renderTemplate(w, "data_management_help.html", renderContext{"title": "Data Management Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/data-management"}})
 }
 func (s *Server) settingsEnrichmentHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/enrichment" {
@@ -2584,7 +2872,7 @@ func (s *Server) settingsEnrichmentHelpPage(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_enrichment_help.html", pongo2.Context{"title": "Settings Enrichment Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/enrichment"}})
+	s.renderTemplate(w, "settings_enrichment_help.html", renderContext{"title": "Settings Enrichment Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/enrichment"}})
 }
 func (s *Server) settingsKubernetesHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/kubernetes" {
@@ -2599,7 +2887,7 @@ func (s *Server) settingsKubernetesHelpPage(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "kubernetes_help.html", pongo2.Context{"title": "Kubernetes Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/kubernetes"}})
+	s.renderTemplate(w, "kubernetes_help.html", renderContext{"title": "Kubernetes Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/kubernetes"}})
 }
 func (s *Server) settingsMaskingHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/masking" {
@@ -2614,7 +2902,7 @@ func (s *Server) settingsMaskingHelpPage(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "masking_help.html", pongo2.Context{"title": "Masking Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/masking"}})
+	s.renderTemplate(w, "masking_help.html", renderContext{"title": "Masking Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/masking"}})
 }
 func (s *Server) settingsNotificationsHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/notifications" {
@@ -2629,7 +2917,7 @@ func (s *Server) settingsNotificationsHelpPage(w http.ResponseWriter, r *http.Re
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_notifications_help.html", pongo2.Context{"title": "Notifications Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/notifications"}})
+	s.renderTemplate(w, "settings_notifications_help.html", renderContext{"title": "Notifications Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/notifications"}})
 }
 func (s *Server) settingsRepositoriesHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/repositories" {
@@ -2644,7 +2932,7 @@ func (s *Server) settingsRepositoriesHelpPage(w http.ResponseWriter, r *http.Req
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_repositories_help.html", pongo2.Context{"title": "Repositories Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/repositories"}})
+	s.renderTemplate(w, "settings_repositories_help.html", renderContext{"title": "Repositories Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/repositories"}})
 }
 func (s *Server) settingsTagsHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/help/tags" {
@@ -2659,7 +2947,7 @@ func (s *Server) settingsTagsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "settings_tags_help.html", pongo2.Context{"title": "Tags Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/tags"}})
+	s.renderTemplate(w, "settings_tags_help.html", renderContext{"title": "Tags Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "settings/help/tags"}})
 }
 func (s *Server) settingsNotificationsPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/settings/notifications" {
@@ -2717,7 +3005,7 @@ func (s *Server) settingsNotificationsPage(w http.ResponseWriter, r *http.Reques
 		vapidKeySource = "db"
 	}
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                 "Settings Notifications",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "settings/notifications"},
@@ -2754,7 +3042,7 @@ func (s *Server) queryPage(w http.ResponseWriter, r *http.Request) {
 	tables := s.listTableNames(r.Context())
 	defaultSQL := suggestSQLForQuestion("show recent errors", tables)
 
-	ctx := pongo2.Context{
+	ctx := renderContext{
 		"title":                 "Query",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "query"},
@@ -2778,7 +3066,7 @@ func (s *Server) queryHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "query_help.html", pongo2.Context{"title": "Query Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "query/help"}})
+	s.renderTemplate(w, "query_help.html", renderContext{"title": "Query Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "query/help"}})
 }
 func (s *Server) metricsHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/metrics/help" {
@@ -2793,7 +3081,7 @@ func (s *Server) metricsHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "metrics_help.html", pongo2.Context{"title": "Metrics Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help"}})
+	s.renderTemplate(w, "metrics_help.html", renderContext{"title": "Metrics Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help"}})
 }
 func (s *Server) metricsRulesHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/metrics/help/rules" {
@@ -2808,7 +3096,7 @@ func (s *Server) metricsRulesHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "metrics_rules_help.html", pongo2.Context{"title": "Metrics Rules Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/rules"}})
+	s.renderTemplate(w, "metrics_rules_help.html", renderContext{"title": "Metrics Rules Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/rules"}})
 }
 func (s *Server) metricsRulesAutoHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/metrics/help/rules/auto" {
@@ -2823,7 +3111,7 @@ func (s *Server) metricsRulesAutoHelpPage(w http.ResponseWriter, r *http.Request
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "auto_metrics_rules_help.html", pongo2.Context{"title": "Auto Metrics Rules Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/rules/auto"}})
+	s.renderTemplate(w, "auto_metrics_rules_help.html", renderContext{"title": "Auto Metrics Rules Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/rules/auto"}})
 }
 func (s *Server) metricsAnomalyHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/metrics/help/anomaly" {
@@ -2838,7 +3126,7 @@ func (s *Server) metricsAnomalyHelpPage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "metrics_anomaly_help.html", pongo2.Context{"title": "Metrics Anomaly Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/anomaly"}})
+	s.renderTemplate(w, "metrics_anomaly_help.html", renderContext{"title": "Metrics Anomaly Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "metrics/help/anomaly"}})
 }
 func (s *Server) setupPlaybooksHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/setup/help/playbooks" {
@@ -2853,7 +3141,7 @@ func (s *Server) setupPlaybooksHelpPage(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "setup_playbooks_help.html", pongo2.Context{"title": "Setup Playbooks Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "setup/help/playbooks"}})
+	s.renderTemplate(w, "setup_playbooks_help.html", renderContext{"title": "Setup Playbooks Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "setup/help/playbooks"}})
 }
 func (s *Server) chartEditorHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/dashboards/help/chart-editor" {
@@ -2868,7 +3156,7 @@ func (s *Server) chartEditorHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "chart_editor_help.html", pongo2.Context{"title": "Chart Editor Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "dashboards/help/chart-editor"}})
+	s.renderTemplate(w, "chart_editor_help.html", renderContext{"title": "Chart Editor Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "dashboards/help/chart-editor"}})
 }
 func (s *Server) kubernetesHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/kubernetes/help" {
@@ -2883,7 +3171,7 @@ func (s *Server) kubernetesHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "kubernetes_help.html", pongo2.Context{"title": "Kubernetes Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "kubernetes/help"}})
+	s.renderTemplate(w, "kubernetes_help.html", renderContext{"title": "Kubernetes Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "kubernetes/help"}})
 }
 func (s *Server) cveHelpPage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/cve/help" {
@@ -2898,7 +3186,7 @@ func (s *Server) cveHelpPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template error", http.StatusInternalServerError)
 		return
 	}
-	s.renderTemplate(w, "cve_help.html", pongo2.Context{"title": "CVE Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "cve/help"}})
+	s.renderTemplate(w, "cve_help.html", renderContext{"title": "CVE Help", "mobile_breakpoint_max": "575.98px", "request": map[string]any{"endpoint": "cve/help"}})
 }
 
 func toStringSliceAny(value any) []string {

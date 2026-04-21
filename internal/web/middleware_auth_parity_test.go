@@ -80,7 +80,6 @@ func TestV1IngestRequiresAPIKeyWhenConfigured(t *testing.T) {
 	t.Setenv("SOBS_API_KEY", "abc123")
 
 	srv := newParityTestServer()
-	srv.cfg.EnforceAPIAuth = true
 
 	noKeyReq := httptest.NewRequest(http.MethodPost, "http://example.com/v1/traces", nil)
 	noKeyRec := httptest.NewRecorder()

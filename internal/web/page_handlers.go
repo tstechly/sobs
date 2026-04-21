@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/abartrim/sobs/internal/extensionpoints"
-	"github.com/flosch/pongo2/v6"
 )
 
 const (
@@ -95,7 +94,7 @@ func (s *Server) pageLogsHandler(w http.ResponseWriter, r *http.Request) {
 		queryWhere, queryParams = appendLogsRegexWhere(queryWhere, queryParams, includePatterns, excludePatterns)
 	}
 	if errMsg != "" {
-		s.renderTemplate(w, "logs.html", pongo2.Context{
+		s.renderTemplate(w, "logs.html", renderContext{
 			"title":                      "Logs",
 			"mobile_breakpoint_max":      "575.98px",
 			"request":                    map[string]any{"endpoint": "logs", "args": map[string]any{"stats": r.URL.Query().Get("stats"), "stats_updated": r.URL.Query().Get("stats_updated")}},
@@ -149,7 +148,7 @@ func (s *Server) pageLogsHandler(w http.ResponseWriter, r *http.Request) {
 		advancedAnalysis = s.queryAdvancedLogAnalysis(r, queryWhere, queryParams, levelStats, serviceStats)
 	}
 
-	s.renderTemplate(w, "logs.html", pongo2.Context{
+	s.renderTemplate(w, "logs.html", renderContext{
 		"title":                      "Logs",
 		"mobile_breakpoint_max":      "575.98px",
 		"request":                    map[string]any{"endpoint": "logs", "args": map[string]any{"stats": r.URL.Query().Get("stats"), "stats_updated": r.URL.Query().Get("stats_updated")}},
@@ -254,7 +253,7 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 
 	where, params, errMsg := buildErrorsWhereClause(selectedServices, fromTS, toTS, q)
 	if errMsg != "" {
-		s.renderTemplate(w, "errors.html", pongo2.Context{
+		s.renderTemplate(w, "errors.html", renderContext{
 			"title":                 "Errors",
 			"mobile_breakpoint_max": "575.98px",
 			"request":               map[string]any{"endpoint": "errors"},
@@ -295,7 +294,7 @@ func (s *Server) pageErrorsHandler(w http.ResponseWriter, r *http.Request) {
 
 	workItemLinks := s.loadErrorWorkItemLinks(r, rows)
 
-	s.renderTemplate(w, "errors.html", pongo2.Context{
+	s.renderTemplate(w, "errors.html", renderContext{
 		"title":                 "Errors",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "errors"},
@@ -385,7 +384,7 @@ func (s *Server) pageTracesHandler(w http.ResponseWriter, r *http.Request) {
 		total = anyToInt(traceDetail["total_spans"])
 	}
 
-	s.renderTemplate(w, "traces.html", pongo2.Context{
+	s.renderTemplate(w, "traces.html", renderContext{
 		"title":                 "Traces",
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": "traces"},
@@ -1862,7 +1861,7 @@ func (s *Server) renderPageError(w http.ResponseWriter, pageName string, err err
 }
 
 func (s *Server) renderPageWithError(w http.ResponseWriter, templateName, pageName, errMsg string, services, levels []string) {
-	s.renderTemplate(w, templateName, pongo2.Context{
+	s.renderTemplate(w, templateName, renderContext{
 		"title":                 strings.Title(pageName),
 		"mobile_breakpoint_max": "575.98px",
 		"request":               map[string]any{"endpoint": pageName},
@@ -1872,7 +1871,7 @@ func (s *Server) renderPageWithError(w http.ResponseWriter, templateName, pageNa
 	})
 }
 
-func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, ctx pongo2.Context) {
+func (s *Server) renderTemplate(w http.ResponseWriter, templateName string, ctx renderContext) {
 	body, err := s.renderer.Render(templateName, ctx)
 	if err != nil {
 		http.Error(w, "template error", http.StatusInternalServerError)

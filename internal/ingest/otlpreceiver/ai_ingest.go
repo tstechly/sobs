@@ -22,10 +22,7 @@ type AIIngestRequest struct {
 }
 
 func normalizeAIIngestRequest(payload map[string]any) *AIIngestRequest {
-	ts := stringAny(payload["timestamp"])
-	if ts == "" {
-		ts = nowISO()
-	}
+	ts := normalizeIngestTimestamp(stringAny(payload["timestamp"]))
 	model := stringAny(payload["model"])
 	operation := strings.TrimSpace(strings.ToLower(stringAny(payload["operation"])))
 	if operation == "" {

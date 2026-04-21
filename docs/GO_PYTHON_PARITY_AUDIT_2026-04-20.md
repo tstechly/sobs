@@ -11,6 +11,10 @@
 
 ## 1. Page Routes (HTML pages)
 
+## Follow-up plans
+
+- RUM ingestion parity execution plan: [docs/parity/RUM_INGEST_PARITY_IMPLEMENTATION_PLAN_2026-04-20.md](docs/parity/RUM_INGEST_PARITY_IMPLEMENTATION_PLAN_2026-04-20.md)
+
 ### [SEVERITY: LOW] Route: GET /settings
 
 **Python:** Renders `settings.html` with a rich context: `tag_rule_count`, `anomaly_rule_count`, `agent_rule_count`, `ai_configured` (bool from endpoint_url+model), `notification_channel_count`, `notification_rule_count`, `masking_custom_key_count`, `masking_custom_pattern_count`, `kubernetes_view_enabled`, `backup_enabled`, and `query_allowed_tables` (sorted list of allowed SQL table names).
