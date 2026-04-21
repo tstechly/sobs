@@ -462,51 +462,63 @@ func recordIDForSpan(traceID string, spanID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// anyValueToString converts an OTel AnyValue to its string representation.
-// Complex types (array, kvlist) are JSON-encoded, matching _stringify_attrs.
-func anyValueToString(val *commonv1.AnyValue) string {
+// anyValueToNative converts an OTel AnyValue to its native Go representation,
+// preserving nested array and kvlist member types until final stringification.
+func anyValueToNative(val *commonv1.AnyValue) any {
 	if val == nil {
-		return ""
+		return nil
 	}
 	switch v := val.GetValue().(type) {
 	case *commonv1.AnyValue_StringValue:
 		return v.StringValue
 	case *commonv1.AnyValue_IntValue:
-		return fmt.Sprintf("%d", v.IntValue)
+		return v.IntValue
 	case *commonv1.AnyValue_DoubleValue:
-		return fmt.Sprintf("%g", v.DoubleValue)
+		return v.DoubleValue
 	case *commonv1.AnyValue_BoolValue:
-		if v.BoolValue {
-			return "true"
-		}
-		return "false"
+		return v.BoolValue
 	case *commonv1.AnyValue_BytesValue:
 		return base64.StdEncoding.EncodeToString(v.BytesValue)
 	case *commonv1.AnyValue_ArrayValue:
 		parts := make([]any, 0)
 		if v.ArrayValue != nil {
 			for _, item := range v.ArrayValue.Values {
-				parts = append(parts, anyValueToString(item))
+				parts = append(parts, anyValueToNative(item))
 			}
 		}
-		b, _ := json.Marshal(parts)
-		return string(b)
+		return parts
 	case *commonv1.AnyValue_KvlistValue:
-		m := kvListToStringMap(v.KvlistValue.GetValues())
-		b, _ := json.Marshal(m)
-		return string(b)
+		out := make(map[string]any, len(v.KvlistValue.GetValues()))
+		for _, item := range v.KvlistValue.GetValues() {
+			out[item.GetKey()] = anyValueToNative(item.GetValue())
+		}
+		return out
+	default:
+		return nil
 	}
-	return ""
+}
+
+// anyValueToString converts an OTel AnyValue to its string representation,
+// matching Python's _proto_any_value_to_python + _stringify_attrs behavior.
+func anyValueToString(val *commonv1.AnyValue) string {
+	native := anyValueToNative(val)
+	if native == nil {
+		return ""
+	}
+	if text, ok := native.(string); ok {
+		return text
+	}
+	return stringAny(native)
 }
 
 // kvListToStringMap converts a proto KeyValue list to map[string]string,
 // matching Python's _proto_kvlist_to_dict + _stringify_attrs.
 func kvListToStringMap(attrs []*commonv1.KeyValue) map[string]string {
-	out := make(map[string]string, len(attrs))
+	raw := make(map[string]any, len(attrs))
 	for _, kv := range attrs {
-		out[kv.GetKey()] = anyValueToString(kv.GetValue())
+		raw[kv.GetKey()] = anyValueToNative(kv.GetValue())
 	}
-	return out
+	return stringifyAttrs(raw)
 }
 
 // severityNumber maps a severity text to its OTel severity number,
@@ -753,8 +765,8 @@ func (p *StorePipeline) ConsumeLogs(ctx context.Context, req *collogspb.ExportLo
 					"ResourceSchemaUrl":  "",
 					"ResourceAttributes": resourceAttrs,
 					"ScopeSchemaUrl":     "",
-					"ScopeName":          scope.GetName(),
-					"ScopeVersion":       scope.GetVersion(),
+					"ScopeName":          "",
+					"ScopeVersion":       "",
 					"ScopeAttributes":    scopeAttrs,
 					"LogAttributes":      merged,
 					"EventName":          merged["event.name"],
@@ -1087,7 +1099,7 @@ func (p *StorePipeline) ConsumeErrorsV1(ctx context.Context, req *ErrorIngestReq
 		"Timestamp":          ts,
 		"TraceId":            req.TraceID,
 		"SpanId":             req.SpanID,
-		"TraceFlags":         req.TraceFlags,
+		"TraceFlags":         0,
 		"SeverityText":       "ERROR",
 		"SeverityNumber":     severityNumber("ERROR"),
 		"ServiceName":        req.Service,

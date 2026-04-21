@@ -34,7 +34,7 @@ func normalizeErrorIngestRequest(payload map[string]any) *ErrorIngestRequest {
 		Timestamp:      ts,
 		TraceID:        stringAny(payload["trace_id"]),
 		SpanID:         stringAny(payload["span_id"]),
-		TraceFlags:     intAny(payload["trace_flags"]),
+		TraceFlags:     0,
 		Service:        stringAny(payload["service"]),
 		Message:        message,
 		ExceptionType:  exceptionType,

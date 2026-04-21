@@ -485,6 +485,9 @@ func TestHTTPAcceptErrorsReturnsOK(t *testing.T) {
 	if pipeline.lastError.ExceptionType != "ReferenceError" || pipeline.lastError.Message != "boom" {
 		t.Fatalf("unexpected normalized error request: %#v", pipeline.lastError)
 	}
+	if pipeline.lastError.TraceFlags != 0 {
+		t.Fatalf("expected direct error trace flags to normalize to 0, got %#v", pipeline.lastError)
+	}
 	if pipeline.lastError.Attributes["release"] != "2024.01.01" || pipeline.lastError.Attributes["handled"] != "false" {
 		t.Fatalf("unexpected normalized error attributes: %#v", pipeline.lastError.Attributes)
 	}

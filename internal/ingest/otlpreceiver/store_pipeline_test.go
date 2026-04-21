@@ -457,6 +457,7 @@ func TestStorePipelineErrorsV1PersistsLogsAndTags(t *testing.T) {
 	for _, expected := range []string{
 		"INSERT INTO otel_logs",
 		`"Timestamp":"2024-01-01 00:00:00.000000"`,
+		`"TraceFlags":0`,
 		`"SeverityText":"ERROR"`,
 		`"ServiceName":"svc-errors"`,
 		`"Body":"boom"`,
@@ -476,6 +477,115 @@ func TestStorePipelineErrorsV1PersistsLogsAndTags(t *testing.T) {
 	}
 	if strings.Contains(joined, "INSERT INTO sobs_ingest_opaque") {
 		t.Fatalf("expected /v1/errors to bypass opaque staging, got:\n%s", joined)
+	}
+	if strings.Contains(joined, `"TraceFlags":1`) {
+		t.Fatalf("expected direct errors to persist TraceFlags=0 like Python, got:\n%s", joined)
+	}
+}
+
+func TestStorePipelineLogIngestPreservesStructuredAnyValueBodiesAndBlankScopeMetadata(t *testing.T) {
+	store := &captureStore{}
+	factory := &captureStoreFactory{store: store}
+	pipeline := NewStorePipeline(factory).(*StorePipeline)
+
+	req := &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logsv1.ResourceLogs{{
+			Resource: &resourcev1.Resource{Attributes: []*commonv1.KeyValue{{
+				Key: "service.name", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_StringValue{StringValue: "svc-logs-structured"}},
+			}}},
+			ScopeLogs: []*logsv1.ScopeLogs{{
+				Scope: &commonv1.InstrumentationScope{
+					Name:    "structured-logger",
+					Version: "1.2.3",
+				},
+				LogRecords: []*logsv1.LogRecord{{
+					TimeUnixNano: 1713520800000000000,
+					Body: &commonv1.AnyValue{Value: &commonv1.AnyValue_KvlistValue{KvlistValue: &commonv1.KeyValueList{Values: []*commonv1.KeyValue{
+						{Key: "count", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_IntValue{IntValue: 7}}},
+						{Key: "ok", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_BoolValue{BoolValue: true}}},
+					}}}},
+					Attributes: []*commonv1.KeyValue{
+						{Key: "request.payload", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_KvlistValue{KvlistValue: &commonv1.KeyValueList{Values: []*commonv1.KeyValue{
+							{Key: "count", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_IntValue{IntValue: 7}}},
+							{Key: "ok", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_BoolValue{BoolValue: true}}},
+						}}}}},
+						{Key: "request.items", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_ArrayValue{ArrayValue: &commonv1.ArrayValue{Values: []*commonv1.AnyValue{
+							{Value: &commonv1.AnyValue_IntValue{IntValue: 1}},
+							{Value: &commonv1.AnyValue_BoolValue{BoolValue: true}},
+							{Value: &commonv1.AnyValue_StringValue{StringValue: "x"}},
+						}}}}},
+					},
+				}},
+			}},
+		}},
+	}
+
+	if err := pipeline.ConsumeLogs(context.Background(), req); err != nil {
+		t.Fatalf("consume logs: %v", err)
+	}
+
+	joined := strings.Join(store.execs, "\n")
+	for _, expected := range []string{
+		`"Body":"{\"count\":7,\"ok\":true}"`,
+		`"request.payload":"{\"count\":7,\"ok\":true}"`,
+		`"request.items":"[1,true,\"x\"]"`,
+		`"ScopeName":""`,
+		`"ScopeVersion":""`,
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected query containing %q, got:\n%s", expected, joined)
+		}
+	}
+	if strings.Contains(joined, `"ScopeName":"structured-logger"`) || strings.Contains(joined, `"ScopeVersion":"1.2.3"`) {
+		t.Fatalf("expected log scope name/version to stay blank like Python, got:\n%s", joined)
+	}
+}
+
+func TestStorePipelineTraceIngestPreservesStructuredAnyValueAttributes(t *testing.T) {
+	store := &captureStore{}
+	factory := &captureStoreFactory{store: store}
+	pipeline := NewStorePipeline(factory).(*StorePipeline)
+
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracev1.ResourceSpans{{
+			Resource: &resourcev1.Resource{Attributes: []*commonv1.KeyValue{{
+				Key: "service.name", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_StringValue{StringValue: "svc-trace-structured"}},
+			}}},
+			ScopeSpans: []*tracev1.ScopeSpans{{
+				Spans: []*tracev1.Span{{
+					TraceId:           []byte{0x01, 0x02, 0x03},
+					SpanId:            []byte{0x0a, 0x0b},
+					Name:              "structured span",
+					StartTimeUnixNano: 1713520800000000000,
+					EndTimeUnixNano:   1713520801000000000,
+					Attributes: []*commonv1.KeyValue{
+						{Key: "payload", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_KvlistValue{KvlistValue: &commonv1.KeyValueList{Values: []*commonv1.KeyValue{
+							{Key: "count", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_IntValue{IntValue: 7}}},
+							{Key: "ok", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_BoolValue{BoolValue: true}}},
+						}}}}},
+						{Key: "items", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_ArrayValue{ArrayValue: &commonv1.ArrayValue{Values: []*commonv1.AnyValue{
+							{Value: &commonv1.AnyValue_IntValue{IntValue: 1}},
+							{Value: &commonv1.AnyValue_BoolValue{BoolValue: true}},
+							{Value: &commonv1.AnyValue_StringValue{StringValue: "x"}},
+						}}}}},
+					},
+				}},
+			}},
+		}},
+	}
+
+	if err := pipeline.ConsumeTraces(context.Background(), req); err != nil {
+		t.Fatalf("consume traces: %v", err)
+	}
+
+	joined := strings.Join(store.execs, "\n")
+	for _, expected := range []string{
+		`"payload":"{\"count\":7,\"ok\":true}"`,
+		`"items":"[1,true,\"x\"]"`,
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected query containing %q, got:\n%s", expected, joined)
+		}
 	}
 }
 
