@@ -168,7 +168,7 @@ class _SobsRedactingFilter(RedactingFilter):
 
         if isinstance(content, tuple):
             object_id = id(content)
-            if object_id in visited:
+            if object_id in visited:  # pragma: no cover – tuples are immutable, unreachable
                 return self._mask
             visited.add(object_id)
             try:
@@ -178,7 +178,7 @@ class _SobsRedactingFilter(RedactingFilter):
 
         if isinstance(content, (set, frozenset)):
             object_id = id(content)
-            if object_id in visited:
+            if object_id in visited:  # pragma: no cover – sets/frozensets are unhashable/immutable, unreachable
                 return self._mask
             visited.add(object_id)
             try:

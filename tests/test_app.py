@@ -539,6 +539,153 @@ class TestMasking:
         assert error_email not in body
         assert "****" in body
 
+    def test_none_value_inside_dict_passes_through(self):
+        import masking
+
+        result = masking.mask_value({"service": "svc", "detail": None})
+        assert result["detail"] is None
+        assert result["service"] == "svc"
+
+    def test_tuple_values_are_masked(self):
+        import masking
+
+        result = masking.mask_value(("normal", "api_key=supersecret"))
+        assert isinstance(result, tuple)
+        assert result[0] == "normal"
+        assert "supersecret" not in result[1]
+        assert "****" in result[1]
+
+    def test_tuple_with_sensitive_values_masked(self):
+        import masking
+
+        result = masking.mask_value(("safe", "john@example.com", 42))
+        assert isinstance(result, tuple)
+        assert result[0] == "safe"
+        assert "john@example.com" not in result[1]
+        assert result[2] == 42
+
+    def test_set_values_are_masked(self):
+        import masking
+
+        result = masking.mask_value({"safe_value_abc", "other_safe_xyz"})
+        assert isinstance(result, set)
+        assert len(result) == 2
+
+    def test_frozenset_values_are_masked(self):
+        import masking
+
+        result = masking.mask_value(frozenset({"safe_abc", "other_xyz"}))
+        assert isinstance(result, frozenset)
+        assert len(result) == 2
+
+    def test_circular_dict_reference_returns_mask(self):
+        import masking
+
+        d: dict = {"key": "value"}
+        d["self"] = d
+        result = masking.mask_value(d)
+        assert result["self"] == "****"
+        assert result["key"] == "value"
+
+    def test_circular_list_reference_returns_mask(self):
+        import masking
+
+        lst: list = ["item"]
+        lst.append(lst)
+        result = masking.mask_value(lst)
+        assert result[0] == "item"
+        assert result[1] == "****"
+
+    def test_unknown_immutable_object_returns_mask(self):
+        """object() deepcopy raises TypeError; _redact_value should return MASK."""
+        import masking
+
+        result = masking.mask_value(object())
+        assert result == "****"
+
+    def test_deepcopy_identity_returns_mask(self):
+        """When deepcopy returns the same object (identity), _redact_value returns MASK."""
+        import masking
+
+        class _SelfDeepCopy:
+            def __deepcopy__(self, memo):
+                return self
+
+        result = masking.mask_value(_SelfDeepCopy())
+        assert result == "****"
+
+    def test_validate_pattern_raises_on_empty_string(self):
+        import pytest
+
+        import masking
+
+        with pytest.raises(ValueError, match="Pattern is required"):
+            masking.validate_pattern("")
+
+    def test_validate_pattern_raises_on_whitespace_only(self):
+        import pytest
+
+        import masking
+
+        with pytest.raises(ValueError, match="Pattern is required"):
+            masking.validate_pattern("   ")
+
+    def test_configure_runtime_rules_with_custom_key_and_pattern(self):
+        import masking
+
+        original_keys = masking.SENSITIVE_KEYS
+        original_patterns = masking.SENSITIVE_PATTERNS
+        try:
+            masking.configure_runtime_rules(
+                custom_keys=["my_secret_field"],
+                custom_patterns=[r"CUSTOM-\d{6}"],
+            )
+            result = masking.mask_value({"my_secret_field": "should_be_masked"})
+            assert result["my_secret_field"] == "****"
+            result2 = masking.mask_value("token CUSTOM-123456 in log")
+            assert "CUSTOM-123456" not in result2
+        finally:
+            masking.SENSITIVE_KEYS = original_keys
+            masking.SENSITIVE_PATTERNS = original_patterns
+            masking.build_redacting_filter()
+
+    def test_configure_runtime_rules_deduplicates_patterns(self):
+        import masking
+
+        original_keys = masking.SENSITIVE_KEYS
+        original_patterns = masking.SENSITIVE_PATTERNS
+        try:
+            masking.configure_runtime_rules(
+                custom_patterns=[r"DUP-\d+", r"DUP-\d+"],
+            )
+            custom = [p for p in masking.SENSITIVE_PATTERNS if "DUP" in p]
+            assert len(custom) == 1
+        finally:
+            masking.SENSITIVE_KEYS = original_keys
+            masking.SENSITIVE_PATTERNS = original_patterns
+            masking.build_redacting_filter()
+
+    def test_get_filter_rebuilds_when_filter_is_none(self):
+        import masking
+
+        original_filter = masking._filter
+        try:
+            masking._filter = None
+            result = masking.mask_value("john@example.com")
+            assert "john@example.com" not in result
+            assert "****" in result
+        finally:
+            masking._filter = original_filter
+
+    def test_mask_string_json_dumps_exception_falls_back_to_str(self, monkeypatch):
+        import json
+
+        import masking
+
+        monkeypatch.setattr(json, "dumps", lambda *a, **kw: (_ for _ in ()).throw(ValueError("simulated")))
+        result = masking.mask_string({"service": "checkout", "status": "ok"})
+        assert isinstance(result, str)
+
 
 # ---------------------------------------------------------------------------
 # Compression helpers
@@ -2683,6 +2830,84 @@ class TestUIPages:
         bad_data = await r_bad.get_json()
         assert bad_data["ok"] is False
         assert bad_data["issues"]
+
+    async def test_ai_field_hints_api(self, client):
+        r = await client.get("/api/ai/field-hints")
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert "fields" in data
+        assert "operators" in data
+        assert "keywords" in data
+        assert "functions" in data
+        assert "snippets" in data
+        field_names = [f["name"] for f in data["fields"]]
+        assert "service" in field_names
+        assert "model" in field_names
+        assert "row_type" in field_names
+        function_names = [fn["name"] for fn in data["functions"]]
+        assert "match" in function_names
+        assert "toDateTime" in function_names
+
+    async def test_ai_field_hints_api_falls_back_to_empty_values_on_query_error(self, client, monkeypatch):
+        class _BoomDb:
+            def execute(self, *_args, **_kwargs):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(sobs_app, "get_db", lambda: _BoomDb())
+
+        r = await client.get("/api/ai/field-hints")
+        assert r.status_code == 200
+        data = await r.get_json()
+        service_field = next(f for f in data["fields"] if f["name"] == "service")
+        model_field = next(f for f in data["fields"] if f["name"] == "model")
+        assert service_field["values"] == []
+        assert model_field["values"] == []
+
+    async def test_ai_validate_filter_api(self, client):
+        r_ok = await client.post("/api/ai/validate-filter", json={"sql": "service='svc-a'"})
+        assert r_ok.status_code == 200
+        ok_data = await r_ok.get_json()
+        assert ok_data["ok"] is True
+        assert ok_data["normalized"]
+        assert ok_data["issues"] == []
+
+        r_bad = await client.post("/api/ai/validate-filter", json={"sql": "service='svc-a"})
+        assert r_bad.status_code == 200
+        bad_data = await r_bad.get_json()
+        assert bad_data["ok"] is False
+        assert any(issue["level"] == "error" for issue in bad_data["issues"])
+
+    async def test_ai_validate_filter_returns_warning_for_trailing_keyword(self, client, monkeypatch):
+        class _FakeResult:
+            def fetchone(self):
+                return {"ok": 1}
+
+        class _FakeDb:
+            def execute(self, *_args, **_kwargs):
+                return _FakeResult()
+
+        monkeypatch.setattr(sobs_app, "get_db", lambda: _FakeDb())
+        monkeypatch.setattr(sobs_app, "_normalize_ai_sql_where", lambda _sql: "ServiceName='svc-a'")
+
+        r = await client.post("/api/ai/validate-filter", json={"sql": "service='svc-a' AND"})
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert data["ok"] is True
+        assert any("ends with an operator" in issue["message"] for issue in data["issues"])
+
+    async def test_ai_validate_filter_surfaces_public_error(self, client, monkeypatch):
+        class _BoomDb:
+            def execute(self, *_args, **_kwargs):
+                raise RuntimeError("Unknown identifier: definitely_missing")
+
+        monkeypatch.setattr(sobs_app, "get_db", lambda: _BoomDb())
+        monkeypatch.setattr(sobs_app, "_normalize_ai_sql_where", lambda _sql: "ServiceName='svc-a'")
+
+        r = await client.post("/api/ai/validate-filter", json={"sql": "service='svc-a'"})
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert data["ok"] is False
+        assert any(issue["level"] == "error" for issue in data["issues"])
 
     async def test_logs_validate_regex_api(self, client):
         # Valid regex should return ok=True.
@@ -14242,6 +14467,46 @@ class TestAISettingsAndAgentFlows:
 # Notifications & Webhooks
 # ---------------------------------------------------------------------------
 class TestNotifications:
+    @staticmethod
+    def _insert_metric_rule(
+        db,
+        *,
+        rule_id: str,
+        name: str,
+        source: str,
+        signal: str,
+        comparator: str = "gt",
+        warning_threshold: float = 0.0,
+        critical_threshold: float = 0.0,
+        service: str = "notify-svc",
+    ) -> None:
+        sobs_app._insert_rows_json_each_row(
+            db,
+            "sobs_anomaly_rules",
+            [
+                {
+                    "Id": rule_id,
+                    "Name": name,
+                    "RuleType": "threshold",
+                    "SignalSource": source,
+                    "SignalName": signal,
+                    "ServiceName": service,
+                    "AttrFingerprint": "",
+                    "Comparator": comparator,
+                    "WarningThreshold": warning_threshold,
+                    "CriticalThreshold": critical_threshold,
+                    "SecondarySignalSource": "",
+                    "SecondarySignalName": "",
+                    "SecondaryComparator": "gt",
+                    "SecondaryWarningThreshold": 0.0,
+                    "SecondaryCriticalThreshold": 0.0,
+                    "MinSampleCount": 1,
+                    "IsDeleted": 0,
+                    "Version": int(time.time() * 1000),
+                }
+            ],
+        )
+
     async def test_notifications_page_loads(self, client):
         r = await client.get("/settings/notifications")
         assert r.status_code == 200
@@ -14845,6 +15110,97 @@ class TestNotifications:
         assert "fired" in data
         assert isinstance(data["results"], list)
         assert "agent_runs" in data
+
+    async def test_get_notification_auto_candidates_uses_warning_threshold_and_enabled_channels(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": f"Auto Candidate Channel {time.time_ns()}",
+                "channel_type": "webhook",
+                "webhook_url": "https://example.com/auto-candidate",
+                "webhook_method": "POST",
+            },
+        )
+        db = sobs_app.get_db()
+        rule_id = f"auto-candidate-{time.time_ns()}"
+        self._insert_metric_rule(
+            db,
+            rule_id=rule_id,
+            name="Warning-only signal",
+            source="metrics",
+            signal="cpu_warning_only",
+            warning_threshold=12.5,
+            critical_threshold=0.0,
+        )
+
+        result = sobs_app._get_notification_auto_candidates(db, rule_id)
+
+        assert result["examined"] == 1
+        assert result["skipped"] == 0
+        assert len(result["candidates"]) == 1
+        candidate = result["candidates"][0]
+        assert candidate["threshold"] == 12.5
+        assert candidate["severity"] == "warning"
+        assert candidate["channel_ids"]
+        assert candidate["channel_names"]
+
+    async def test_auto_generate_notification_rules_preview_and_create(self, client):
+        await client.post(
+            "/settings/notifications/channels",
+            form={
+                "name": f"Auto Generate Channel {time.time_ns()}",
+                "channel_type": "webhook",
+                "webhook_url": "https://example.com/auto-generate",
+                "webhook_method": "POST",
+            },
+        )
+        db = sobs_app.get_db()
+        rule_id = f"auto-create-{time.time_ns()}"
+        self._insert_metric_rule(
+            db,
+            rule_id=rule_id,
+            name="Critical auto-create signal",
+            source="traces",
+            signal="trace_latency_auto_create",
+            warning_threshold=50.0,
+            critical_threshold=125.0,
+        )
+
+        preview = await client.post(
+            "/api/notifications/rules/auto-generate",
+            form={"action": "preview", "metric_rule_id": rule_id},
+        )
+        assert preview.status_code == 200
+        preview_data = await preview.get_json()
+        assert preview_data["ok"] is True
+        assert preview_data["examined"] == 1
+        assert preview_data["skipped"] == 0
+        assert len(preview_data["candidates"]) == 1
+        assert preview_data["candidates"][0]["severity"] == "critical"
+
+        create = await client.post(
+            "/api/notifications/rules/auto-generate",
+            form={"action": "create", "metric_rule_id": rule_id},
+        )
+        assert create.status_code == 200
+        create_data = await create.get_json()
+        assert create_data == {"ok": True, "created": 1, "skipped": 0, "examined": 1}
+
+        created_rules = sobs_app._load_notification_rules(db)
+        created_rule = next(
+            (rule for rule in created_rules if rule["name"] == "Auto: Critical auto-create signal"), None
+        )
+        assert created_rule is not None
+        assert created_rule["severity"] == "critical"
+        assert created_rule["conditions"][0]["signal"] == "trace_latency_auto_create"
+
+        repeat = await client.post(
+            "/api/notifications/rules/auto-generate",
+            form={"action": "create", "metric_rule_id": rule_id},
+        )
+        assert repeat.status_code == 200
+        repeat_data = await repeat.get_json()
+        assert repeat_data == {"ok": True, "created": 0, "skipped": 1, "examined": 1}
 
     async def test_check_notification_rule_supports_mixed_signal_and_tag_conditions(self, monkeypatch):
         db = sobs_app.get_db()
@@ -16415,6 +16771,83 @@ class TestQueryRoutes:
         assert data["ok"] is True
         assert "Database: default" in data["schema"]
 
+    async def test_query_refine_chart_disabled_when_settings_missing(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: {})
+        r = await client.post(
+            "/api/query/refine-chart",
+            json={"chart_spec": "{}", "instruction": "make it a bar chart"},
+        )
+        assert r.status_code == 404
+        data = await r.get_json()
+        assert data["ok"] is False
+
+    async def test_query_refine_chart_requires_chart_spec(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+        r = await client.post(
+            "/api/query/refine-chart",
+            json={"instruction": "make it a bar chart"},
+        )
+        assert r.status_code == 400
+        data = await r.get_json()
+        assert "chart spec" in data["error"].lower()
+
+    async def test_query_refine_chart_requires_instruction(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+        r = await client.post(
+            "/api/query/refine-chart",
+            json={"chart_spec": '{"series": [{"type": "line"}]}'},
+        )
+        assert r.status_code == 400
+        data = await r.get_json()
+        assert "instruction" in data["error"].lower()
+
+    async def test_query_refine_chart_returns_refined_spec(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+        monkeypatch.setattr(sobs_app, "_emit_ai_helper_log_event", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            sobs_app,
+            "_vanna_refine_chart_spec",
+            AsyncMock(return_value=('{"series": [{"type": "bar", "data": [3, 4]}]}', "", {"elapsed_ms": 5})),
+        )
+
+        r = await client.post(
+            "/api/query/refine-chart",
+            json={
+                "chart_spec": '{"series": [{"type": "line", "data": [1, 2]}]}',
+                "columns": ["day", "count"],
+                "rows": [["2026-04-01", 3], ["2026-04-02", 4]],
+                "instruction": "make this a bar chart",
+                "thinking_level": "high",
+            },
+        )
+        assert r.status_code == 200
+        data = await r.get_json()
+        assert data["ok"] is True
+        assert json.loads(data["chart_spec"])["series"][0]["type"] == "bar"
+
+    async def test_query_refine_chart_returns_error_when_refinement_fails(self, client, monkeypatch):
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
+        monkeypatch.setattr(sobs_app, "_emit_ai_helper_log_event", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            sobs_app,
+            "_vanna_refine_chart_spec",
+            AsyncMock(return_value=("", "chart refinement failed", {"error": "bad output"})),
+        )
+
+        r = await client.post(
+            "/api/query/refine-chart",
+            json={
+                "chart_spec": '{"series": [{"type": "line", "data": [1, 2]}]}',
+                "columns": ["day", "count"],
+                "rows": [["2026-04-01", 3]],
+                "instruction": "make this a bar chart",
+            },
+        )
+        assert r.status_code == 500
+        data = await r.get_json()
+        assert data["ok"] is False
+        assert "refinement failed" in data["error"]
+
     async def test_query_run_endpoint_missing_sql(self, client, monkeypatch):
         monkeypatch.setattr(sobs_app, "_load_all_ai_settings", lambda _db: self._configured_query_settings())
         r = await client.post("/api/query/run", json={})
@@ -17077,6 +17510,73 @@ class TestTableExplorer:
 
 
 class TestChartSpecHelpers:
+    async def test_refine_chart_spec_requires_ai_configuration(self):
+        spec, err, stats = await sobs_app._vanna_refine_chart_spec(
+            current_spec='{"series": [{"type": "line"}]}',
+            columns=["day", "count"],
+            sample_rows=[{"day": "2026-04-01", "count": 3}],
+            user_instruction="make it a bar chart",
+            settings={},
+        )
+
+        assert spec == ""
+        assert err == "AI endpoint not configured."
+        assert stats == {}
+
+    async def test_refine_chart_spec_rejects_invalid_current_json(self):
+        spec, err, stats = await sobs_app._vanna_refine_chart_spec(
+            current_spec='{"series": [}',
+            columns=["day", "count"],
+            sample_rows=[{"day": "2026-04-01", "count": 3}],
+            user_instruction="make it a bar chart",
+            settings=TestQueryRoutes._configured_query_settings(),
+        )
+
+        assert spec == ""
+        assert "invalid json" in err.lower()
+        assert stats == {}
+
+    async def test_refine_chart_spec_returns_llm_error_details(self, monkeypatch):
+        async def _fake_llm(*_args, **_kwargs):
+            return "", {"error": "timeout talking to model"}
+
+        monkeypatch.setattr(sobs_app, "_call_llm_endpoint", _fake_llm)
+
+        spec, err, stats = await sobs_app._vanna_refine_chart_spec(
+            current_spec='{"series": [{"type": "line"}]}',
+            columns=["day", "count"],
+            sample_rows=[{"day": "2026-04-01", "count": 3}],
+            user_instruction="make it a bar chart",
+            settings=TestQueryRoutes._configured_query_settings(),
+            thinking_level="high",
+        )
+
+        assert spec == ""
+        assert err == "LLM chart refinement failed: timeout talking to model"
+        assert stats["error"] == "timeout talking to model"
+
+    async def test_refine_chart_spec_repairs_invalid_json(self, monkeypatch):
+        async def _fake_llm(*_args, **_kwargs):
+            return '{"series": [{"type": "bar", "data": [1, 2]}', {"elapsed_ms": 7}
+
+        async def _fake_repair(_raw, _parse_err, _settings):
+            return ({"series": [{"type": "bar", "data": [1, 2]}]}, "", {"elapsed_ms": 2})
+
+        monkeypatch.setattr(sobs_app, "_call_llm_endpoint", _fake_llm)
+        monkeypatch.setattr(sobs_app, "_repair_chart_spec_json_with_llm", _fake_repair)
+
+        spec, err, stats = await sobs_app._vanna_refine_chart_spec(
+            current_spec='{"series": [{"type": "line", "data": [3, 4]}]}',
+            columns=["day", "count"],
+            sample_rows=[{"day": "2026-04-01", "count": 3}],
+            user_instruction="make it a bar chart",
+            settings=TestQueryRoutes._configured_query_settings(),
+        )
+
+        assert err == ""
+        assert json.loads(spec)["series"][0]["type"] == "bar"
+        assert stats["chart_json_repair"] == 1
+
     async def test_generate_chart_spec_rejects_empty_object(self, monkeypatch):
         async def _fake_llm(*_a, **_kw):
             return "{}", {}

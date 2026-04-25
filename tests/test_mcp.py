@@ -864,3 +864,293 @@ class TestMcpSettingsPage:
         html = (await r.get_data()).decode()
         assert "MCP" in html
         assert "Configure MCP" in html
+
+
+# ---------------------------------------------------------------------------
+# Unit: helper functions
+# ---------------------------------------------------------------------------
+class TestMcpHelperUnits:
+    """Direct unit tests for helper functions not exercised by HTTP flows."""
+
+    def test_load_mcp_api_keys_returns_empty_for_non_list_json(self):
+        """When stored JSON is a dict/string (not a list), return []."""
+        db = _get_db()
+        from app import _set_app_setting
+
+        _set_app_setting(db, sobs_mcp._MCP_API_KEYS_SETTING, '{"oops": true}')
+        result = sobs_mcp._load_mcp_api_keys(db)
+        assert result == []
+
+    def test_load_mcp_api_keys_returns_empty_for_invalid_json(self):
+        """When stored value is invalid JSON, return []."""
+        db = _get_db()
+        from app import _set_app_setting
+
+        _set_app_setting(db, sobs_mcp._MCP_API_KEYS_SETTING, "not-valid-json{{")
+        result = sobs_mcp._load_mcp_api_keys(db)
+        assert result == []
+
+    def test_build_time_where_with_from_ts(self):
+        conditions: list = []
+        params: list = []
+        sobs_mcp._build_time_where("Timestamp", "2024-01-01 00:00:00", "", conditions, params)
+        assert any(">=" in c for c in conditions)
+        assert "2024-01-01 00:00:00" in params
+
+    def test_build_time_where_with_to_ts(self):
+        conditions: list = []
+        params: list = []
+        sobs_mcp._build_time_where("Timestamp", "", "2024-12-31 23:59:59", conditions, params)
+        assert any("<=" in c for c in conditions)
+        assert "2024-12-31 23:59:59" in params
+
+    def test_clamp_with_non_integer_string(self):
+        assert sobs_mcp._clamp("abc", 1, 100, 50) == 50
+
+    def test_normalize_map_value_none(self):
+        assert sobs_mcp._normalize_map_value(None) == {}
+
+    def test_normalize_map_value_dict(self):
+        d = {"k": "v"}
+        assert sobs_mcp._normalize_map_value(d) is d
+
+    def test_normalize_map_value_valid_json_string(self):
+        result = sobs_mcp._normalize_map_value('{"key": "val"}')
+        assert result == {"key": "val"}
+
+    def test_normalize_map_value_empty_string(self):
+        assert sobs_mcp._normalize_map_value("") == {}
+
+    def test_normalize_map_value_whitespace_string(self):
+        assert sobs_mcp._normalize_map_value("   ") == {}
+
+    def test_normalize_map_value_invalid_json_valid_literal(self):
+        result = sobs_mcp._normalize_map_value("{'key': 'val'}")
+        assert result == {"key": "val"}
+
+    def test_normalize_map_value_non_dict_json(self):
+        """JSON that parses to non-dict (e.g. list) should fall through to {} ."""
+        result = sobs_mcp._normalize_map_value("[1, 2, 3]")
+        assert result == {}
+
+    def test_normalize_map_value_unparseable_string(self):
+        result = sobs_mcp._normalize_map_value("definitely not parseable @#$")
+        assert result == {}
+
+    def test_normalize_map_value_iterable_of_pairs(self):
+        result = sobs_mcp._normalize_map_value([("k", "v")])
+        assert result == {"k": "v"}
+
+    def test_normalize_map_value_non_convertible(self):
+        result = sobs_mcp._normalize_map_value(42)
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# Unit: tool functions with a mock DB (covers row-processing paths)
+# ---------------------------------------------------------------------------
+class _MockResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _MockDb:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, sql, params=None):
+        return _MockResult(self._rows)
+
+
+class TestMcpToolsDirect:
+    """Call tool functions directly with a mock DB to cover row-processing branches."""
+
+    def test_tool_query_otel_logs_with_all_filters(self):
+        db = _MockDb(
+            rows=[
+                ("2024-01-01 00:00:00", "svc-a", "ERROR", "oops body", "trace1", "span1", '{"k": "v"}'),
+            ]
+        )
+        result = sobs_mcp._tool_query_otel_logs(
+            db,
+            {
+                "service": "svc-a",
+                "severity": "error",
+                "trace_id": "trace1",
+                "search": "oops",
+                "from_ts": "2024-01-01T00:00:00Z",
+                "to_ts": "2024-12-31T23:59:59Z",
+                "limit": 5,
+            },
+        )
+        assert result["count"] == 1
+        assert result["rows"][0]["service"] == "svc-a"
+        assert result["rows"][0]["attributes"] == {"k": "v"}
+
+    def test_tool_query_otel_traces_with_all_filters(self):
+        db = _MockDb(
+            rows=[
+                (
+                    "2024-01-01 00:00:00",
+                    "svc-b",
+                    "trace1",
+                    "span1",
+                    "GET /api",
+                    "SPAN_KIND_SERVER",
+                    "STATUS_CODE_ERROR",
+                    "err",
+                    42,
+                ),
+            ]
+        )
+        result = sobs_mcp._tool_query_otel_traces(
+            db,
+            {
+                "service": "svc-b",
+                "span_name": "GET /api",
+                "trace_id": "trace1",
+                "status_code": "STATUS_CODE_ERROR",
+                "from_ts": "2024-01-01T00:00:00Z",
+                "to_ts": "2024-12-31T23:59:59Z",
+                "limit": 5,
+            },
+        )
+        assert result["count"] == 1
+        assert result["rows"][0]["status_code"] == "STATUS_CODE_ERROR"
+
+    def test_tool_query_metrics_with_all_filters(self):
+        db = _MockDb(rows=[("2024-01-01 00:00:00", "svc-c", "cpu.usage", "gauge", 0.5, 10)])
+        result = sobs_mcp._tool_query_metrics(
+            db,
+            {
+                "service": "svc-c",
+                "metric_name": "cpu.usage",
+                "metric_kind": "gauge",
+                "from_ts": "2024-01-01T00:00:00Z",
+                "to_ts": "2024-12-31T23:59:59Z",
+                "limit": 5,
+            },
+        )
+        assert result["count"] == 1
+        assert result["rows"][0]["metric_name"] == "cpu.usage"
+
+    def test_tool_query_metrics_raw_histogram_branch(self):
+        db = _MockDb(rows=[("2024-01-01 00:00:00", "svc-d", "req.duration", "ms", '{"k": "v"}', 100, 5000.0)])
+        result = sobs_mcp._tool_query_metrics_raw(
+            db,
+            {
+                "metric_kind": "histogram",
+                "service": "svc-d",
+                "metric_name": "req.duration",
+            },
+        )
+        assert result["count"] == 1
+        assert result["rows"][0]["sum"] == 5000.0
+
+    def test_tool_query_metrics_raw_gauge_with_rows(self):
+        db = _MockDb(rows=[("2024-01-01 00:00:00", "svc-e", "mem.used", "bytes", None, 1024.0)])
+        result = sobs_mcp._tool_query_metrics_raw(db, {"metric_kind": "gauge"})
+        assert result["count"] == 1
+        assert result["rows"][0]["metric_name"] == "mem.used"
+
+    def test_tool_get_metric_names_with_rows(self):
+        db = _MockDb(rows=[("cpu.usage", "svc-a", "2024-01-01 00:00:00")])
+        result = sobs_mcp._tool_get_metric_names(db, {})
+        assert result["count"] == 1
+        assert result["metrics"][0]["metric_name"] == "cpu.usage"
+
+    def test_tool_get_recent_errors_with_service_filter_and_rows(self):
+        db = _MockDb(
+            rows=[
+                ("2024-01-01 00:00:00", "svc-f", "log", "ERROR", "something failed", "trace1"),
+            ]
+        )
+        result = sobs_mcp._tool_get_recent_errors(
+            db,
+            {
+                "service": "svc-f",
+                "from_ts": "2024-01-01T00:00:00Z",
+                "to_ts": "2024-12-31T23:59:59Z",
+                "limit": 10,
+            },
+        )
+        assert result["count"] == 2  # log + trace rows (same mock rows for both queries)
+        assert result["errors"][0]["service"] == "svc-f"
+
+
+# ---------------------------------------------------------------------------
+# HTTP: endpoint edge cases
+# ---------------------------------------------------------------------------
+class TestMcpEndpointEdgeCases:
+    def setup_method(self):
+        db = _get_db()
+        _clear_mcp_keys(db)
+        self._raw_key = _create_mcp_key(db, "test-edge")
+
+    def teardown_method(self):
+        _clear_mcp_keys(_get_db())
+
+    async def test_rate_limit_exceeded_returns_429(self, client):
+        sobs_mcp._rate_limit_store.clear()
+        ip = "10.99.99.99"
+        # Exhaust the limit directly via the store, then make an HTTP request
+        # from that IP (simulated via X-Forwarded-For).
+        for _ in range(sobs_mcp._MCP_RATE_LIMIT_REQUESTS):
+            sobs_mcp._check_rate_limit(ip)
+        r = await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            headers={"X-Forwarded-For": ip},
+        )
+        assert r.status_code == 429
+        data = json.loads(await r.get_data())
+        assert data["error"]["code"] == -32000
+
+    async def test_parse_error_returns_400(self, client):
+        r = await client.post(
+            "/mcp",
+            data=b"this is not json {{{",
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["error"]["code"] == -32700
+
+    async def test_tool_args_not_dict_normalised_to_empty(self, client):
+        """tools/call with arguments as a list (not dict) should not crash."""
+        r = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "list_services", "arguments": ["not", "a", "dict"]},
+            },
+            headers={"X-MCP-API-Key": self._raw_key},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "result" in data
+
+    async def test_tool_exception_returns_500(self, client, monkeypatch):
+        def _boom(db, args):
+            raise RuntimeError("simulated tool failure")
+
+        monkeypatch.setitem(sobs_mcp._TOOL_HANDLERS, "list_services", _boom)
+        r = await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "list_services", "arguments": {}},
+            },
+            headers={"X-MCP-API-Key": self._raw_key},
+        )
+        assert r.status_code == 500
+        data = json.loads(await r.get_data())
+        assert data["error"]["code"] == -32603
+        assert "RuntimeError" in data["error"]["message"]

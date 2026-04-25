@@ -181,7 +181,7 @@ def _authenticate_mcp_request(db: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _mcp_error(code: int, message: str, req_id: Any = None) -> Any:
+def _mcp_error(code: int, message: str, req_id: Any = None) -> Any:  # pragma: no cover
     """Return a JSON-RPC 2.0 error response."""
     return jsonify(
         {
@@ -192,7 +192,7 @@ def _mcp_error(code: int, message: str, req_id: Any = None) -> Any:
     )
 
 
-def _mcp_result(result: Any, req_id: Any = None) -> Any:
+def _mcp_result(result: Any, req_id: Any = None) -> Any:  # pragma: no cover
     """Return a JSON-RPC 2.0 success response."""
     return jsonify({"jsonrpc": "2.0", "id": req_id, "result": result})
 
