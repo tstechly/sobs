@@ -16438,12 +16438,15 @@ async def _github_actions_dependency_rows(
 ) -> list[dict[str, Any]]:
     """Return dependency artifact rows from GH Actions snapshots for a release."""
     rows: list[dict[str, Any]] = []
+    commit = str(commit_sha or "").strip()
+    if not commit:
+        # Without commit identity, we cannot safely bind a workflow run to this release.
+        return rows
     params: dict[str, str] = {
         "status": "completed",
         "per_page": str(_GITHUB_ACTIONS_BACKFILL_MAX_RUNS_PER_RELEASE),
     }
-    if commit_sha:
-        params["head_sha"] = commit_sha
+    params["head_sha"] = commit
 
     try:
         runs_resp = await client.get(
@@ -17866,7 +17869,7 @@ async def api_enrichment_libraries():
             }
         )
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str, Any]:
@@ -18017,6 +18020,8 @@ async def api_enrichment_github_repo_health():
     """Return version-scoped GitHub repo health counts for CVE workflow context."""
     db = get_db()
     summary = await _collect_github_repo_health_summary(db)
+    if not bool(summary.get("ok")):
+        return jsonify(summary), 500
     return jsonify(summary)
 
 

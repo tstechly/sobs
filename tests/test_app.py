@@ -17674,6 +17674,64 @@ class TestWebTraffic:
         deps = metadata.get("dependencies", [])
         assert any(d.get("package") == "requests" and d.get("version") == "2.32.3" for d in deps)
 
+    async def test_fetch_release_deps_from_github_skips_actions_artifacts_without_commit_sha(self, client, monkeypatch):
+        app_resp = await client.post(
+            "/v1/apps",
+            json={
+                "name": "GitHub Actions No SHA App",
+                "slug": f"github-actions-no-sha-app-{time.time_ns()}",
+                "ownerTeam": "platform",
+                "repoUrl": "https://github.com/acme/actions-no-sha",
+                "defaultEnvironment": "prod",
+            },
+        )
+        assert app_resp.status_code == 201
+        app_id = (await app_resp.get_json())["id"]
+
+        rel_resp = await client.post(
+            f"/v1/apps/{app_id}/releases",
+            json={"version": "4.5.6", "environment": "prod"},
+        )
+        assert rel_resp.status_code == 201
+
+        db = sobs_app.get_db()
+        sobs_app._save_ai_setting(db, "ai.github_token", "ghp-test-token")
+
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload: dict | None = None):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.content = b"{}"
+
+            def json(self):
+                return self._payload
+
+        class _FakeClient:
+            async def get(self, url, params=None, headers=None, timeout=None, follow_redirects=False):
+                if url.endswith("/contents/requirements.txt"):
+                    req_text = "requests==2.32.3\n"
+                    encoded = base64.b64encode(req_text.encode("utf-8")).decode("ascii")
+                    return _FakeResponse(200, {"encoding": "base64", "content": encoded})
+                return _FakeResponse(404, {})
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(sobs_app, "_get_async_http_client", _fake_get_client)
+
+        summary = await sobs_app._fetch_release_deps_from_github(db)
+        assert summary["attempted"] >= 1
+        assert summary["inserted"] >= 1
+
+        rows = db.execute(
+            "SELECT Name, MetadataJson FROM sobs_release_artifacts FINAL "
+            "WHERE ArtifactType='dependencies-lockfile' AND IsDeleted=0 "
+            "ORDER BY UploadedAt DESC LIMIT 1"
+        ).fetchall()
+        assert rows
+        metadata = json.loads(str(rows[0]["MetadataJson"]))
+        assert metadata.get("source") == "github_contents_api"
+
     async def test_sync_github_repo_health_once_persists_summary(self, client, monkeypatch):
         db = sobs_app.get_db()
 
@@ -17705,6 +17763,40 @@ class TestWebTraffic:
         assert compact["open_issues"] == 4
         assert compact["open_prs"] == 5
         assert compact["security_items"] == 1
+
+    async def test_enrichment_libraries_returns_500_on_query_error(self, client, monkeypatch):
+        original_collect = sobs_app._collect_library_inventory
+
+        def _boom(_db):
+            raise RuntimeError("forced libraries failure")
+
+        monkeypatch.setattr(sobs_app, "_collect_library_inventory", _boom)
+        try:
+            r = await client.get("/api/enrichment/libraries")
+        finally:
+            monkeypatch.setattr(sobs_app, "_collect_library_inventory", original_collect)
+
+        assert r.status_code == 500
+        body = json.loads(await r.get_data())
+        assert body["ok"] is False
+        assert "forced libraries failure" in body["error"]
+
+    async def test_repo_health_endpoint_returns_500_when_summary_fails(self, client, monkeypatch):
+        original_collect = sobs_app._collect_github_repo_health_summary
+
+        async def _fake_collect(_db):
+            return {"ok": False, "error": "forced repo health failure"}
+
+        monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", _fake_collect)
+        try:
+            r = await client.get("/api/enrichment/github/repo-health")
+        finally:
+            monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", original_collect)
+
+        assert r.status_code == 500
+        body = json.loads(await r.get_data())
+        assert body["ok"] is False
+        assert "forced repo health failure" in body["error"]
 
     async def test_web_traffic_geo_api_empty(self, client):
         r = await client.get("/api/web-traffic/geo")
