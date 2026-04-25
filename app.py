@@ -18111,143 +18111,74 @@ _WORK_ITEMS_TABLE_STATE_KEYS = [
 ]
 
 
+def _map_limit_offset_to_page_state(args: Any) -> dict[str, Any]:
+    """Convert legacy ``limit``/``offset`` query params to JBS ``page``/``page_size``.
+
+    Called only when ``limit`` or ``offset`` appear in the request args and the
+    canonical JBS params (``page``, ``page_size``) are absent, so existing
+    bookmarks like ``/work-items?limit=50&offset=50`` continue to work.
+    """
+    result: dict[str, Any] = dict(args)
+    if "limit" in args and "page_size" not in args:
+        try:
+            limit = max(1, int(args["limit"]))
+        except (TypeError, ValueError):
+            limit = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+        # Clamp to the nearest supported page size
+        if limit >= 100:
+            result["page_size"] = "100"
+        elif limit >= 50:
+            result["page_size"] = "50"
+        else:
+            result["page_size"] = "25"
+    if "offset" in args and "page" not in args:
+        try:
+            offset = max(0, int(args["offset"]))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            page_size = int(result.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE))
+        except (TypeError, ValueError):
+            page_size = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+        result["page"] = str((offset // page_size) + 1)
+    return result
+
+
 @app.route("/work-items")
 @require_basic_auth
 async def view_work_items():
     """Display work items created by agent rules."""
     db = get_db()
 
-    # Filters
+    # Parse filter display values for template rendering.
     service_filter = request.args.get("service", "").strip()
     rule_filter = request.args.get("rule_name", "").strip()
     action_type_filter = request.args.get("action_type", "").strip()
     status_filter = request.args.get("status", "").strip()
+    # _parse_time_window_args handles window_s → absolute timestamp derivation.
     from_ts, to_ts, time_error = _parse_time_window_args()
 
-    # Build initial JBS table state from request args so the data_grid
-    # is seeded with the correct filter + pagination values on first render.
+    # Map legacy limit/offset params → JBS page/page_size for backward compatibility.
+    compat_args = _map_limit_offset_to_page_state(request.args)
+
+    # Inject already-normalised timestamps so the shared data helper sees
+    # consistent values regardless of window_s computation.
+    init_state: dict[str, Any] = dict(compat_args)
+    if from_ts:
+        init_state["from_ts"] = from_ts
+    if to_ts:
+        init_state["to_ts"] = to_ts
+
     table_state = parse_table_state(
-        request.args,
+        init_state,
         default_sort_by=_WORK_ITEMS_TABLE_DEFAULT_SORT_BY,
         default_page_size=_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE,
         allowed_page_sizes=_WORK_ITEMS_TABLE_PAGE_SIZES,
         filter_keys=["service", "rule_name", "action_type", "status", "from_ts", "to_ts"],
     )
 
-    # Build query
-    conditions = ["IsDeleted = 0"]
-    params: list[Any] = []
-
-    if service_filter:
-        conditions.append("ServiceName = ?")
-        params.append(service_filter)
-    if rule_filter:
-        conditions.append("AgentRuleName = ?")
-        params.append(rule_filter)
-    if action_type_filter:
-        conditions.append("AgentAction = ?")
-        params.append(action_type_filter)
-    if status_filter:
-        conditions.append("IssueState = ?")
-        params.append(status_filter)
-    if from_ts:
-        conditions.append("CreatedAt >= ?")
-        params.append(from_ts)
-    if to_ts:
-        conditions.append("CreatedAt <= ?")
-        params.append(to_ts)
-
-    where_clause = "WHERE " + " AND ".join(conditions) if conditions else "WHERE 1=1"
-
-    # Query work items
-    items: list[dict[str, Any]] = []
-    total_items = 0
-    services: set[str] = set()
-    rules: set[str] = set()
-    page_size = int(table_state.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE))
-    page = int(table_state.get("page", 1))
-    offset = (page - 1) * page_size
-    sort_by_key = str(
-        table_state.get("sort_by", _WORK_ITEMS_TABLE_DEFAULT_SORT_BY) or _WORK_ITEMS_TABLE_DEFAULT_SORT_BY
-    )
-    sort_col = _WORK_ITEMS_TABLE_SORT_MAP.get(sort_by_key, "CreatedAt")
-    sort_dir = str(
-        table_state.get("sort_dir", _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR) or _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR
-    )
-    if sort_dir not in ("asc", "desc"):
-        sort_dir = _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR
-
-    cache_key = (
-        service_filter,
-        rule_filter,
-        action_type_filter,
-        status_filter,
-        str(from_ts or ""),
-        str(to_ts or ""),
-        int(page_size),
-        int(offset),
-    )
-    now = time.time()
-
-    try:
-        settings = _load_all_ai_settings(db)
-        # Backfill may call multiple GitHub APIs; run it in the background so
-        # page rendering is not blocked on network latency.
-        asyncio.create_task(_maybe_backfill_github_work_item_links(db, settings))
-
-        page_cache_hit = False
-        with _work_items_cache_lock:
-            cached_page = _work_items_page_cache.get(cache_key)
-            if cached_page and float(cached_page.get("expires_at", 0.0)) > now:
-                total_items = int(cached_page.get("total_items", 0))
-                items = list(cached_page.get("items", []))
-                page_cache_hit = True
-
-        if not page_cache_hit:
-            count_row = db.execute(
-                f"SELECT count() AS c FROM sobs_github_work_items FINAL {where_clause}", params
-            ).fetchone()
-            total_items = int(count_row["c"]) if count_row else 0
-
-            rows = db.execute(
-                f"SELECT * FROM sobs_github_work_items FINAL {where_clause} "
-                f"ORDER BY {sort_col} {sort_dir.upper()} LIMIT {page_size} OFFSET {offset}",
-                params,
-            ).fetchall()
-            items = [_serialize_github_work_item_row(r) for r in rows]
-            with _work_items_cache_lock:
-                _work_items_page_cache[cache_key] = {
-                    "total_items": total_items,
-                    "items": items,
-                    "expires_at": now + max(1, WORK_ITEMS_PAGE_CACHE_TTL_SEC),
-                }
-
-        filter_cache_hit = False
-        with _work_items_cache_lock:
-            if float(_work_items_filter_cache.get("expires_at", 0.0)) > now:
-                services = set(_work_items_filter_cache.get("services", []))
-                rules = set(_work_items_filter_cache.get("rules", []))
-                filter_cache_hit = True
-
-        if not filter_cache_hit:
-            all_services = db.execute(
-                "SELECT DISTINCT ServiceName FROM sobs_github_work_items FINAL "
-                "WHERE IsDeleted=0 ORDER BY ServiceName"
-            ).fetchall()
-            services = {str(r["ServiceName"]) for r in all_services if r["ServiceName"]}
-
-            all_rules = db.execute(
-                "SELECT DISTINCT AgentRuleName FROM sobs_github_work_items FINAL "
-                "WHERE IsDeleted=0 ORDER BY AgentRuleName"
-            ).fetchall()
-            rules = {str(r["AgentRuleName"]) for r in all_rules if r["AgentRuleName"]}
-            with _work_items_cache_lock:
-                _work_items_filter_cache["services"] = sorted(services)
-                _work_items_filter_cache["rules"] = sorted(rules)
-                _work_items_filter_cache["expires_at"] = now + max(1, WORK_ITEMS_FILTER_CACHE_TTL_SEC)
-    except Exception as exc:
-        app.logger.warning("Error loading work items: %s", exc)
-
+    # Delegate data fetching to the shared helper (eliminates query duplication).
+    items, total_items, services, rules = await _fetch_work_items_fragment_data(db, table_state)
     table_rows = _work_items_table_rows(items)
 
     return await render_template(
@@ -18257,8 +18188,8 @@ async def view_work_items():
         table_state=table_state,
         table_rows=table_rows,
         table_state_keys=_WORK_ITEMS_TABLE_STATE_KEYS,
-        services=sorted(services),
-        rules=sorted(rules),
+        services=services,
+        rules=rules,
         service_filter=service_filter,
         rule_filter=rule_filter,
         action_type_filter=action_type_filter,
@@ -18272,6 +18203,28 @@ async def view_work_items():
 # ---------------------------------------------------------------------------
 # jinja-bootstrap-spa – Work Items table fragment helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_safe_github_url(url: str) -> bool:
+    """Return True only if *url* is an ``https://github.com`` or ``https://*.github.com`` URL.
+
+    ``html.escape()`` does not sanitise URL schemes, so a ``javascript:`` or
+    ``data:`` value would survive escaping and remain dangerous as an ``href``.
+    This guard ensures only GitHub HTTPS links are rendered as anchors; anything
+    else is shown as plain text.
+    """
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        return False
+    netloc = parsed.netloc.lower()
+    return netloc == "github.com" or netloc.endswith(".github.com")
 
 
 def _work_items_table_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -18326,14 +18279,15 @@ def _work_items_table_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 f'<br><span class="badge bg-info text-dark mt-1">' f"{html.escape(dedup.replace('_', ' '))}</span>"
             )
 
-        # Issue cell – link, copilot assignment badge, PR link
+        # Issue cell – link, copilot assignment badge, PR link.
+        # Only render hrefs for safe GitHub URLs (html.escape is not URL sanitization).
         issue_url = item.get("issue_url", "")
         issue_number = item.get("issue_number", 0)
         issue_title = item.get("issue_title", "")
         copilot_status = item.get("copilot_assignment_status", "")
         pr_url = item.get("pr_url", "")
         pr_number = item.get("pr_number", 0)
-        if issue_url and issue_number:
+        if issue_url and issue_number and _is_safe_github_url(issue_url):
             issue_html = (
                 f'<a href="{html.escape(issue_url)}" target="_blank" rel="noopener" '
                 f'class="text-decoration-none" title="{html.escape(issue_title)}">'
@@ -18352,7 +18306,7 @@ def _work_items_table_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     f'<br><span class="badge {cs_class} mt-1">'
                     f"{html.escape(copilot_status.replace('_', ' '))}</span>"
                 )
-            if pr_url and pr_number:
+            if pr_url and pr_number and _is_safe_github_url(pr_url):
                 issue_html += (
                     f'<br><a href="{html.escape(pr_url)}" target="_blank" rel="noopener" '
                     f'class="small text-decoration-none">'
@@ -18448,7 +18402,8 @@ async def _fetch_work_items_fragment_data(
     if sort_dir not in ("asc", "desc"):
         sort_dir = _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR
 
-    # Shared cache key (page-based)
+    # Shared cache key – must include every field that affects rendered output:
+    # filters, time window, pagination, sort key, and sort direction.
     cache_key = (
         service_filter,
         rule_filter,
@@ -18458,6 +18413,8 @@ async def _fetch_work_items_fragment_data(
         to_ts,
         page_size,
         offset,
+        sort_by_key,
+        sort_dir,
     )
     now = time.time()
     items: list[dict[str, Any]] = []

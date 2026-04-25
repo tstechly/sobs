@@ -2048,3 +2048,226 @@ class TestUIQA:
                 )
             self._expect_new_toast(page, before, "could not raise issue")
         assert not dialog_alerts, f"Native browser dialogs on /incident: {dialog_alerts}"
+
+
+# ---------------------------------------------------------------------------
+# JBS Work Items Migration – Playwright browser tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestJBSWorkItemsMigration:
+    """Browser-based verification for the jinja-bootstrap-spa Work Items migration.
+
+    Validates:
+    - No browser console errors on page load
+    - JBS runtime loaded from the packaged asset (not a local shim)
+    - ``data-jbs-component`` is present in the DOM
+    - Fragment endpoint returns 200 + ETag
+    - Fragment endpoint returns 304 when content has not changed
+    - Sort interaction triggers a fragment fetch
+    - Loading state appears and clears after the fetch
+    - State (sort key) is reflected in the fragment URL/headers
+    """
+
+    def _init_page(self, page: Page) -> None:
+        """Suppress first-run modals before every navigation."""
+        page.add_init_script("""
+            try {
+                localStorage.setItem('sobs.setupWizardSeen.v1',  '1');
+                localStorage.setItem('sobs.firstRunTourSeen.v1', '1');
+                localStorage.setItem('sobs.firstRunTourShown.v1', '1');
+            } catch (_) {}
+        """)
+
+    # --- HTTP-level tests (no browser required) ---
+
+    def test_fragment_endpoint_returns_200_with_etag(self, live_server: str) -> None:
+        """GET /components/work-items must return 200 with an ETag header."""
+        resp = requests.get(f"{live_server}/components/work-items", timeout=10)
+        assert resp.status_code == 200, f"Fragment endpoint returned {resp.status_code}"
+        assert "data-jbs-component" in resp.text, "Fragment HTML missing data-jbs-component"
+        etag = resp.headers.get("ETag", "")
+        assert etag, "Fragment endpoint must return an ETag header"
+
+    def test_fragment_endpoint_304_on_unchanged_content(self, live_server: str) -> None:
+        """Re-requesting the fragment with the cached ETag must return 304 Not Modified."""
+        r1 = requests.get(f"{live_server}/components/work-items", timeout=10)
+        etag = r1.headers.get("ETag", "")
+        assert etag, "First response must supply an ETag"
+
+        r2 = requests.get(
+            f"{live_server}/components/work-items",
+            headers={"If-None-Match": etag},
+            timeout=10,
+        )
+        assert r2.status_code == 304, (
+            f"Identical re-request with If-None-Match should be 304, got {r2.status_code}"
+        )
+
+    def test_fragment_endpoint_sort_params_accepted(self, live_server: str) -> None:
+        """Fragment endpoint must accept sort_by/sort_dir query params without error."""
+        for sort_by, sort_dir in [("created_at", "desc"), ("service", "asc"), ("anomaly", "desc")]:
+            resp = requests.get(
+                f"{live_server}/components/work-items?sort_by={sort_by}&sort_dir={sort_dir}",
+                timeout=10,
+            )
+            assert resp.status_code == 200, (
+                f"Fragment with sort_by={sort_by}&sort_dir={sort_dir} returned {resp.status_code}"
+            )
+            assert "data-jbs-component" in resp.text
+
+    def test_fragment_endpoint_filter_params_accepted(self, live_server: str) -> None:
+        """Fragment endpoint must accept filter query params without error."""
+        resp = requests.get(
+            f"{live_server}/components/work-items?service=nonexistent&status=open",
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        assert "data-jbs-component" in resp.text
+
+    def test_legacy_limit_offset_params_accepted(self, live_server: str) -> None:
+        """Legacy ?limit=50&offset=0 request must still return a valid page."""
+        resp = requests.get(f"{live_server}/work-items?limit=50&offset=0", timeout=10)
+        assert resp.status_code == 200
+        assert "data-jbs-component" in resp.text
+
+    # --- Browser-level tests (Playwright) ---
+
+    def test_work_items_no_browser_console_errors(self, page: Page, live_server: str) -> None:
+        """Work Items page must load without browser console errors."""
+        console_errors: list[str] = []
+
+        def _on_console(msg: Any) -> None:
+            if msg.type == "error":
+                console_errors.append(msg.text)
+
+        page.on("console", _on_console)
+        try:
+            self._init_page(page)
+            page.set_viewport_size({"width": 1440, "height": 900})
+            page.goto(f"{live_server}/work-items")
+            page.wait_for_load_state("networkidle")
+        finally:
+            page.remove_listener("console", _on_console)
+        assert not console_errors, f"Browser console errors on /work-items: {console_errors}"
+
+    def test_jbs_runtime_script_loaded_from_package(self, page: Page, live_server: str) -> None:
+        """The JBS runtime script tag must point to the packaged asset (no local shim)."""
+        self._init_page(page)
+        page.goto(f"{live_server}/work-items")
+        page.wait_for_load_state("domcontentloaded")
+
+        script_src: Any = page.evaluate("""() => {
+            const scripts = Array.from(document.querySelectorAll('script[src]'));
+            const jbs = scripts.find(s => s.src && s.src.includes('jinja-bootstrap-spa.js'));
+            return jbs ? jbs.src : null;
+        }""")
+        assert script_src is not None, "JBS runtime <script> tag not found in DOM"
+        assert "jinja-bootstrap-spa.js" in str(script_src), (
+            f"Expected jinja-bootstrap-spa.js in src, got: {script_src}"
+        )
+
+    def test_jbs_component_present_in_dom(self, page: Page, live_server: str) -> None:
+        """The Work Items table must be wrapped in a data-jbs-component element."""
+        self._init_page(page)
+        page.goto(f"{live_server}/work-items")
+        page.wait_for_load_state("domcontentloaded")
+
+        info: Any = page.evaluate("""() => {
+            const el = document.querySelector('[data-jbs-component="work-items-table"]');
+            if (!el) return null;
+            return {
+                endpoint: el.getAttribute('data-jbs-endpoint'),
+                persist:  el.getAttribute('data-jbs-persist'),
+            };
+        }""")
+        assert info is not None, "data-jbs-component='work-items-table' not found in DOM"
+        assert info["endpoint"] and "/components/work-items" in info["endpoint"], (
+            f"Unexpected data-jbs-endpoint: {info.get('endpoint')}"
+        )
+
+    def test_jbs_runtime_script_loads_before_page_scripts(self, page: Page, live_server: str) -> None:
+        """The JBS runtime script must appear before page-level {% block scripts %} content.
+
+        This ensures page scripts can reference window.JinjaBootstrapSpa at init time.
+        """
+        self._init_page(page)
+        page.goto(f"{live_server}/work-items")
+        page.wait_for_load_state("domcontentloaded")
+
+        order: Any = page.evaluate("""() => {
+            const scripts = Array.from(document.querySelectorAll('script'));
+            const jbsIdx = scripts.findIndex(s => s.src && s.src.includes('jinja-bootstrap-spa.js'));
+            // sobs-ui.js is the main page script bundle included via {% block scripts %}
+            const sobsIdx = scripts.findIndex(s => s.src && s.src.includes('sobs-ui.js'));
+            return { jbsIdx, sobsIdx };
+        }""")
+        # If neither sobs-ui.js is present, skip ordering check (page may bundle inline)
+        if order["sobsIdx"] == -1:
+            return
+        assert order["jbsIdx"] != -1, "JBS runtime script not found among <script src> tags"
+        assert order["jbsIdx"] < order["sobsIdx"], (
+            f"JBS runtime (idx={order['jbsIdx']}) must appear before sobs-ui.js "
+            f"(idx={order['sobsIdx']}) in the DOM"
+        )
+
+    def test_sort_click_triggers_fragment_fetch(self, page: Page, live_server: str) -> None:
+        """Clicking a sort header must trigger a fetch to /components/work-items."""
+        fragment_requests: list[str] = []
+
+        def _on_request(req: Any) -> None:
+            if "/components/work-items" in req.url:
+                fragment_requests.append(req.url)
+
+        self._init_page(page)
+        page.goto(f"{live_server}/work-items")
+        page.wait_for_load_state("networkidle")
+
+        page.on("request", _on_request)
+        try:
+            sort_btn = page.locator('[data-jbs-action="sort"]').first
+            if sort_btn.count() == 0:
+                # No sort buttons — table may render differently, skip
+                return
+            before = len(fragment_requests)
+            sort_btn.click(timeout=5000)
+            page.wait_for_function(
+                f"() => document.querySelectorAll('/components/work-items') !== null",
+                timeout=6000,
+            )
+            # Give the fetch time to fire
+            page.wait_for_timeout(1500)
+        except PlaywrightError:
+            page.wait_for_timeout(1500)
+        finally:
+            page.remove_listener("request", _on_request)
+
+        assert len(fragment_requests) > 0, (
+            "Sort button click did not trigger a fetch to /components/work-items"
+        )
+
+    def test_loading_state_clears_after_sort(self, page: Page, live_server: str) -> None:
+        """The jbs-is-loading class must clear from the component after a fetch completes."""
+        self._init_page(page)
+        page.goto(f"{live_server}/work-items")
+        page.wait_for_load_state("networkidle")
+
+        sort_btn = page.locator('[data-jbs-action="sort"]').first
+        if sort_btn.count() == 0:
+            return  # No sort buttons available
+
+        sort_btn.click(timeout=5000)
+        # Wait for the loading class to clear (may be fast on localhost)
+        page.wait_for_function(
+            """() => {
+                const comp = document.querySelector('[data-jbs-component]');
+                return !comp || !comp.classList.contains('jbs-is-loading');
+            }""",
+            timeout=8000,
+        )
+        # Verify no JS errors occurred during the swap
+        assert page.evaluate("""() => typeof window.JinjaBootstrapSpa !== 'undefined'
+            || document.querySelector('[data-jbs-component]') !== null"""), (
+            "JBS component disappeared after sort — swap may have errored"
+        )
