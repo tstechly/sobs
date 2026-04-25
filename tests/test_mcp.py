@@ -254,6 +254,10 @@ class TestMcpGetProbe:
         """GET /mcp must succeed even with an invalid API key header."""
         r = await client.get("/mcp", headers={"X-MCP-API-Key": "invalid-key"})
         assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert "protocolVersion" in data
+        assert "serverInfo" in data
+        assert "capabilities" in data
 
     async def test_get_mcp_disabled_returns_503(self, client):
         """GET /mcp returns 503 when MCP is disabled."""
@@ -261,6 +265,9 @@ class TestMcpGetProbe:
         sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "0")
         r = await client.get("/mcp")
         assert r.status_code == 503
+        data = json.loads(await r.get_data())
+        assert "error" in data
+        assert data["error"]["code"] == -32001
         # Re-enable.
         sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
 
