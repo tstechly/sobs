@@ -399,7 +399,11 @@ def _origin_allowed_for_otlp(origin: str) -> bool:
     # that a pattern like "https://example.com" does not accidentally allow
     # "https://example.com:8443".
     candidates: list[str] = [with_port]
-    if parsed.port is None or parsed.port == _SCHEME_DEFAULT_PORTS.get(scheme):
+    try:
+        parsed_port = parsed.port
+    except ValueError:
+        return False
+    if parsed_port is None or parsed_port == _SCHEME_DEFAULT_PORTS.get(scheme):
         without_port = f"{scheme}://{host}" if host else with_port
         if without_port != with_port:
             candidates.append(without_port)
@@ -419,6 +423,13 @@ def _path_needs_otlp_cors(path: str) -> bool:
     if path.startswith("/v1/rum/assets/"):
         return True
     return False
+
+
+def _otlp_cors_allow_methods(path: str) -> str:
+    """Return allowed methods for CORS preflight on OTLP/RUM endpoints."""
+    if path.startswith("/v1/rum/assets/"):
+        return "GET, HEAD, OPTIONS"
+    return "POST, OPTIONS"
 
 
 def _append_vary_header(response: Response, value: str) -> None:
@@ -448,7 +459,7 @@ async def _apply_security_headers(response: Response):
             response.headers["Access-Control-Allow-Origin"] = origin
             _append_vary_header(response, "Origin")
             response.headers.setdefault("Access-Control-Allow-Credentials", "true")
-            response.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
+            response.headers.setdefault("Access-Control-Allow-Methods", _otlp_cors_allow_methods(request.path))
             response.headers.setdefault(
                 "Access-Control-Allow-Headers",
                 (
