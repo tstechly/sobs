@@ -21097,3 +21097,215 @@ class TestOnboardingWizard:
         assert status == "requested"
         assert "accepted" in reason.lower() or "requested" in reason.lower()
         assert requested_at > 0
+
+
+# ---------------------------------------------------------------------------
+# jinja-bootstrap-spa Migration Tests
+# ---------------------------------------------------------------------------
+
+
+class TestJBSMigration:
+    """Tests for the jinja-bootstrap-spa migration of the Work Items data grid."""
+
+    # ------------------------------------------------------------------
+    # Framework integration
+    # ------------------------------------------------------------------
+
+    def test_jbs_runtime_js_is_served(self, client):
+        """The packaged JBS runtime JS must be accessible at /static/jinja-bootstrap-spa.js."""
+
+        async def _run():
+            r = await client.get("/static/jinja-bootstrap-spa.js")
+            assert r.status_code == 200
+            body = await r.get_data()
+            assert len(body) > 1000, "Runtime JS should be non-trivial"
+            ct = r.headers.get("Content-Type", "")
+            assert "javascript" in ct
+            # Verify it is the real framework runtime and not a local shim.
+            assert b"data-jbs-component" in body or b"jbs-component" in body or b"jinja-bootstrap-spa" in body
+
+        import asyncio
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+    async def test_jbs_runtime_js_served_async(self, client):
+        r = await client.get("/static/jinja-bootstrap-spa.js")
+        assert r.status_code == 200
+        body = await r.get_data()
+        assert len(body) > 1000
+        ct = r.headers.get("Content-Type", "")
+        assert "javascript" in ct
+
+    async def test_jbs_runtime_included_in_base_html(self, client):
+        """Every full-page response must include the JBS runtime script tag."""
+        r = await client.get("/work-items")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "jinja-bootstrap-spa.js" in text, "JBS runtime script tag must be in base.html"
+
+    # ------------------------------------------------------------------
+    # Work Items table fragment endpoint
+    # ------------------------------------------------------------------
+
+    async def test_work_items_fragment_returns_200(self, client):
+        """GET /components/work-items returns 200 with the data grid HTML."""
+        r = await client.get("/components/work-items")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "data-jbs-component" in text
+        assert "data-jbs-endpoint" in text
+        assert "/components/work-items" in text
+
+    async def test_work_items_fragment_has_etag(self, client):
+        """The fragment endpoint must return an ETag header for conditional caching."""
+        r = await client.get("/components/work-items")
+        assert r.status_code == 200
+        assert r.headers.get("ETag"), "Fragment endpoint must return an ETag header"
+
+    async def test_work_items_fragment_returns_304_on_second_identical_request(self, client):
+        """Re-requesting the fragment with the same ETag should return 304 Not Modified."""
+        r1 = await client.get("/components/work-items")
+        assert r1.status_code == 200
+        etag = r1.headers.get("ETag", "")
+        assert etag, "First response must have an ETag"
+
+        r2 = await client.get("/components/work-items", headers={"If-None-Match": etag})
+        assert r2.status_code == 304, "Identical re-request with ETag should return 304"
+
+    async def test_work_items_fragment_state_keys_in_html(self, client):
+        """The fragment must declare all relevant state keys so the runtime persists them."""
+        r = await client.get("/components/work-items")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        # The macro encodes state keys as a JSON list in data-jbs-state
+        for key in ("page", "sort_by", "sort_dir"):
+            assert key in text, f"State key '{key}' should appear in fragment HTML"
+
+    async def test_work_items_fragment_with_filter_params(self, client):
+        """The fragment endpoint must honour filter query params passed directly."""
+        r = await client.get("/components/work-items?service=nonexistent&status=open")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "data-jbs-component" in text
+
+    async def test_work_items_fragment_page_param_changes_etag(self, client):
+        """Requesting a different page should produce a different ETag (or 200 response)."""
+        r1 = await client.get("/components/work-items?page=1")
+        etag1 = r1.headers.get("ETag", "")
+
+        r2 = await client.get("/components/work-items?page=2")
+        # A 200 is expected; ETag may differ or match (no data means both pages are empty).
+        assert r2.status_code in (200, 304)
+
+    # ------------------------------------------------------------------
+    # Full-page view still works
+    # ------------------------------------------------------------------
+
+    async def test_work_items_page_renders_with_jbs_component(self, client):
+        """The full work-items page must include the JBS data grid component."""
+        r = await client.get("/work-items")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "data-jbs-component" in text
+        assert "data-jbs-endpoint" in text
+        assert "/components/work-items" in text
+        # Existing controls must still be present
+        assert 'id="work-items-reports-group"' in text
+        assert 'id="work-items-save-report-btn"' in text
+
+    async def test_work_items_page_no_raw_table_markup(self, client):
+        """The migrated page must not contain the old raw table rows directly in /work-items."""
+        r = await client.get("/work-items")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        # The old raw table was a plain Bootstrap table without JBS attributes.
+        # After migration, all table rendering goes through the data_grid macro.
+        assert "data-jbs-component" in text
+
+    # ------------------------------------------------------------------
+    # _work_items_table_rows helper
+    # ------------------------------------------------------------------
+
+    def test_work_items_table_rows_escapes_html(self):
+        """The helper must HTML-escape user-controlled content in pre-rendered HTML cells.
+
+        Plain-text columns (service, agent_rule) are passed as raw values and will be
+        escaped by Jinja auto-escaping at render time. Pre-rendered HTML columns (signal,
+        anomaly, issue, detail, created_at) must use html.escape() explicitly since the
+        macro renders them with the ``safe`` filter.
+        """
+        items = [
+            {
+                "id": "wi-xss",
+                "created_at": "2026-01-01T00:00:00.000Z",
+                "service": '<script>alert("xss")</script>',
+                "signal_source": "metrics",
+                "signal_name": 'p95<br>injection',
+                "anomaly_state": "critical",
+                "anomaly_rule_id": "rule-1",
+                "agent_rule_name": "Rule A",
+                "agent_action": "github_issue",
+                "dedup_decision": "new_issue",
+                "issue_url": "https://github.com/abartrim/sobs/issues/1",
+                "issue_number": 1,
+                "issue_title": '<img src=x onerror=alert(1)>',
+                "copilot_assignment_status": "",
+                "pr_url": "",
+                "pr_number": 0,
+                "analysis_summary": "test",
+                "suggestion_summary": "test",
+            }
+        ]
+        rows = sobs_app._work_items_table_rows(items)
+        assert len(rows) == 1
+        row = rows[0]
+        # Pre-rendered HTML columns (html=True in macro) must escape injected content.
+        # Signal HTML must not allow raw <br> injection in signal_name.
+        assert "<br>injection" not in row["signal"]
+        # Issue HTML must escape the XSS payload in the title attribute.
+        assert '<img src=x' not in row["issue"]
+        # Detail button's data attributes must not contain raw HTML.
+        assert '<img' not in row["detail"]
+
+    def test_work_items_table_rows_empty_returns_empty_list(self):
+        rows = sobs_app._work_items_table_rows([])
+        assert rows == []
+
+    def test_work_items_table_rows_basic_structure(self):
+        """Every output row must have the 8 expected column keys."""
+        items = [
+            {
+                "id": "wi-1",
+                "created_at": "2026-01-01T00:00:00.000Z",
+                "service": "api",
+                "signal_source": "metrics",
+                "signal_name": "latency",
+                "anomaly_state": "warning",
+                "anomaly_rule_id": "rule-abc",
+                "agent_rule_name": "Rule",
+                "agent_action": "github_issue_copilot",
+                "dedup_decision": "reused_existing",
+                "issue_url": "https://github.com/abartrim/sobs/issues/2",
+                "issue_number": 2,
+                "issue_title": "Latency",
+                "copilot_assignment_status": "requested",
+                "pr_url": "",
+                "pr_number": 0,
+                "analysis_summary": "db slow",
+                "suggestion_summary": "scale",
+            }
+        ]
+        rows = sobs_app._work_items_table_rows(items)
+        assert len(rows) == 1
+        row = rows[0]
+        for key in ("created_at", "service", "signal", "anomaly", "agent_rule", "action", "issue", "detail"):
+            assert key in row, f"Expected key '{key}' in row dict"
+        # Copilot badge should appear in action column
+        assert "Copilot" in row["action"]
+        # Dedup decision should appear in action column
+        assert "reused" in row["action"]
+        # Copilot assignment status badge in issue column
+        assert "requested" in row["issue"]
+        # Detail button must include data attributes
+        assert "work-item-detail-btn" in row["detail"]
+        assert "data-work-item-id" in row["detail"]

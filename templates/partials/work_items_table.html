@@ -1,0 +1,22 @@
+{% import "jinja_bootstrap_spa/bootstrap_macros.html" as ui %}
+{{ ui.table(
+    "work-items-table",
+    "/components/work-items",
+    columns=[
+        {"key": "created_at", "label": "Created",    "sortable": true,  "html": true},
+        {"key": "service",    "label": "Service",    "sortable": true},
+        {"key": "signal",     "label": "Signal",     "sortable": false, "html": true},
+        {"key": "anomaly",    "label": "Anomaly",    "sortable": true,  "html": true},
+        {"key": "agent_rule", "label": "Agent Rule", "sortable": true},
+        {"key": "action",     "label": "Action",     "sortable": false, "html": true},
+        {"key": "issue",      "label": "Issue",      "sortable": false, "html": true},
+        {"key": "detail",     "label": "",           "sortable": false, "html": true, "cell_class": "text-end"},
+    ],
+    rows=rows,
+    state=table_state,
+    total_rows=total_rows,
+    title="Work Items",
+    class_name="work-items-mobile-card-table table-sm table-hover",
+    persist="header",
+    state_keys=["page", "page_size", "sort_by", "sort_dir", "service", "rule_name", "action_type", "status", "from_ts", "to_ts"]
+) }}

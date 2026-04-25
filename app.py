@@ -42,6 +42,11 @@ import pandas as pd
 from google.protobuf.json_format import ParseDict
 from hypercorn.asyncio import serve as hypercorn_serve
 from hypercorn.config import Config as HypercornConfig
+from jinja_bootstrap_spa import (
+    conditional_fragment_response,
+    parse_table_state,
+    register_bootstrap_macros,
+)
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
@@ -13365,6 +13370,26 @@ app.jinja_env.globals["source_label"] = source_label
 # ``{{ value|mask }}`` to redact PII/secrets from OTEL output.
 app.jinja_env.filters["mask"] = _mask_value_for_output
 
+# Register jinja-bootstrap-spa macros so any template can use:
+#   {% import "jinja_bootstrap_spa/bootstrap_macros.html" as ui %}
+register_bootstrap_macros(app.jinja_env)
+
+
+# ---------------------------------------------------------------------------
+# jinja-bootstrap-spa – runtime JS static asset
+# ---------------------------------------------------------------------------
+
+
+@app.route("/static/jinja-bootstrap-spa.js")
+async def jbs_static_js():
+    """Serve the packaged jinja-bootstrap-spa runtime from the installed package."""
+    import importlib.resources as _pkg_resources
+
+    pkg_dir = str(_pkg_resources.files("jinja_bootstrap_spa").joinpath("static"))
+    response = await send_from_directory(pkg_dir, "jinja-bootstrap-spa.js", mimetype="application/javascript")
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Web UI – Metrics (derived signal index)
@@ -18071,9 +18096,19 @@ async def view_work_items():
     status_filter = request.args.get("status", "").strip()
     from_ts, to_ts, time_error = _parse_time_window_args()
 
+    # Build initial JBS table state from request args so the data_grid
+    # is seeded with the correct filter + pagination values on first render.
+    table_state = parse_table_state(
+        request.args,
+        default_sort_by=_WORK_ITEMS_TABLE_DEFAULT_SORT_BY,
+        default_page_size=_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE,
+        allowed_page_sizes=_WORK_ITEMS_TABLE_PAGE_SIZES,
+        filter_keys=["service", "rule_name", "action_type", "status", "from_ts", "to_ts"],
+    )
+
     # Build query
     conditions = ["IsDeleted = 0"]
-    params = []
+    params: list[Any] = []
 
     if service_filter:
         conditions.append("ServiceName = ?")
@@ -18097,12 +18132,23 @@ async def view_work_items():
     where_clause = "WHERE " + " AND ".join(conditions) if conditions else "WHERE 1=1"
 
     # Query work items
-    items = []
+    items: list[dict[str, Any]] = []
     total_items = 0
-    services = set()
-    rules = set()
-    limit = _parse_limit(100)
-    offset = _parse_offset()
+    services: set[str] = set()
+    rules: set[str] = set()
+    page_size = int(table_state.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE))
+    page = int(table_state.get("page", 1))
+    offset = (page - 1) * page_size
+    sort_by_key = str(
+        table_state.get("sort_by", _WORK_ITEMS_TABLE_DEFAULT_SORT_BY) or _WORK_ITEMS_TABLE_DEFAULT_SORT_BY
+    )
+    sort_col = _WORK_ITEMS_TABLE_SORT_MAP.get(sort_by_key, "CreatedAt")
+    sort_dir = str(
+        table_state.get("sort_dir", _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR) or _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR
+    )
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR
+
     cache_key = (
         service_filter,
         rule_filter,
@@ -18110,7 +18156,7 @@ async def view_work_items():
         status_filter,
         str(from_ts or ""),
         str(to_ts or ""),
-        int(limit),
+        int(page_size),
         int(offset),
     )
     now = time.time()
@@ -18137,7 +18183,7 @@ async def view_work_items():
 
             rows = db.execute(
                 f"SELECT * FROM sobs_github_work_items FINAL {where_clause} "
-                f"ORDER BY CreatedAt DESC LIMIT {limit} OFFSET {offset}",
+                f"ORDER BY {sort_col} {sort_dir.upper()} LIMIT {page_size} OFFSET {offset}",
                 params,
             ).fetchall()
             items = [_serialize_github_work_item_row(r) for r in rows]
@@ -18174,10 +18220,14 @@ async def view_work_items():
     except Exception as exc:
         app.logger.warning("Error loading work items: %s", exc)
 
+    table_rows = _work_items_table_rows(items)
+
     return await render_template(
         "work_items.html",
         items=items,
         total_items=total_items,
+        table_state=table_state,
+        table_rows=table_rows,
         services=sorted(services),
         rules=sorted(rules),
         service_filter=service_filter,
@@ -18190,7 +18240,318 @@ async def view_work_items():
     )
 
 
-@app.route("/api/work-items", methods=["GET"])
+# ---------------------------------------------------------------------------
+# jinja-bootstrap-spa – Work Items table fragment helpers
+# ---------------------------------------------------------------------------
+
+_WORK_ITEMS_TABLE_SORT_MAP: dict[str, str] = {
+    "created_at": "CreatedAt",
+    "service": "ServiceName",
+    "anomaly": "AnomalyState",
+    "agent_rule": "AgentRuleName",
+}
+_WORK_ITEMS_TABLE_DEFAULT_SORT_BY = "created_at"
+_WORK_ITEMS_TABLE_DEFAULT_SORT_DIR = "desc"
+_WORK_ITEMS_TABLE_PAGE_SIZES = (25, 50, 100)
+_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE = 25
+_WORK_ITEMS_TABLE_STATE_KEYS = [
+    "page",
+    "page_size",
+    "sort_by",
+    "sort_dir",
+    "service",
+    "rule_name",
+    "action_type",
+    "status",
+    "from_ts",
+    "to_ts",
+]
+
+
+def _work_items_table_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert serialised work-item dicts into data_grid row dicts.
+
+    Columns that require HTML (badges, links, timestamps with TZ class) are
+    pre-rendered here so the template can pass ``html=True`` for those columns
+    without embedding Jinja logic in the cell values.
+    """
+    rows = []
+    for item in items:
+        created_raw = item.get("created_at", "")
+        # Timestamp cell – keep sobs-tz-ts class so client-side TZ conversion works.
+        created_html = (
+            f'<span class="sobs-tz-ts font-monospace small" data-utc-ts="{html.escape(created_raw)}">'
+            f"{html.escape(created_raw[:16].replace('T', ' '))}"
+            f"</span>"
+            if created_raw
+            else "—"
+        )
+
+        # Signal cell – two-line (source / name)
+        signal_html = (
+            f'<span class="text-secondary">{html.escape(item.get("signal_source", ""))}</span>'
+            f'<br><span class="font-monospace">{html.escape(item.get("signal_name", ""))}</span>'
+        )
+
+        # Anomaly cell – badge + short rule id
+        anomaly_state = item.get("anomaly_state", "")
+        anomaly_rule_id = item.get("anomaly_rule_id", "")
+        if anomaly_state == "critical":
+            badge_class = "bg-danger"
+        elif anomaly_state == "warning":
+            badge_class = "bg-warning text-dark"
+        else:
+            badge_class = "bg-secondary"
+        anomaly_html = (
+            f'<span class="badge {badge_class}">{html.escape(anomaly_state)}</span>'
+            f'<br><span class="text-secondary small" style="font-size:0.75rem;">rule: '
+            f"{html.escape(anomaly_rule_id[:8])}</span>"
+        )
+
+        # Action cell – copilot/issue badge + dedup badge
+        agent_action = item.get("agent_action", "")
+        if agent_action == "github_issue_copilot":
+            action_html = '<span class="badge bg-primary"><i class="bi bi-robot me-1"></i>Copilot</span>'
+        else:
+            action_html = '<span class="badge bg-secondary">Issue</span>'
+        dedup = item.get("dedup_decision", "")
+        if dedup and dedup != "new_issue":
+            action_html += (
+                f'<br><span class="badge bg-info text-dark mt-1">' f"{html.escape(dedup.replace('_', ' '))}</span>"
+            )
+
+        # Issue cell – link, copilot assignment badge, PR link
+        issue_url = item.get("issue_url", "")
+        issue_number = item.get("issue_number", 0)
+        issue_title = item.get("issue_title", "")
+        copilot_status = item.get("copilot_assignment_status", "")
+        pr_url = item.get("pr_url", "")
+        pr_number = item.get("pr_number", 0)
+        if issue_url and issue_number:
+            issue_html = (
+                f'<a href="{html.escape(issue_url)}" target="_blank" rel="noopener" '
+                f'class="text-decoration-none" title="{html.escape(issue_title)}">'
+                f'<i class="bi bi-github me-1"></i>#{issue_number}</a>'
+            )
+            if copilot_status and agent_action == "github_issue_copilot":
+                if copilot_status in ("requested", "active"):
+                    cs_class = "bg-success"
+                elif copilot_status == "blocked":
+                    cs_class = "bg-warning text-dark"
+                elif copilot_status == "failed":
+                    cs_class = "bg-danger"
+                else:
+                    cs_class = "bg-secondary"
+                issue_html += (
+                    f'<br><span class="badge {cs_class} mt-1">'
+                    f"{html.escape(copilot_status.replace('_', ' '))}</span>"
+                )
+            if pr_url and pr_number:
+                issue_html += (
+                    f'<br><a href="{html.escape(pr_url)}" target="_blank" rel="noopener" '
+                    f'class="small text-decoration-none">'
+                    f'<i class="bi bi-git"></i> PR #{pr_number}</a>'
+                )
+        else:
+            issue_html = '<span class="text-secondary">—</span>'
+
+        # Detail button – opens the existing Bootstrap modal (keep as-is).
+        detail_html = (
+            f'<button class="btn btn-sm btn-link py-0 px-1 work-item-detail-btn" '
+            f'data-bs-toggle="modal" data-bs-target="#workItemDetailModal" '
+            f'data-work-item-id="{html.escape(item.get("id", ""))}" '
+            f'data-work-item-url="{html.escape(issue_url)}" '
+            f'data-work-item-title="{html.escape(issue_title)}" '
+            f'data-work-item-analysis="{html.escape(item.get("analysis_summary", ""))}" '
+            f'data-work-item-suggestion="{html.escape(item.get("suggestion_summary", ""))}">'
+            f'<i class="bi bi-arrow-right"></i></button>'
+        )
+
+        rows.append(
+            {
+                "created_at": created_html,
+                "service": item.get("service", ""),
+                "signal": signal_html,
+                "anomaly": anomaly_html,
+                "agent_rule": item.get("agent_rule_name", ""),
+                "action": action_html,
+                "issue": issue_html,
+                "detail": detail_html,
+            }
+        )
+    return rows
+
+
+async def _fetch_work_items_fragment_data(
+    db: "ChDbConnection",
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int, list[str], list[str]]:
+    """Fetch work items for the JBS fragment endpoint using page-based pagination.
+
+    Returns ``(items, total_items, services, rules)``.
+    """
+    service_filter = str(state.get("service", "") or "")
+    rule_filter = str(state.get("rule_name", "") or "")
+    action_type_filter = str(state.get("action_type", "") or "")
+    status_filter = str(state.get("status", "") or "")
+    from_ts_raw = str(state.get("from_ts", "") or "")
+    to_ts_raw = str(state.get("to_ts", "") or "")
+
+    # Normalise time values (same logic as _parse_time_window_args).
+    try:
+        from_ts = _normalize_ch_timestamp(from_ts_raw) if from_ts_raw else ""
+        to_ts = _normalize_ch_timestamp(to_ts_raw) if to_ts_raw else ""
+    except (TypeError, ValueError):
+        from_ts = ""
+        to_ts = ""
+
+    conditions = ["IsDeleted = 0"]
+    params: list[Any] = []
+    if service_filter:
+        conditions.append("ServiceName = ?")
+        params.append(service_filter)
+    if rule_filter:
+        conditions.append("AgentRuleName = ?")
+        params.append(rule_filter)
+    if action_type_filter:
+        conditions.append("AgentAction = ?")
+        params.append(action_type_filter)
+    if status_filter:
+        conditions.append("IssueState = ?")
+        params.append(status_filter)
+    if from_ts:
+        conditions.append("CreatedAt >= ?")
+        params.append(from_ts)
+    if to_ts:
+        conditions.append("CreatedAt <= ?")
+        params.append(to_ts)
+
+    where_clause = "WHERE " + " AND ".join(conditions)
+
+    # Pagination
+    page = max(1, int(state.get("page", 1) or 1))
+    page_size = int(state.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE) or _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE)
+    if page_size not in _WORK_ITEMS_TABLE_PAGE_SIZES:
+        page_size = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+    offset = (page - 1) * page_size
+
+    # Sort
+    sort_by_key = str(state.get("sort_by", _WORK_ITEMS_TABLE_DEFAULT_SORT_BY) or _WORK_ITEMS_TABLE_DEFAULT_SORT_BY)
+    sort_col = _WORK_ITEMS_TABLE_SORT_MAP.get(sort_by_key, "CreatedAt")
+    sort_dir = str(state.get("sort_dir", _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR) or _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR)
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR
+
+    # Shared cache key (page-based)
+    cache_key = (
+        service_filter,
+        rule_filter,
+        action_type_filter,
+        status_filter,
+        from_ts,
+        to_ts,
+        page_size,
+        offset,
+    )
+    now = time.time()
+    items: list[dict[str, Any]] = []
+    total_items = 0
+    services: set[str] = set()
+    rules: set[str] = set()
+
+    try:
+        settings = _load_all_ai_settings(db)
+        asyncio.create_task(_maybe_backfill_github_work_item_links(db, settings))
+
+        page_cache_hit = False
+        with _work_items_cache_lock:
+            cached_page = _work_items_page_cache.get(cache_key)
+            if cached_page and float(cached_page.get("expires_at", 0.0)) > now:
+                total_items = int(cached_page.get("total_items", 0))
+                items = list(cached_page.get("items", []))
+                page_cache_hit = True
+
+        if not page_cache_hit:
+            count_row = db.execute(
+                f"SELECT count() AS c FROM sobs_github_work_items FINAL {where_clause}",
+                params,
+            ).fetchone()
+            total_items = int(count_row["c"]) if count_row else 0
+
+            rows = db.execute(
+                f"SELECT * FROM sobs_github_work_items FINAL {where_clause} "
+                f"ORDER BY {sort_col} {sort_dir.upper()} LIMIT {page_size} OFFSET {offset}",
+                params,
+            ).fetchall()
+            items = [_serialize_github_work_item_row(r) for r in rows]
+            with _work_items_cache_lock:
+                _work_items_page_cache[cache_key] = {
+                    "total_items": total_items,
+                    "items": items,
+                    "expires_at": now + max(1, WORK_ITEMS_PAGE_CACHE_TTL_SEC),
+                }
+
+        filter_cache_hit = False
+        with _work_items_cache_lock:
+            if float(_work_items_filter_cache.get("expires_at", 0.0)) > now:
+                services = set(_work_items_filter_cache.get("services", []))
+                rules = set(_work_items_filter_cache.get("rules", []))
+                filter_cache_hit = True
+
+        if not filter_cache_hit:
+            all_services = db.execute(
+                "SELECT DISTINCT ServiceName FROM sobs_github_work_items FINAL "
+                "WHERE IsDeleted=0 ORDER BY ServiceName"
+            ).fetchall()
+            services = {str(r["ServiceName"]) for r in all_services if r["ServiceName"]}
+            all_rules = db.execute(
+                "SELECT DISTINCT AgentRuleName FROM sobs_github_work_items FINAL "
+                "WHERE IsDeleted=0 ORDER BY AgentRuleName"
+            ).fetchall()
+            rules = {str(r["AgentRuleName"]) for r in all_rules if r["AgentRuleName"]}
+            with _work_items_cache_lock:
+                _work_items_filter_cache["services"] = sorted(services)
+                _work_items_filter_cache["rules"] = sorted(rules)
+                _work_items_filter_cache["expires_at"] = now + max(1, WORK_ITEMS_FILTER_CACHE_TTL_SEC)
+    except Exception as exc:
+        app.logger.warning("Error loading work items fragment data: %s", exc)
+
+    return items, total_items, sorted(services), sorted(rules)
+
+
+@app.route("/components/work-items")
+@require_basic_auth
+async def work_items_table_component():
+    """jinja-bootstrap-spa fragment endpoint for the Work Items data grid.
+
+    Returns just the table fragment HTML with ETag/304 support so the runtime
+    can swap only the table without reloading the full page.
+    """
+    db = get_db()
+
+    state = parse_table_state(
+        request.args,
+        request_headers=request.headers,
+        default_sort_by=_WORK_ITEMS_TABLE_DEFAULT_SORT_BY,
+        default_page_size=_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE,
+        allowed_page_sizes=_WORK_ITEMS_TABLE_PAGE_SIZES,
+        filter_keys=["service", "rule_name", "action_type", "status", "from_ts", "to_ts"],
+    )
+
+    items, total_items, services, rules = await _fetch_work_items_fragment_data(db, state)
+    table_rows = _work_items_table_rows(items)
+
+    content = await render_template(
+        "partials/work_items_table.html",
+        rows=table_rows,
+        total_rows=total_items,
+        table_state=state,
+        services=services,
+        rules=rules,
+    )
+    return conditional_fragment_response(content, request.headers)
+
+
 @require_basic_auth
 async def api_get_work_items():
     """Get work items filtered by optional criteria."""
