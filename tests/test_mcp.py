@@ -237,6 +237,42 @@ class TestMcpToolsDiscovery:
 
 
 # ---------------------------------------------------------------------------
+# HTTP: GET /mcp  – transport compatibility probe (no auth)
+# ---------------------------------------------------------------------------
+class TestMcpGetProbe:
+    async def test_get_mcp_returns_200(self, client):
+        """GET /mcp must return 200 for VS Code / MCP client compatibility."""
+        r = await client.get("/mcp")
+        assert r.status_code == 200
+
+    async def test_get_mcp_returns_server_info(self, client):
+        r = await client.get("/mcp")
+        data = json.loads(await r.get_data())
+        assert "protocolVersion" in data
+        assert "serverInfo" in data
+        assert data["serverInfo"]["name"] == "sobs-mcp"
+
+    async def test_get_mcp_returns_capabilities(self, client):
+        r = await client.get("/mcp")
+        data = json.loads(await r.get_data())
+        assert "capabilities" in data
+
+    async def test_get_mcp_does_not_require_api_key(self, client):
+        """GET /mcp must be accessible without authentication."""
+        r = await client.get("/mcp")
+        assert r.status_code == 200
+
+    async def test_get_mcp_disabled_returns_503(self, client):
+        """GET /mcp returns 503 when MCP is disabled."""
+        db = _get_db()
+        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "0")
+        r = await client.get("/mcp")
+        assert r.status_code == 503
+        # Re-enable.
+        sobs_app._set_app_setting(db, sobs_mcp._MCP_ENABLED_SETTING, "1")
+
+
+# ---------------------------------------------------------------------------
 # HTTP: POST /mcp  initialize (no auth)
 # ---------------------------------------------------------------------------
 class TestMcpInitialize:
