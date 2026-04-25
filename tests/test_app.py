@@ -17766,6 +17766,46 @@ class TestWebTraffic:
         assert compact["open_prs"] == 5
         assert compact["security_items"] == 1
 
+    async def test_sync_github_repo_health_once_skips_persist_when_unchanged(self, client, monkeypatch):
+        db = sobs_app.get_db()
+        sobs_app._del_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING)
+        sobs_app._del_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING)
+        state = {"n": 0}
+
+        async def _fake_collect(_db):
+            state["n"] += 1
+            return {
+                "ok": True,
+                "scanned_repos": 2,
+                "total_repos_considered": 3,
+                "open_issues": 4,
+                "open_prs": 5,
+                "security_items": 1,
+                "version_scoped": True,
+                "last_synced_at": f"2026-04-25T00:00:0{state['n']}Z",
+                "repos": [],
+            }
+
+        original_set = sobs_app._set_app_setting
+        set_calls: list[str] = []
+
+        def _tracking_set(db_obj, key, value):
+            set_calls.append(str(key))
+            return original_set(db_obj, key, value)
+
+        monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", _fake_collect)
+        monkeypatch.setattr(sobs_app, "_set_app_setting", _tracking_set)
+
+        first = await sobs_app._sync_github_repo_health_once(db)
+        assert first["ok"] is True
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING) == 1
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) == 1
+
+        second = await sobs_app._sync_github_repo_health_once(db)
+        assert second["ok"] is True
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING) == 1
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) == 1
+
     async def test_enrichment_libraries_returns_500_on_query_error(self, client, monkeypatch):
         original_collect = sobs_app._collect_library_inventory
 

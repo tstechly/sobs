@@ -17210,13 +17210,33 @@ async def _sync_github_repo_health_once(db: "ChDbConnection | None" = None) -> d
     if not bool(summary.get("ok")):
         return summary
 
-    _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SYNC_SETTING, str(summary.get("last_synced_at") or ""))
-    compact = {
+    compact_values = {
         "scanned_repos": int(summary.get("scanned_repos", 0) or 0),
         "total_repos_considered": int(summary.get("total_repos_considered", 0) or 0),
         "open_issues": int(summary.get("open_issues", 0) or 0),
         "open_prs": int(summary.get("open_prs", 0) or 0),
         "security_items": int(summary.get("security_items", 0) or 0),
+    }
+
+    previous_raw = _get_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) or ""
+    if previous_raw:
+        try:
+            previous = _safe_json_loads(previous_raw, {})
+            previous_values = {
+                "scanned_repos": int(previous.get("scanned_repos", 0) or 0),
+                "total_repos_considered": int(previous.get("total_repos_considered", 0) or 0),
+                "open_issues": int(previous.get("open_issues", 0) or 0),
+                "open_prs": int(previous.get("open_prs", 0) or 0),
+                "security_items": int(previous.get("security_items", 0) or 0),
+            }
+        except Exception:
+            previous_values = {}
+        if previous_values == compact_values:
+            return summary
+
+    _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SYNC_SETTING, str(summary.get("last_synced_at") or ""))
+    compact = {
+        **compact_values,
         "last_synced_at": str(summary.get("last_synced_at") or ""),
     }
     _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING, json.dumps(compact, separators=(",", ":")))
