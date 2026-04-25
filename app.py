@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import html
 import inspect
+import io
 import ipaddress as _ipaddress
 import json
 import logging
@@ -28,6 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
@@ -319,7 +321,7 @@ async def _startup_async_http_client() -> None:
 
 @app.after_serving
 async def _shutdown_async_http_client() -> None:
-    global _ASYNC_HTTP_CLIENT, _CVE_SCAN_TASK, _RAW_WINDOW_COPY_TASK
+    global _ASYNC_HTTP_CLIENT, _CVE_SCAN_TASK, _RAW_WINDOW_COPY_TASK, _GITHUB_REPO_HEALTH_TASK
     if _ASYNC_HTTP_CLIENT is not None:
         await _ASYNC_HTTP_CLIENT.aclose()
         _ASYNC_HTTP_CLIENT = None
@@ -337,6 +339,13 @@ async def _shutdown_async_http_client() -> None:
         except asyncio.CancelledError:
             pass
         _RAW_WINDOW_COPY_TASK = None
+    if _GITHUB_REPO_HEALTH_TASK is not None and not _GITHUB_REPO_HEALTH_TASK.done():
+        _GITHUB_REPO_HEALTH_TASK.cancel()
+        try:
+            await _GITHUB_REPO_HEALTH_TASK
+        except asyncio.CancelledError:
+            pass
+        _GITHUB_REPO_HEALTH_TASK = None
     _shutdown_db_resources()
 
 
@@ -16406,6 +16415,171 @@ def _decode_github_contents_payload(payload: dict[str, Any]) -> bytes:
         return b""
 
 
+def _github_actions_snapshot_name(filename: str) -> tuple[str, str, str] | None:
+    base = os.path.basename(str(filename or "").strip())
+    if not base:
+        return None
+    match = re.match(r"^pip-freeze-([a-z0-9_-]+)-([a-z0-9_-]+)\.txt$", base, re.IGNORECASE)
+    if not match:
+        return None
+    platform = match.group(1).lower()
+    architecture = match.group(2).lower()
+    return (f"pip-freeze-{platform}-{architecture}", platform, architecture)
+
+
+async def _github_actions_dependency_rows(
+    client: httpx.AsyncClient,
+    github_token: str,
+    owner: str,
+    repo: str,
+    release_id: str,
+    release_version: str,
+    commit_sha: str,
+) -> list[dict[str, Any]]:
+    """Return dependency artifact rows from GH Actions snapshots for a release."""
+    rows: list[dict[str, Any]] = []
+    commit = str(commit_sha or "").strip()
+    if not commit:
+        # Without commit identity, we cannot safely bind a workflow run to this release.
+        return rows
+    params: dict[str, str] = {
+        "status": "completed",
+        "per_page": str(_GITHUB_ACTIONS_BACKFILL_MAX_RUNS_PER_RELEASE),
+    }
+    params["head_sha"] = commit
+
+    try:
+        runs_resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/actions/runs",
+            params=params,
+            headers=_github_api_headers(github_token),
+            timeout=20,
+        )
+    except Exception:
+        return rows
+
+    if runs_resp.status_code != 200:
+        return rows
+
+    runs_payload = runs_resp.json() if runs_resp.content else {}
+    workflow_runs = runs_payload.get("workflow_runs", []) if isinstance(runs_payload, dict) else []
+    if not isinstance(workflow_runs, list):
+        return rows
+
+    for run in workflow_runs:
+        if not isinstance(run, dict):
+            continue
+        if str(run.get("conclusion") or "").lower() != "success":
+            continue
+        run_id = str(run.get("id") or "").strip()
+        if not run_id:
+            continue
+
+        try:
+            artifacts_resp = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/artifacts",
+                params={"per_page": "100"},
+                headers=_github_api_headers(github_token),
+                timeout=20,
+            )
+        except Exception:
+            continue
+        if artifacts_resp.status_code != 200:
+            continue
+
+        artifacts_payload = artifacts_resp.json() if artifacts_resp.content else {}
+        artifacts = artifacts_payload.get("artifacts", []) if isinstance(artifacts_payload, dict) else []
+        if not isinstance(artifacts, list):
+            continue
+
+        snapshot_artifact: dict[str, Any] | None = None
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            if str(artifact.get("name") or "") != _GITHUB_ACTIONS_SNAPSHOT_ARTIFACT_NAME:
+                continue
+            if bool(artifact.get("expired", False)):
+                continue
+            snapshot_artifact = artifact
+            break
+        if snapshot_artifact is None:
+            continue
+
+        archive_url = str(snapshot_artifact.get("archive_download_url") or "").strip()
+        artifact_id = str(snapshot_artifact.get("id") or "").strip()
+        if not archive_url:
+            continue
+
+        try:
+            archive_resp = await client.get(
+                archive_url,
+                headers=_github_api_headers(
+                    github_token,
+                    extra={"Accept": "application/octet-stream"},
+                ),
+                timeout=30,
+                follow_redirects=True,
+            )
+        except Exception:
+            continue
+        if archive_resp.status_code != 200 or not archive_resp.content:
+            continue
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive_resp.content)) as zip_file:
+                for info in zip_file.infolist():
+                    if info.is_dir():
+                        continue
+                    parsed_name = _github_actions_snapshot_name(info.filename)
+                    if not parsed_name:
+                        continue
+                    dep_name, platform, architecture = parsed_name
+                    raw_bytes = zip_file.read(info)
+                    deps = _parse_requirements_dependencies(raw_bytes.decode("utf-8", errors="replace"))
+                    if not deps:
+                        continue
+
+                    rows.append(
+                        {
+                            "Id": str(uuid.uuid4()),
+                            "ReleaseId": release_id,
+                            "ArtifactType": "dependencies-lockfile",
+                            "Name": dep_name,
+                            "ContentType": "text/plain",
+                            "Size": len(raw_bytes),
+                            "StorageRef": (
+                                f"github-actions://{owner}/{repo}/runs/{run_id}"
+                                f"/artifacts/{artifact_id}/{os.path.basename(info.filename)}"
+                            ),
+                            "ChecksumSha256": hashlib.sha256(raw_bytes).hexdigest(),
+                            "Platform": platform,
+                            "Architecture": architecture,
+                            "MetadataJson": json.dumps(
+                                {
+                                    "source": "github_actions_artifact",
+                                    "repo": f"{owner}/{repo}",
+                                    "run_id": run_id,
+                                    "run_head_sha": str(run.get("head_sha") or ""),
+                                    "release_version": release_version,
+                                    "artifact_name": str(snapshot_artifact.get("name") or ""),
+                                    "dependencies": deps,
+                                },
+                                separators=(",", ":"),
+                            ),
+                            "UploadedAt": _normalize_ch_timestamp(datetime.now(timezone.utc)),
+                            "IsDeleted": 0,
+                            "Version": int(time.time() * 1000),
+                        }
+                    )
+        except Exception:
+            continue
+
+        if rows:
+            return rows
+
+    return rows
+
+
 def _github_ref_candidates(release_version: str) -> list[str]:
     """Return Git refs to try for a release version, in priority order."""
     version = (release_version or "").strip()
@@ -16496,7 +16670,7 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
 
     try:
         release_rows = db.execute(
-            "SELECT Id, AppId, ReleaseVersion "
+            "SELECT Id, AppId, ReleaseVersion, CommitSha "
             "FROM sobs_app_releases FINAL "
             "WHERE IsDeleted=0 "
             f"ORDER BY ReleasedAt DESC LIMIT {max_releases}"
@@ -16536,6 +16710,7 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
         release_id = str(row[0] or "")
         app_id = str(row[1] or "")
         release_version = str(row[2] or "").strip()
+        commit_sha = str(row[3] or "").strip()
         app_info = apps_by_id.get(app_id, {})
         repo_url = str(app_info.get("repo_url") or "").strip()
         app_enabled = int(cast(Any, app_info.get("enabled")) or 0)
@@ -16549,6 +16724,22 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
             continue
 
         attempted += 1
+
+        actions_rows = await _github_actions_dependency_rows(
+            client,
+            github_token,
+            owner,
+            repo,
+            release_id,
+            release_version,
+            commit_sha,
+        )
+        if actions_rows:
+            inserted_rows.extend(actions_rows)
+            existing_release_ids.add(release_id)
+            inserted += len(actions_rows)
+            continue
+
         found_for_release = False
         for ref in _github_ref_candidates(release_version):
             for lockfile_path, content_type, parser_kind in candidates:
@@ -17001,12 +17192,64 @@ async def _cve_scanner_loop() -> None:
         await asyncio.sleep(_CVE_SCAN_INTERVAL_S)
 
 
+async def _github_repo_health_loop() -> None:
+    """Background task: periodically sync GitHub repo health for configured repos."""
+    await asyncio.sleep(_GITHUB_REPO_HEALTH_INITIAL_DELAY_S)
+    while True:
+        try:
+            await _sync_github_repo_health_once()
+        except Exception:
+            app.logger.debug("GitHub repo health loop error", exc_info=True)
+        await asyncio.sleep(_GITHUB_REPO_HEALTH_INTERVAL_S)
+
+
+async def _sync_github_repo_health_once(db: "ChDbConnection | None" = None) -> dict[str, Any]:
+    """Run a single GitHub repo-health sync and persist summary settings."""
+    resolved_db = db if db is not None else get_db()
+    summary = await _collect_github_repo_health_summary(resolved_db)
+    if not bool(summary.get("ok")):
+        return summary
+
+    compact_values = {
+        "scanned_repos": int(summary.get("scanned_repos", 0) or 0),
+        "total_repos_considered": int(summary.get("total_repos_considered", 0) or 0),
+        "open_issues": int(summary.get("open_issues", 0) or 0),
+        "open_prs": int(summary.get("open_prs", 0) or 0),
+        "security_items": int(summary.get("security_items", 0) or 0),
+    }
+
+    previous_raw = _get_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) or ""
+    if previous_raw:
+        try:
+            previous = _safe_json_loads(previous_raw, {})
+            previous_values = {
+                "scanned_repos": int(previous.get("scanned_repos", 0) or 0),
+                "total_repos_considered": int(previous.get("total_repos_considered", 0) or 0),
+                "open_issues": int(previous.get("open_issues", 0) or 0),
+                "open_prs": int(previous.get("open_prs", 0) or 0),
+                "security_items": int(previous.get("security_items", 0) or 0),
+            }
+        except Exception:
+            previous_values = {}
+        if previous_values == compact_values:
+            return summary
+
+    _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SYNC_SETTING, str(summary.get("last_synced_at") or ""))
+    compact = {
+        **compact_values,
+        "last_synced_at": str(summary.get("last_synced_at") or ""),
+    }
+    _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING, json.dumps(compact, separators=(",", ":")))
+    return summary
+
+
 @app.before_serving
 async def _startup_enrichment() -> None:
     """Start the background CVE scanner and raw metrics window copy worker."""
-    global _CVE_SCAN_TASK, _RAW_WINDOW_COPY_TASK
+    global _CVE_SCAN_TASK, _RAW_WINDOW_COPY_TASK, _GITHUB_REPO_HEALTH_TASK
     _CVE_SCAN_TASK = asyncio.create_task(_cve_scanner_loop())
     _RAW_WINDOW_COPY_TASK = asyncio.create_task(_raw_window_copy_loop())
+    _GITHUB_REPO_HEALTH_TASK = asyncio.create_task(_github_repo_health_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -17649,11 +17892,8 @@ async def api_enrichment_libraries():
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 
-@app.route("/api/enrichment/github/repo-health", methods=["GET"])
-@require_basic_auth
-async def api_enrichment_github_repo_health():
+async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str, Any]:
     """Return version-scoped GitHub repo health counts for CVE workflow context."""
-    db = get_db()
     default_github_token = _load_ai_setting(db, "ai.github_token", "").strip()
 
     try:
@@ -17670,7 +17910,7 @@ async def api_enrichment_github_repo_health():
             "ORDER BY ReleasedAt DESC LIMIT 4000"
         ).fetchall()
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 500
+        return {"ok": False, "error": str(exc)}
 
     versions_by_app: dict[str, list[str]] = {}
     for row in release_rows:
@@ -17781,19 +18021,28 @@ async def api_enrichment_github_repo_health():
         )
     )
 
-    return jsonify(
-        {
-            "ok": True,
-            "scanned_repos": scanned_repos,
-            "total_repos_considered": len(repo_targets),
-            "open_issues": total_open_issues,
-            "open_prs": total_open_prs,
-            "security_items": total_security_items,
-            "version_scoped": True,
-            "last_synced_at": _now_iso(),
-            "repos": repos_summary,
-        }
-    )
+    return {
+        "ok": True,
+        "scanned_repos": scanned_repos,
+        "total_repos_considered": len(repo_targets),
+        "open_issues": total_open_issues,
+        "open_prs": total_open_prs,
+        "security_items": total_security_items,
+        "version_scoped": True,
+        "last_synced_at": _now_iso(),
+        "repos": repos_summary,
+    }
+
+
+@app.route("/api/enrichment/github/repo-health", methods=["GET"])
+@require_basic_auth
+async def api_enrichment_github_repo_health():
+    """Return version-scoped GitHub repo health counts for CVE workflow context."""
+    db = get_db()
+    summary = await _collect_github_repo_health_summary(db)
+    if not bool(summary.get("ok")):
+        return jsonify(summary), 500
+    return jsonify(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -24244,6 +24493,8 @@ _GITHUB_BACKFILL_MAX_RELEASES_SETTING = "enrichment.github_backfill_max_releases
 _CVE_LAST_BACKFILL_ATTEMPTED_SETTING = "enrichment.cve_last_scan_github_backfill_attempted"
 _CVE_LAST_BACKFILL_INSERTED_SETTING = "enrichment.cve_last_scan_github_backfill_inserted"
 _CVE_LAST_BACKFILL_CAP_SETTING = "enrichment.cve_last_scan_github_backfill_cap"
+_GITHUB_REPO_HEALTH_LAST_SYNC_SETTING = "enrichment.github_repo_health_last_sync"
+_GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING = "enrichment.github_repo_health_last_summary"
 
 # Simple bounded in-process geo cache: {ip: geo_dict}
 _GEO_CACHE: OrderedDict[str, dict] = OrderedDict()
@@ -24264,9 +24515,14 @@ _GITHUB_BACKFILL_MAX_RELEASES_MIN = 1
 _GITHUB_BACKFILL_MAX_RELEASES_MAX = 2000
 _GITHUB_REPO_HEALTH_MAX_REPOS = 25
 _GITHUB_REPO_HEALTH_MAX_ITEMS_PER_REPO = 100
+_GITHUB_ACTIONS_SNAPSHOT_ARTIFACT_NAME = "sobs-release-dependency-snapshots"
+_GITHUB_ACTIONS_BACKFILL_MAX_RUNS_PER_RELEASE = 20
+_GITHUB_REPO_HEALTH_INITIAL_DELAY_S = 45
+_GITHUB_REPO_HEALTH_INTERVAL_S = 3600
 
 # Background CVE scan task handle
 _CVE_SCAN_TASK: "asyncio.Task[None] | None" = None
+_GITHUB_REPO_HEALTH_TASK: "asyncio.Task[None] | None" = None
 
 # Available signal sources for condition building (mirrors v_derived_signals_1m signals)
 _NOTIFICATION_SIGNAL_SOURCES: dict[str, list[str]] = {
