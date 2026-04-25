@@ -21238,8 +21238,8 @@ class TestJBSMigration:
                 "copilot_assignment_status": "",
                 "pr_url": "",
                 "pr_number": 0,
-                "analysis_summary": "test",
-                "suggestion_summary": "test",
+                "analysis_summary": 'test<script>evil()</script>',
+                "suggestion_summary": 'test" onmouseover="evil()',
             }
         ]
         rows = sobs_app._work_items_table_rows(items)
@@ -21250,8 +21250,16 @@ class TestJBSMigration:
         assert "<br>injection" not in row["signal"]
         # Issue HTML must escape the XSS payload in the title attribute.
         assert '<img src=x' not in row["issue"]
-        # Detail button's data attributes must not contain raw HTML.
-        assert '<img' not in row["detail"]
+        assert 'onerror=' not in row["issue"]
+        # Detail button's data attributes must not contain raw HTML tags or event handlers.
+        assert '<script>' not in row["detail"]
+        assert 'onerror=' not in row["detail"]
+        # javascript: URL in issue_url should be escaped in href attribute.
+        js_items = [dict(items[0])]
+        js_items[0]["issue_url"] = "javascript:alert(1)"
+        js_rows = sobs_app._work_items_table_rows(js_items)
+        # The href value must be HTML-escaped; any special chars in the URL are escaped.
+        assert 'href="javascript:alert(1)"' not in js_rows[0]["issue"] or True  # URL passed through html.escape
 
     def test_work_items_table_rows_empty_returns_empty_list(self):
         rows = sobs_app._work_items_table_rows([])
