@@ -21513,7 +21513,7 @@ class TestJBSMigration:
     async def test_work_items_fragment_page_param_changes_etag(self, client):
         """Requesting a different page should produce a different ETag (or 200 response)."""
         r1 = await client.get("/components/work-items?page=1")
-        etag1 = r1.headers.get("ETag", "")
+        assert r1.status_code in (200, 304)
 
         r2 = await client.get("/components/work-items?page=2")
         # A 200 is expected; ETag may differ or match (no data means both pages are empty).
@@ -21563,7 +21563,7 @@ class TestJBSMigration:
                 "created_at": "2026-01-01T00:00:00.000Z",
                 "service": '<script>alert("xss")</script>',
                 "signal_source": "metrics",
-                "signal_name": 'p95<br>injection',
+                "signal_name": "p95<br>injection",
                 "anomaly_state": "critical",
                 "anomaly_rule_id": "rule-1",
                 "agent_rule_name": "Rule A",
@@ -21571,11 +21571,11 @@ class TestJBSMigration:
                 "dedup_decision": "new_issue",
                 "issue_url": "https://github.com/abartrim/sobs/issues/1",
                 "issue_number": 1,
-                "issue_title": '<img src=x onerror=alert(1)>',
+                "issue_title": "<img src=x onerror=alert(1)>",
                 "copilot_assignment_status": "",
                 "pr_url": "",
                 "pr_number": 0,
-                "analysis_summary": 'test<script>evil()</script>',
+                "analysis_summary": "test<script>evil()</script>",
                 "suggestion_summary": 'test" onmouseover="evil()',
             }
         ]
@@ -21587,8 +21587,8 @@ class TestJBSMigration:
         assert "<br>injection" not in row["signal"]
         # Issue and detail HTML must not contain raw (unescaped) HTML tags.
         # html.escape() converts < and > so <img, <script, etc. cannot appear as element openers.
-        assert '<img' not in row["issue"], "Raw unescaped <img element must not appear in issue HTML"
-        assert '<script>' not in row["detail"], "Raw <script> must not appear in detail column"
+        assert "<img" not in row["issue"], "Raw unescaped <img element must not appear in issue HTML"
+        assert "<script>" not in row["detail"], "Raw <script> must not appear in detail column"
         # javascript: URL in issue_url is not a safe GitHub URL and must be blocked.
         # _is_safe_github_url rejects non-https and non-github.com domains, so the
         # cell must render as plain text (—) rather than an <a href="javascript:..."> link.
@@ -21599,15 +21599,13 @@ class TestJBSMigration:
         js_rows = sobs_app._work_items_table_rows(js_items)
         # The unsafe URL must never appear as an href — the cell renders as plain text.
         assert 'href="javascript:' not in js_rows[0]["issue"]
-        assert 'href=' not in js_rows[0]["issue"], (
-            "A javascript: URL must be blocked, not rendered as a link"
-        )
+        assert "href=" not in js_rows[0]["issue"], "A javascript: URL must be blocked, not rendered as a link"
         # The detail button must carry an empty data-work-item-url so the modal JS
         # cannot use it to open an unsafe link. _work_items_table_rows() must emit
         # data-work-item-url="" (empty string) when _is_safe_github_url() returns False.
-        assert 'data-work-item-url=""' in js_rows[0]["detail"], (
-            "Unsafe URL must result in an empty data-work-item-url on the detail button"
-        )
+        assert (
+            'data-work-item-url=""' in js_rows[0]["detail"]
+        ), "Unsafe URL must result in an empty data-work-item-url on the detail button"
 
     def test_work_items_detail_button_safe_url_propagated(self):
         """A valid GitHub URL must appear in data-work-item-url on the detail button."""
@@ -21640,9 +21638,9 @@ class TestJBSMigration:
         assert "data-work-item-url=" in row["detail"], "detail button must carry data-work-item-url"
         # The URL must appear verbatim (html-escaped) in the attribute; verify the specific value.
         expected_url = "https://github.com/abartrim/sobs/issues/42"
-        assert f'data-work-item-url="{html.escape(expected_url)}"' in row["detail"], (
-            f"Safe URL {expected_url!r} must appear verbatim in data-work-item-url"
-        )
+        assert (
+            f'data-work-item-url="{html.escape(expected_url)}"' in row["detail"]
+        ), f"Safe URL {expected_url!r} must appear verbatim in data-work-item-url"
 
     def test_work_items_detail_button_unsafe_url_cleared(self):
         """Unsafe issue_url must produce an empty data-work-item-url on the detail button.
@@ -21681,9 +21679,7 @@ class TestJBSMigration:
             rows = sobs_app._work_items_table_rows(items)
             row = rows[0]
             # Visible cell must not render an href.
-            assert "href=" not in row["issue"], (
-                f"Unsafe URL {bad_url!r} must not appear as href in issue cell"
-            )
+            assert "href=" not in row["issue"], f"Unsafe URL {bad_url!r} must not appear as href in issue cell"
             # Detail button must carry an empty data-work-item-url attribute.
             assert 'data-work-item-url=""' in row["detail"], (
                 f"Unsafe URL {bad_url!r} must result in empty data-work-item-url on detail button; "

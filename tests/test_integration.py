@@ -2105,9 +2105,7 @@ class TestJBSWorkItemsMigration:
             headers={"If-None-Match": etag},
             timeout=10,
         )
-        assert r2.status_code == 304, (
-            f"Identical re-request with If-None-Match should be 304, got {r2.status_code}"
-        )
+        assert r2.status_code == 304, f"Identical re-request with If-None-Match should be 304, got {r2.status_code}"
 
     def test_fragment_endpoint_sort_params_accepted(self, live_server: str) -> None:
         """Fragment endpoint must accept sort_by/sort_dir query params without error."""
@@ -2116,9 +2114,9 @@ class TestJBSWorkItemsMigration:
                 f"{live_server}/components/work-items?sort_by={sort_by}&sort_dir={sort_dir}",
                 timeout=10,
             )
-            assert resp.status_code == 200, (
-                f"Fragment with sort_by={sort_by}&sort_dir={sort_dir} returned {resp.status_code}"
-            )
+            assert (
+                resp.status_code == 200
+            ), f"Fragment with sort_by={sort_by}&sort_dir={sort_dir} returned {resp.status_code}"
             assert 'data-jbs-component="table"' in resp.text
 
     def test_fragment_endpoint_filter_params_accepted(self, live_server: str) -> None:
@@ -2157,7 +2155,12 @@ class TestJBSWorkItemsMigration:
         assert not console_errors, f"Browser console errors on /work-items: {console_errors}"
 
     def test_jbs_runtime_script_loaded_from_package(self, page: Page, live_server: str) -> None:
-        """The JBS runtime script tag must point to the packaged asset (no local shim)."""
+        """The JBS runtime must load from package and be marked as an ES module.
+
+        Audit regression guard: the packaged runtime uses top-level ``export`` statements.
+        If loaded as a classic script, browsers throw ``Unexpected token 'export'`` and many
+        integration tests fail at teardown due to captured page errors.
+        """
         self._init_page(page)
         page.goto(f"{live_server}/work-items")
         page.wait_for_load_state("domcontentloaded")
@@ -2165,12 +2168,16 @@ class TestJBSWorkItemsMigration:
         script_src: Any = page.evaluate("""() => {
             const scripts = Array.from(document.querySelectorAll('script[src]'));
             const jbs = scripts.find(s => s.src && s.src.includes('jinja-bootstrap-spa.js'));
-            return jbs ? jbs.src : null;
+            if (!jbs) return null;
+            return { src: jbs.src, type: (jbs.getAttribute('type') || '').toLowerCase() };
         }""")
         assert script_src is not None, "JBS runtime <script> tag not found in DOM"
-        assert "jinja-bootstrap-spa.js" in str(script_src), (
-            f"Expected jinja-bootstrap-spa.js in src, got: {script_src}"
-        )
+        assert "jinja-bootstrap-spa.js" in str(
+            script_src.get("src", "")
+        ), f"Expected jinja-bootstrap-spa.js in src, got: {script_src}"
+        assert (
+            script_src.get("type") == "module"
+        ), f"JBS runtime must be loaded as type='module' to support ESM export syntax, got: {script_src}"
 
     def test_jbs_component_present_in_dom(self, page: Page, live_server: str) -> None:
         """The Work Items table must use the real JBS ``ui.table(...)`` DOM contract.
@@ -2197,19 +2204,17 @@ class TestJBSWorkItemsMigration:
                 persist:   byId.getAttribute('data-jbs-persist'),
             };
         }""")
-        assert info.get("byId"), (
-            "#work-items-table element not found in DOM — ui.table() root section is missing"
-        )
+        assert info.get("byId"), "#work-items-table element not found in DOM — ui.table() root section is missing"
         assert info.get("component") == "table", (
             f"Expected data-jbs-component='table', got '{info.get('component')}'. "
             "ui.table() always sets data-jbs-component='table', not the component key."
         )
-        assert info.get("key") == "work-items-table", (
-            f"Expected data-jbs-key='work-items-table', got '{info.get('key')}'"
-        )
-        assert info.get("endpoint") and "/components/work-items" in info.get("endpoint", ""), (
-            f"Unexpected data-jbs-endpoint: {info.get('endpoint')}"
-        )
+        assert (
+            info.get("key") == "work-items-table"
+        ), f"Expected data-jbs-key='work-items-table', got '{info.get('key')}'"
+        assert info.get("endpoint") and "/components/work-items" in info.get(
+            "endpoint", ""
+        ), f"Unexpected data-jbs-endpoint: {info.get('endpoint')}"
 
     def test_jbs_runtime_script_loads_before_page_scripts(self, page: Page, live_server: str) -> None:
         """The JBS runtime script must appear before page-level {% block scripts %} content.
@@ -2232,8 +2237,7 @@ class TestJBSWorkItemsMigration:
             return
         assert order["jbsIdx"] != -1, "JBS runtime script not found among <script src> tags"
         assert order["jbsIdx"] < order["sobsIdx"], (
-            f"JBS runtime (idx={order['jbsIdx']}) must appear before sobs-ui.js "
-            f"(idx={order['sobsIdx']}) in the DOM"
+            f"JBS runtime (idx={order['jbsIdx']}) must appear before sobs-ui.js " f"(idx={order['sobsIdx']}) in the DOM"
         )
 
     def test_sort_click_triggers_fragment_fetch(self, page: Page, live_server: str) -> None:
@@ -2255,9 +2259,7 @@ class TestJBSWorkItemsMigration:
         )
 
         # Use expect_request to wait deterministically for the fragment fetch triggered by sort.
-        with page.expect_request(
-            lambda r: "/components/work-items" in r.url, timeout=6000
-        ) as request_info:
+        with page.expect_request(lambda r: "/components/work-items" in r.url, timeout=6000) as request_info:
             sort_btn.click(timeout=5000)
 
         req = request_info.value
