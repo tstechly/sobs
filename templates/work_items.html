@@ -4,9 +4,9 @@
 {% from "_page_header_macros.html" import render_page_header %}
 {% block title %}Work Items{% endblock %}
 {% block styles %}{{ super() }}<style>
-  /* POC visual instrumentation for jinja-bootstrap-spa component replacement.
-     These animations make replacement events visible during review/validation.
-     They can be removed before production rollout. */
+  /* TODO: Remove POC visual instrumentation before production rollout.
+     Tracked in the migration backlog (docs/JBS_MIGRATION_AUDIT.md).
+     These animations make JBS component replacement events visible during review/validation. */
 
   /* Normal fragment replacement — brief blue flash */
   @keyframes jbs-swap-flash {

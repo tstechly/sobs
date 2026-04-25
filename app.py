@@ -18083,6 +18083,34 @@ async def api_cve_scan():
 # ---------------------------------------------------------------------------
 # Web UI – Work Items (Auto-Created GitHub Issues)
 # ---------------------------------------------------------------------------
+
+# jinja-bootstrap-spa table constants for the Work Items data grid.
+# These are defined here so view_work_items and the fragment endpoint
+# share the same sort map, page sizes, and state key list.
+_WORK_ITEMS_TABLE_SORT_MAP: dict[str, str] = {
+    "created_at": "CreatedAt",
+    "service": "ServiceName",
+    "anomaly": "AnomalyState",
+    "agent_rule": "AgentRuleName",
+}
+_WORK_ITEMS_TABLE_DEFAULT_SORT_BY = "created_at"
+_WORK_ITEMS_TABLE_DEFAULT_SORT_DIR = "desc"
+_WORK_ITEMS_TABLE_PAGE_SIZES = (25, 50, 100)
+_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE = 25
+_WORK_ITEMS_TABLE_STATE_KEYS = [
+    "page",
+    "page_size",
+    "sort_by",
+    "sort_dir",
+    "service",
+    "rule_name",
+    "action_type",
+    "status",
+    "from_ts",
+    "to_ts",
+]
+
+
 @app.route("/work-items")
 @require_basic_auth
 async def view_work_items():
@@ -18228,6 +18256,7 @@ async def view_work_items():
         total_items=total_items,
         table_state=table_state,
         table_rows=table_rows,
+        table_state_keys=_WORK_ITEMS_TABLE_STATE_KEYS,
         services=sorted(services),
         rules=sorted(rules),
         service_filter=service_filter,
@@ -18243,29 +18272,6 @@ async def view_work_items():
 # ---------------------------------------------------------------------------
 # jinja-bootstrap-spa – Work Items table fragment helpers
 # ---------------------------------------------------------------------------
-
-_WORK_ITEMS_TABLE_SORT_MAP: dict[str, str] = {
-    "created_at": "CreatedAt",
-    "service": "ServiceName",
-    "anomaly": "AnomalyState",
-    "agent_rule": "AgentRuleName",
-}
-_WORK_ITEMS_TABLE_DEFAULT_SORT_BY = "created_at"
-_WORK_ITEMS_TABLE_DEFAULT_SORT_DIR = "desc"
-_WORK_ITEMS_TABLE_PAGE_SIZES = (25, 50, 100)
-_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE = 25
-_WORK_ITEMS_TABLE_STATE_KEYS = [
-    "page",
-    "page_size",
-    "sort_by",
-    "sort_dir",
-    "service",
-    "rule_name",
-    "action_type",
-    "status",
-    "from_ts",
-    "to_ts",
-]
 
 
 def _work_items_table_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -18548,10 +18554,12 @@ async def work_items_table_component():
         table_state=state,
         services=services,
         rules=rules,
+        table_state_keys=_WORK_ITEMS_TABLE_STATE_KEYS,
     )
     return conditional_fragment_response(content, request.headers)
 
 
+@app.route("/api/work-items", methods=["GET"])
 @require_basic_auth
 async def api_get_work_items():
     """Get work items filtered by optional criteria."""

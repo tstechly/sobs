@@ -21111,30 +21111,16 @@ class TestJBSMigration:
     # Framework integration
     # ------------------------------------------------------------------
 
-    def test_jbs_runtime_js_is_served(self, client):
+    async def test_jbs_runtime_js_served(self, client):
         """The packaged JBS runtime JS must be accessible at /static/jinja-bootstrap-spa.js."""
-
-        async def _run():
-            r = await client.get("/static/jinja-bootstrap-spa.js")
-            assert r.status_code == 200
-            body = await r.get_data()
-            assert len(body) > 1000, "Runtime JS should be non-trivial"
-            ct = r.headers.get("Content-Type", "")
-            assert "javascript" in ct
-            # Verify it is the real framework runtime and not a local shim.
-            assert b"data-jbs-component" in body or b"jbs-component" in body or b"jinja-bootstrap-spa" in body
-
-        import asyncio
-
-        asyncio.get_event_loop().run_until_complete(_run())
-
-    async def test_jbs_runtime_js_served_async(self, client):
         r = await client.get("/static/jinja-bootstrap-spa.js")
         assert r.status_code == 200
         body = await r.get_data()
-        assert len(body) > 1000
+        assert len(body) > 1000, "Runtime JS should be non-trivial"
         ct = r.headers.get("Content-Type", "")
         assert "javascript" in ct
+        # Verify it is the real framework runtime and not a local shim.
+        assert b"data-jbs-component" in body or b"jbs-component" in body or b"jinja-bootstrap-spa" in body
 
     async def test_jbs_runtime_included_in_base_html(self, client):
         """Every full-page response must include the JBS runtime script tag."""
