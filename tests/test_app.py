@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -21269,11 +21270,11 @@ class TestJBSMigration:
             "A javascript: URL must be blocked, not rendered as a link"
         )
         # The detail button must carry an empty data-work-item-url so the modal JS
-        # cannot use it to open an unsafe link.
-        assert 'data-work-item-url=""' in js_rows[0]["detail"] or (
-            'data-work-item-url="javascript' not in js_rows[0]["detail"]
-            and "javascript:" not in js_rows[0]["detail"]
-        ), "Unsafe URL must not appear in data-work-item-url on the detail button"
+        # cannot use it to open an unsafe link. _work_items_table_rows() must emit
+        # data-work-item-url="" (empty string) when _is_safe_github_url() returns False.
+        assert 'data-work-item-url=""' in js_rows[0]["detail"], (
+            "Unsafe URL must result in an empty data-work-item-url on the detail button"
+        )
 
     def test_work_items_detail_button_safe_url_propagated(self):
         """A valid GitHub URL must appear in data-work-item-url on the detail button."""
@@ -21304,7 +21305,11 @@ class TestJBSMigration:
         # Safe GitHub URL propagates into both the visible link and the modal attribute.
         assert "href=" in row["issue"], "Safe GitHub URL must render as a link in the issue cell"
         assert "data-work-item-url=" in row["detail"], "detail button must carry data-work-item-url"
-        assert "github.com" in row["detail"], "Safe GitHub URL must appear in data-work-item-url"
+        # The URL must appear verbatim (html-escaped) in the attribute; verify the specific value.
+        expected_url = "https://github.com/abartrim/sobs/issues/42"
+        assert f'data-work-item-url="{html.escape(expected_url)}"' in row["detail"], (
+            f"Safe URL {expected_url!r} must appear verbatim in data-work-item-url"
+        )
 
     def test_work_items_detail_button_unsafe_url_cleared(self):
         """Unsafe issue_url must produce an empty data-work-item-url on the detail button.

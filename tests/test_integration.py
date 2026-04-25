@@ -2265,7 +2265,6 @@ class TestJBSWorkItemsMigration:
             # Give the fetch time to fire; the actual request is collected via on("request").
             page.wait_for_timeout(1500)
         except PlaywrightError as exc:
-            page.wait_for_timeout(1500)
             pytest.fail(f"Sort button click raised a Playwright error: {exc}")
         finally:
             page.remove_listener("request", _on_request)
