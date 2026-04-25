@@ -295,7 +295,6 @@ jobs:
           fi
 
       - uses: actions/checkout@v6
-        if: steps.sobs_gate.outputs.enabled == 'true'
 
       - name: Set up Python
         if: steps.sobs_gate.outputs.enabled == 'true'
@@ -304,11 +303,9 @@ jobs:
           python-version: "3.14"
 
       - name: Set up QEMU for cross-platform image inspection
-        if: steps.sobs_gate.outputs.enabled == 'true'
         uses: docker/setup-qemu-action@v4
 
       - name: Log in to GitHub Container Registry
-        if: steps.sobs_gate.outputs.enabled == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -316,7 +313,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve release version
-        if: steps.sobs_gate.outputs.enabled == 'true'
         id: release_version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -326,7 +322,6 @@ jobs:
           fi
 
       - name: Resolve deterministic release id
-        if: steps.sobs_gate.outputs.enabled == 'true'
         id: release_id
         run: |
           release_key="${GITHUB_REPOSITORY}|${{ steps.release_version.outputs.value }}|${GITHUB_SHA}|${GITHUB_RUN_ID}|production"
@@ -334,14 +329,12 @@ jobs:
           echo "value=${release_id}" >> "$GITHUB_OUTPUT"
 
       - name: Download rum.min.js.map artifact
-        if: steps.sobs_gate.outputs.enabled == 'true'
         uses: actions/download-artifact@v6
         with:
           name: rum-min-js-sourcemap
           path: static
 
       - name: Extract resolved dependency snapshots from published image (per arch)
-        if: steps.sobs_gate.outputs.enabled == 'true'
         run: |
           set -euo pipefail
           mkdir -p .sobs-release
@@ -357,7 +350,6 @@ jobs:
           done
 
       - name: Upload per-arch dependency snapshots
-        if: steps.sobs_gate.outputs.enabled == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: sobs-release-dependency-snapshots

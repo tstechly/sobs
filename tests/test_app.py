@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
@@ -17574,6 +17576,135 @@ class TestWebTraffic:
             sobs_app._GITHUB_BACKFILL_MAX_RELEASES_SETTING,
             str(sobs_app._GITHUB_BACKFILL_MAX_RELEASES_DEFAULT),
         )
+
+    async def test_fetch_release_deps_from_github_uses_actions_artifact_snapshots(self, client, monkeypatch):
+        app_resp = await client.post(
+            "/v1/apps",
+            json={
+                "name": "GitHub Actions Backfill App",
+                "slug": f"github-actions-backfill-app-{time.time_ns()}",
+                "ownerTeam": "platform",
+                "repoUrl": "https://github.com/acme/actions-backfill",
+                "defaultEnvironment": "prod",
+            },
+        )
+        assert app_resp.status_code == 201
+        app_id = (await app_resp.get_json())["id"]
+
+        rel_resp = await client.post(
+            f"/v1/apps/{app_id}/releases",
+            json={"version": "3.4.5", "environment": "prod", "commitSha": "abc123def456"},
+        )
+        assert rel_resp.status_code == 201
+        release_id = (await rel_resp.get_json())["id"]
+
+        db = sobs_app.get_db()
+        sobs_app._save_ai_setting(db, "ai.github_token", "ghp-test-token")
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr("pip-freeze-linux-amd64.txt", "requests==2.32.3\nurllib3==2.2.2\n")
+            zip_file.writestr("pip-freeze-linux-arm64.txt", "requests==2.32.3\n")
+        archive_bytes = archive_buffer.getvalue()
+
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload: dict | None = None, content: bytes = b"{}"):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.content = content
+
+            def json(self):
+                return self._payload
+
+        class _FakeClient:
+            async def get(self, url, params=None, headers=None, timeout=None, follow_redirects=False):
+                if url.endswith("/actions/runs"):
+                    return _FakeResponse(
+                        200,
+                        {
+                            "workflow_runs": [
+                                {
+                                    "id": 1001,
+                                    "conclusion": "success",
+                                    "head_sha": "abc123def456",
+                                }
+                            ]
+                        },
+                    )
+                if url.endswith("/actions/runs/1001/artifacts"):
+                    return _FakeResponse(
+                        200,
+                        {
+                            "artifacts": [
+                                {
+                                    "id": 2002,
+                                    "name": "sobs-release-dependency-snapshots",
+                                    "expired": False,
+                                    "archive_download_url": "https://api.github.com/artifacts/2002/zip",
+                                }
+                            ]
+                        },
+                    )
+                if url == "https://api.github.com/artifacts/2002/zip":
+                    return _FakeResponse(200, content=archive_bytes)
+                return _FakeResponse(404, {})
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(sobs_app, "_get_async_http_client", _fake_get_client)
+
+        summary = await sobs_app._fetch_release_deps_from_github(db)
+        assert summary["attempted"] >= 1
+        assert summary["inserted"] >= 2
+
+        rows = db.execute(
+            "SELECT Name, Platform, Architecture, MetadataJson "
+            "FROM sobs_release_artifacts FINAL "
+            "WHERE ReleaseId=? AND ArtifactType='dependencies-lockfile' AND IsDeleted=0",
+            [release_id],
+        ).fetchall()
+        assert len(rows) >= 2
+        names = {str(row["Name"]) for row in rows}
+        assert "pip-freeze-linux-amd64" in names
+        assert "pip-freeze-linux-arm64" in names
+        amd64_row = next(row for row in rows if str(row["Name"]) == "pip-freeze-linux-amd64")
+        metadata = json.loads(str(amd64_row["MetadataJson"]))
+        assert metadata.get("source") == "github_actions_artifact"
+        deps = metadata.get("dependencies", [])
+        assert any(d.get("package") == "requests" and d.get("version") == "2.32.3" for d in deps)
+
+    async def test_sync_github_repo_health_once_persists_summary(self, client, monkeypatch):
+        db = sobs_app.get_db()
+
+        async def _fake_collect(_db):
+            return {
+                "ok": True,
+                "scanned_repos": 2,
+                "total_repos_considered": 3,
+                "open_issues": 4,
+                "open_prs": 5,
+                "security_items": 1,
+                "version_scoped": True,
+                "last_synced_at": "2026-04-25T00:00:00Z",
+                "repos": [],
+            }
+
+        monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", _fake_collect)
+
+        summary = await sobs_app._sync_github_repo_health_once(db)
+        assert summary["ok"] is True
+
+        last_sync = sobs_app._get_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING)
+        assert last_sync == "2026-04-25T00:00:00Z"
+
+        compact_raw = sobs_app._get_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING)
+        compact = json.loads(compact_raw)
+        assert compact["scanned_repos"] == 2
+        assert compact["total_repos_considered"] == 3
+        assert compact["open_issues"] == 4
+        assert compact["open_prs"] == 5
+        assert compact["security_items"] == 1
 
     async def test_web_traffic_geo_api_empty(self, client):
         r = await client.get("/api/web-traffic/geo")
