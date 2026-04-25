@@ -617,6 +617,197 @@ class TestHealth:
         assert isinstance(data["write_queue_depth"], int)
 
 
+# ---------------------------------------------------------------------------
+# OTLP CORS behaviour
+# ---------------------------------------------------------------------------
+class TestOtlpCors:
+    """Tests for CORS header injection on OTLP/RUM ingest endpoints."""
+
+    # ------------------------------------------------------------------ helpers
+    def _allowed_origin(self):
+        return "http://localhost:3000"
+
+    def _disallowed_origin(self):
+        return "https://evil.example.com"
+
+    # ------------------------------------------------------------------ _origin_allowed_for_otlp unit tests
+    def test_origin_allowed_for_otlp_with_wildcard_port(self, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("http://localhost:3000") is True
+
+    def test_origin_allowed_for_otlp_rejects_disallowed_origin(self, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("https://evil.example.com") is False
+
+    def test_pattern_without_port_does_not_match_origin_with_nondefault_port(self, monkeypatch):
+        """A pattern like 'https://example.com' must NOT match 'https://example.com:8443'."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("https://example.com",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("https://example.com:8443") is False
+
+    def test_pattern_without_port_matches_origin_without_port(self, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("https://example.com",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("https://example.com") is True
+
+    def test_pattern_without_port_matches_origin_with_default_port(self, monkeypatch):
+        """https://example.com should match https://example.com:443 (default port)."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("https://example.com",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("https://example.com:443") is True
+
+    def test_origin_allowed_for_otlp_rejects_invalid_origin(self, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("not-an-origin") is False
+        assert sobs_app._origin_allowed_for_otlp("") is False
+
+    # ------------------------------------------------------------------ _append_vary_header unit tests
+    def test_append_vary_case_insensitive_dedup(self):
+        from quart.wrappers import Response as QuartResponse
+
+        resp = QuartResponse("")
+        sobs_app._append_vary_header(resp, "Origin")
+        # Adding 'origin' (different case) should not duplicate.
+        sobs_app._append_vary_header(resp, "origin")
+        vary = resp.headers.get("Vary", "")
+        # There should be exactly one "Origin"-like token.
+        tokens = [t.strip() for t in vary.split(",") if t.strip()]
+        assert len(tokens) == 1
+
+    # ------------------------------------------------------------------ CORS headers on ingest routes
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/logs",
+            "/v1/traces",
+            "/v1/metrics",
+            "/v1/rum",
+            "/v1/errors",
+            "/v1/ai",
+        ],
+    )
+    async def test_allowed_origin_gets_cors_headers(self, client, monkeypatch, path):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        r = await client.post(
+            path,
+            json={},
+            headers={"Origin": self._allowed_origin()},
+        )
+        assert r.headers.get("Access-Control-Allow-Origin") == self._allowed_origin()
+        assert r.headers.get("Access-Control-Allow-Credentials") == "true"
+        assert "Origin" in (r.headers.get("Vary") or "")
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/logs",
+            "/v1/traces",
+            "/v1/metrics",
+            "/v1/rum",
+        ],
+    )
+    async def test_disallowed_origin_gets_no_cors_headers(self, client, monkeypatch, path):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        r = await client.post(
+            path,
+            json={},
+            headers={"Origin": self._disallowed_origin()},
+        )
+        assert "Access-Control-Allow-Origin" not in r.headers
+        assert "Access-Control-Allow-Credentials" not in r.headers
+
+    async def test_options_preflight_with_api_key_header(self, client, monkeypatch):
+        """OPTIONS preflight including X-API-Key must succeed for an allowed origin."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        r = await client.options(
+            "/v1/logs",
+            headers={
+                "Origin": self._allowed_origin(),
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type, X-API-Key",
+            },
+        )
+        assert r.status_code == 204
+        assert r.headers.get("Access-Control-Allow-Origin") == self._allowed_origin()
+        allow_headers = r.headers.get("Access-Control-Allow-Headers", "")
+        assert "X-API-Key" in allow_headers
+
+    async def test_options_preflight_with_asset_signature_headers(self, client, monkeypatch):
+        """OPTIONS preflight including asset signature headers must succeed for an allowed origin."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        r = await client.options(
+            "/v1/rum/assets",
+            headers={
+                "Origin": self._allowed_origin(),
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type, X-SOBS-Asset-Timestamp, X-SOBS-Asset-Signature",
+            },
+        )
+        assert r.status_code == 204
+        assert r.headers.get("Access-Control-Allow-Origin") == self._allowed_origin()
+        allow_headers = r.headers.get("Access-Control-Allow-Headers", "")
+        assert "X-SOBS-Asset-Timestamp" in allow_headers
+        assert "X-SOBS-Asset-Signature" in allow_headers
+
+    # ------------------------------------------------------------------ CORS NOT applied to non-ingest routes
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/v1/apps",
+            "/v1/releases/fake-id",
+        ],
+    )
+    async def test_non_ingest_routes_do_not_get_cors_headers(self, client, monkeypatch, path):
+        """Management API routes must not receive CORS headers even when the origin is allowed."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        r = await client.get(
+            path,
+            headers={"Origin": self._allowed_origin()},
+        )
+        assert "Access-Control-Allow-Origin" not in r.headers
+
+
 class TestWriteQueue:
     @pytest.mark.parametrize(
         ("path", "payload"),

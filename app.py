@@ -10,6 +10,7 @@ import atexit
 import base64
 import copy
 import difflib
+import fnmatch
 import hashlib
 import hmac
 import html
@@ -354,6 +355,83 @@ def _request_is_secure_context() -> bool:
     return str(request.scheme or "").lower() == "https"
 
 
+_OTLP_CORS_ALLOWED_ORIGINS = tuple(
+    item.strip()
+    for item in os.environ.get(
+        "SOBS_OTLP_CORS_ALLOWED_ORIGINS",
+        "http://localhost:*,https://localhost:*,http://127.0.0.1:*,https://127.0.0.1:*",
+    ).split(",")
+    if item.strip()
+)
+
+# Exact paths that are OTLP/RUM ingest endpoints exposed to browsers.
+# CORS is applied only to these paths, NOT to management API routes like
+# /v1/apps or /v1/releases which are not intended for browser cross-origin use.
+_OTLP_CORS_INGEST_PATHS = frozenset(
+    {
+        "/v1/logs",
+        "/v1/traces",
+        "/v1/metrics",
+        "/v1/rum",
+        "/v1/rum/assets",
+        "/v1/rum/client-token",
+        "/v1/errors",
+        "/v1/ai",
+    }
+)
+
+# Default ports per scheme – used to normalise origins for matching.
+_SCHEME_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+
+
+def _origin_allowed_for_otlp(origin: str) -> bool:
+    parsed = urllib.parse.urlparse(origin)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    netloc = (parsed.netloc or "").lower()
+    if scheme not in {"http", "https"} or not netloc:
+        return False
+
+    with_port = f"{scheme}://{netloc}"
+    # Include the port-stripped form only when the origin carries no explicit
+    # port or uses the scheme default (e.g. https://example.com:443 →
+    # https://example.com).  Non-default ports must be matched explicitly so
+    # that a pattern like "https://example.com" does not accidentally allow
+    # "https://example.com:8443".
+    candidates: list[str] = [with_port]
+    if parsed.port is None or parsed.port == _SCHEME_DEFAULT_PORTS.get(scheme):
+        without_port = f"{scheme}://{host}" if host else with_port
+        if without_port != with_port:
+            candidates.append(without_port)
+    for pattern in _OTLP_CORS_ALLOWED_ORIGINS:
+        p = pattern.lower()
+        if any(fnmatch.fnmatch(c, p) for c in candidates):
+            return True
+    return False
+
+
+def _path_needs_otlp_cors(path: str) -> bool:
+    """Return True if *path* is an OTLP/RUM ingest endpoint that may receive
+    browser cross-origin requests."""
+    if path in _OTLP_CORS_INGEST_PATHS:
+        return True
+    # Dynamic sub-paths under /v1/rum/assets/ (individual asset downloads).
+    if path.startswith("/v1/rum/assets/"):
+        return True
+    return False
+
+
+def _append_vary_header(response: Response, value: str) -> None:
+    existing = str(response.headers.get("Vary") or "")
+    if not existing:
+        response.headers["Vary"] = value
+        return
+    parts = [p.strip() for p in existing.split(",") if p.strip()]
+    # Vary tokens are case-insensitive; compare in lower-case to avoid dupes.
+    if value.lower() not in {p.lower() for p in parts}:
+        response.headers["Vary"] = ", ".join(parts + [value])
+
+
 @app.after_request
 async def _apply_security_headers(response: Response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -363,6 +441,24 @@ async def _apply_security_headers(response: Response):
     response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
     if _request_is_secure_context():
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    if _path_needs_otlp_cors(request.path):
+        origin = str(request.headers.get("Origin") or "").strip()
+        if origin and _origin_allowed_for_otlp(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            _append_vary_header(response, "Origin")
+            response.headers.setdefault("Access-Control-Allow-Credentials", "true")
+            response.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
+            response.headers.setdefault(
+                "Access-Control-Allow-Headers",
+                (
+                    "Content-Type, Authorization, X-API-Key, "
+                    "X-SOBS-RUM-Client, X-SOBS-RUM-Signature, X-SOBS-RUM-Timestamp, "
+                    "X-SOBS-Asset-Timestamp, X-SOBS-Asset-Signature"
+                ),
+            )
+            response.headers.setdefault("Access-Control-Max-Age", "600")
+
     return response
 
 
@@ -9511,6 +9607,14 @@ async def _parse_otlp_request(proto_class):
 # ---------------------------------------------------------------------------
 # OTLP Ingest – Logs  POST /v1/logs
 # ---------------------------------------------------------------------------
+@app.route("/v1/logs", methods=["OPTIONS"])
+@app.route("/v1/traces", methods=["OPTIONS"])
+@app.route("/v1/metrics", methods=["OPTIONS"])
+@app.route("/v1/rum/assets", methods=["OPTIONS"])
+async def ingest_preflight():
+    return "", 204
+
+
 @app.route("/v1/logs", methods=["POST"])
 @require_api_key
 async def ingest_logs():
@@ -24493,11 +24597,7 @@ async def _dispatch_browser_push_channel(config: dict, payload: dict) -> None:
     try:
         from cryptography.hazmat.backends import default_backend
         from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1
-        from cryptography.hazmat.primitives.serialization import (
-            Encoding,
-            PublicFormat,
-            load_der_private_key,
-        )
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_private_key
     except ImportError as exc:
         raise RuntimeError("The `cryptography` package is required for browser push notifications") from exc
 
@@ -24575,11 +24675,7 @@ def _encrypt_push_payload(
     plaintext: bytes, subscriber_pub_key_bytes: bytes, auth_bytes: bytes, backend: object
 ) -> tuple[bytes, bytes, bytes]:
     """Encrypt a Web Push payload using AES-128-GCM (RFC 8291 / RFC 8188)."""
-    from cryptography.hazmat.primitives.asymmetric.ec import (
-        ECDH,
-        SECP256R1,
-        generate_private_key,
-    )
+    from cryptography.hazmat.primitives.asymmetric.ec import ECDH, SECP256R1, generate_private_key
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.hashes import SHA256
     from cryptography.hazmat.primitives.hmac import HMAC as CryptoHMAC
@@ -25080,12 +25176,7 @@ def _generate_vapid_keys() -> tuple[str, str]:
     """Generate a new VAPID key pair. Returns (private_key_b64url, public_key_b64url)."""
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        NoEncryption,
-        PrivateFormat,
-        PublicFormat,
-    )
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
     private_key = generate_private_key(SECP256R1(), default_backend())
     private_bytes = private_key.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
