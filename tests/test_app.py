@@ -17693,6 +17693,7 @@ class TestWebTraffic:
             json={"version": "4.5.6", "environment": "prod"},
         )
         assert rel_resp.status_code == 201
+        release_id = (await rel_resp.get_json())["id"]
 
         db = sobs_app.get_db()
         sobs_app._save_ai_setting(db, "ai.github_token", "ghp-test-token")
@@ -17725,8 +17726,9 @@ class TestWebTraffic:
 
         rows = db.execute(
             "SELECT Name, MetadataJson FROM sobs_release_artifacts FINAL "
-            "WHERE ArtifactType='dependencies-lockfile' AND IsDeleted=0 "
-            "ORDER BY UploadedAt DESC LIMIT 1"
+            "WHERE ReleaseId=? AND ArtifactType='dependencies-lockfile' AND IsDeleted=0 "
+            "ORDER BY UploadedAt DESC LIMIT 1",
+            [release_id],
         ).fetchall()
         assert rows
         metadata = json.loads(str(rows[0]["MetadataJson"]))
