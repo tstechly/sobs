@@ -92,6 +92,13 @@ _MCP_API_KEYS_SETTING = "mcp.api_keys"
 _MCP_ENABLED_SETTING = "mcp.enabled"
 _MCP_API_KEY_MAX = 20  # maximum number of concurrent keys
 
+# ---------------------------------------------------------------------------
+# MCP server identity – shared by GET probe and POST initialize handlers
+# ---------------------------------------------------------------------------
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+_MCP_SERVER_INFO: dict[str, str] = {"name": "sobs-mcp", "version": "1.0"}
+_MCP_CAPABILITIES: dict[str, Any] = {"tools": {}}
+
 
 def _mcp_mac_key() -> bytes:
     """Return a per-installation 32-byte key derived from ``SOBS_SECRET_KEY``.
@@ -943,9 +950,9 @@ async def mcp_endpoint_get():
 
     return jsonify(
         {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "sobs-mcp", "version": "1.0"},
+            "protocolVersion": _MCP_PROTOCOL_VERSION,
+            "capabilities": _MCP_CAPABILITIES,
+            "serverInfo": _MCP_SERVER_INFO,
         }
     )
 
@@ -1016,9 +1023,9 @@ async def mcp_endpoint():
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "sobs-mcp", "version": "1.0"},
+                    "protocolVersion": _MCP_PROTOCOL_VERSION,
+                    "capabilities": _MCP_CAPABILITIES,
+                    "serverInfo": _MCP_SERVER_INFO,
                 },
             }
         )
