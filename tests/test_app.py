@@ -22359,3 +22359,145 @@ class TestJBSMigration:
         # Empty table: ETags may match. Non-empty: must differ.
         # At minimum we verify the endpoint responds and returns ETags.
         assert etag1 and etag2
+
+    # ------------------------------------------------------------------
+    # _map_limit_offset_to_page_state – error / fallback paths
+    # ------------------------------------------------------------------
+
+    def test_map_limit_offset_invalid_limit_falls_back_to_default(self):
+        """Non-numeric limit is caught and falls back to the default page size."""
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "not-a-number"})
+        assert legacy_limit == sobs_app._WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+        assert result["page_size"] == str(sobs_app._WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE)
+
+    def test_map_limit_offset_invalid_offset_falls_back_to_zero(self):
+        """Non-numeric offset is caught and treated as 0."""
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state(
+            {"limit": "50", "offset": "not-a-number"}
+        )
+        assert legacy_offset == 0
+        # offset=0 // page_size=50 + 1 = 1
+        assert result["page"] == "1"
+
+    def test_map_limit_offset_invalid_page_size_in_offset_block_falls_back(self):
+        """Non-numeric page_size in args causes fallback to default when computing page from offset."""
+        # page_size="abc" is not a valid int; the except block sets page_size = DEFAULT (100).
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state(
+            {"offset": "50", "page_size": "not-a-number"}
+        )
+        assert legacy_offset == 50
+        # page_size falls back to DEFAULT=100, so page = (50 // 100) + 1 = 1
+        assert result["page"] == "1"
+
+    # ------------------------------------------------------------------
+    # view_work_items – from_ts / to_ts injection paths
+    # ------------------------------------------------------------------
+
+    async def test_work_items_page_with_from_ts_and_to_ts(self, client):
+        """from_ts and to_ts are injected into init_state when provided."""
+        r = await client.get("/work-items?from_ts=2026-01-01T00:00:00Z&to_ts=2026-01-02T00:00:00Z")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert 'data-jbs-component="table"' in text
+
+    # ------------------------------------------------------------------
+    # _is_safe_github_url – exception path
+    # ------------------------------------------------------------------
+
+    def test_is_safe_github_url_returns_false_on_urlparse_exception(self, monkeypatch):
+        """When urlparse raises any exception the function returns False gracefully."""
+        import urllib.parse
+
+        def _raise(*_args, **_kwargs):
+            raise RuntimeError("simulated urlparse failure")
+
+        monkeypatch.setattr(urllib.parse, "urlparse", _raise)
+        assert sobs_app._is_safe_github_url("https://github.com/abartrim/sobs") is False
+
+    # ------------------------------------------------------------------
+    # _work_items_table_rows – copilot badge branches
+    # ------------------------------------------------------------------
+
+    def _make_copilot_item(self, copilot_status: str) -> dict:
+        return {
+            "id": "wi-badge-test",
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "service": "svc",
+            "signal_source": "metrics",
+            "signal_name": "latency",
+            "anomaly_state": "critical",
+            "anomaly_rule_id": "rule-1",
+            "agent_rule_name": "Rule",
+            "agent_action": "github_issue_copilot",
+            "dedup_decision": "new_issue",
+            "issue_url": "https://github.com/abartrim/sobs/issues/99",
+            "issue_number": 99,
+            "issue_title": "Test issue",
+            "copilot_assignment_status": copilot_status,
+            "pr_url": "",
+            "pr_number": 0,
+            "analysis_summary": "",
+            "suggestion_summary": "",
+        }
+
+    def test_work_items_table_rows_copilot_blocked_badge(self):
+        """copilot_assignment_status='blocked' renders a bg-warning badge."""
+        rows = sobs_app._work_items_table_rows([self._make_copilot_item("blocked")])
+        assert "bg-warning text-dark" in rows[0]["issue"]
+
+    def test_work_items_table_rows_copilot_failed_badge(self):
+        """copilot_assignment_status='failed' renders a bg-danger badge."""
+        rows = sobs_app._work_items_table_rows([self._make_copilot_item("failed")])
+        assert "bg-danger" in rows[0]["issue"]
+
+    def test_work_items_table_rows_copilot_unknown_status_badge(self):
+        """Unknown copilot_assignment_status falls back to bg-secondary badge."""
+        rows = sobs_app._work_items_table_rows([self._make_copilot_item("pending_review")])
+        assert "bg-secondary" in rows[0]["issue"]
+
+    # ------------------------------------------------------------------
+    # _fetch_work_items_fragment_data – branch / exception paths
+    # ------------------------------------------------------------------
+
+    async def test_fetch_fragment_data_timestamp_exception_falls_back(self, monkeypatch):
+        """TypeError/ValueError from _normalize_ch_timestamp is caught; from_ts/to_ts default to ''."""
+
+        def _raise_value_error(v):
+            raise ValueError("bad timestamp")
+
+        monkeypatch.setattr(sobs_app, "_normalize_ch_timestamp", _raise_value_error)
+        db = sobs_app.get_db()
+        state: dict = {"from_ts": "bad-ts-value"}
+        items, total, services, rules = await sobs_app._fetch_work_items_fragment_data(db, state)
+        assert isinstance(items, list)
+        assert isinstance(total, int)
+
+    async def test_fetch_fragment_data_nonstandard_page_size_falls_back_to_default(self):
+        """page_size not in (25, 50, 100) falls back to DEFAULT in non-legacy mode."""
+        db = sobs_app.get_db()
+        # 99 is not in _WORK_ITEMS_TABLE_PAGE_SIZES so the else-branch DEFAULT applies.
+        state: dict = {"page_size": 99}
+        items, total, services, rules = await sobs_app._fetch_work_items_fragment_data(db, state)
+        assert isinstance(items, list)
+
+    async def test_fetch_fragment_data_invalid_sort_dir_falls_back_to_default(self):
+        """sort_dir not in ('asc', 'desc') is replaced by the default."""
+        db = sobs_app.get_db()
+        state: dict = {"page_size": 100, "sort_dir": "sideways"}
+        items, total, services, rules = await sobs_app._fetch_work_items_fragment_data(db, state)
+        assert isinstance(items, list)
+
+    async def test_fetch_fragment_data_exception_returns_empty_gracefully(self, monkeypatch):
+        """Exception raised inside _fetch_work_items_fragment_data is caught; empty results returned."""
+
+        def _broken_settings(db):
+            raise RuntimeError("simulated AI settings failure")
+
+        monkeypatch.setattr(sobs_app, "_load_all_ai_settings", _broken_settings)
+        db = sobs_app.get_db()
+        state: dict = {"page_size": 100}
+        items, total, services, rules = await sobs_app._fetch_work_items_fragment_data(db, state)
+        assert items == []
+        assert total == 0
+        assert services == []
+        assert rules == []
