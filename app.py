@@ -18096,7 +18096,9 @@ _WORK_ITEMS_TABLE_SORT_MAP: dict[str, str] = {
 _WORK_ITEMS_TABLE_DEFAULT_SORT_BY = "created_at"
 _WORK_ITEMS_TABLE_DEFAULT_SORT_DIR = "desc"
 _WORK_ITEMS_TABLE_PAGE_SIZES = (25, 50, 100)
-_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE = 25
+# Default page size matches the pre-migration default of limit=100 so that
+# /work-items with no query params continues to show the same number of rows.
+_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE = 100
 _WORK_ITEMS_TABLE_STATE_KEYS = [
     "page",
     "page_size",
@@ -18316,11 +18318,14 @@ def _work_items_table_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             issue_html = '<span class="text-secondary">—</span>'
 
         # Detail button – opens the existing Bootstrap modal (keep as-is).
+        # Use a safe URL (or empty string) for data-work-item-url so that page JS
+        # cannot flow an unsafe javascript: or data: value into a modal href.
+        safe_modal_url = issue_url if _is_safe_github_url(issue_url) else ""
         detail_html = (
             f'<button class="btn btn-sm btn-link py-0 px-1 work-item-detail-btn" '
             f'data-bs-toggle="modal" data-bs-target="#workItemDetailModal" '
             f'data-work-item-id="{html.escape(item.get("id", ""))}" '
-            f'data-work-item-url="{html.escape(issue_url)}" '
+            f'data-work-item-url="{html.escape(safe_modal_url)}" '
             f'data-work-item-title="{html.escape(issue_title)}" '
             f'data-work-item-analysis="{html.escape(item.get("analysis_summary", ""))}" '
             f'data-work-item-suggestion="{html.escape(item.get("suggestion_summary", ""))}">'

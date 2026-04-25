@@ -21134,12 +21134,14 @@ class TestJBSMigration:
     # ------------------------------------------------------------------
 
     async def test_work_items_fragment_returns_200(self, client):
-        """GET /components/work-items returns 200 with the data grid HTML."""
+        """GET /components/work-items returns 200 with the correct JBS DOM contract."""
         r = await client.get("/components/work-items")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
-        assert "data-jbs-component" in text
-        assert "data-jbs-endpoint" in text
+        # ui.table("work-items-table", ...) renders these attributes on the root <section>:
+        assert 'id="work-items-table"' in text, "Fragment missing id='work-items-table'"
+        assert 'data-jbs-component="table"' in text, "Fragment missing data-jbs-component='table'"
+        assert 'data-jbs-key="work-items-table"' in text, "Fragment missing data-jbs-key"
         assert "/components/work-items" in text
 
     async def test_work_items_fragment_has_etag(self, client):
@@ -21172,7 +21174,7 @@ class TestJBSMigration:
         r = await client.get("/components/work-items?service=nonexistent&status=open")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
-        assert "data-jbs-component" in text
+        assert 'data-jbs-component="table"' in text
 
     async def test_work_items_fragment_page_param_changes_etag(self, client):
         """Requesting a different page should produce a different ETag (or 200 response)."""
@@ -21192,8 +21194,10 @@ class TestJBSMigration:
         r = await client.get("/work-items")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
-        assert "data-jbs-component" in text
-        assert "data-jbs-endpoint" in text
+        # Verify the real JBS DOM contract (not just any data-jbs-* attribute)
+        assert 'id="work-items-table"' in text
+        assert 'data-jbs-component="table"' in text
+        assert 'data-jbs-key="work-items-table"' in text
         assert "/components/work-items" in text
         # Existing controls must still be present
         assert 'id="work-items-reports-group"' in text
@@ -21204,9 +21208,8 @@ class TestJBSMigration:
         r = await client.get("/work-items")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
-        # The old raw table was a plain Bootstrap table without JBS attributes.
-        # After migration, all table rendering goes through the data_grid macro.
-        assert "data-jbs-component" in text
+        # After migration, all table rendering goes through the JBS data_grid macro.
+        assert 'data-jbs-component="table"' in text
 
     # ------------------------------------------------------------------
     # _work_items_table_rows helper
@@ -21255,6 +21258,8 @@ class TestJBSMigration:
         # javascript: URL in issue_url is not a safe GitHub URL and must be blocked.
         # _is_safe_github_url rejects non-https and non-github.com domains, so the
         # cell must render as plain text (—) rather than an <a href="javascript:..."> link.
+        # Crucially, the detail button's data-work-item-url must also be empty — otherwise
+        # the modal JS can still flow an unsafe URL into a href.
         js_items = [dict(items[0])]
         js_items[0]["issue_url"] = "javascript:alert(1)"
         js_rows = sobs_app._work_items_table_rows(js_items)
@@ -21263,6 +21268,89 @@ class TestJBSMigration:
         assert 'href=' not in js_rows[0]["issue"], (
             "A javascript: URL must be blocked, not rendered as a link"
         )
+        # The detail button must carry an empty data-work-item-url so the modal JS
+        # cannot use it to open an unsafe link.
+        assert 'data-work-item-url=""' in js_rows[0]["detail"] or (
+            'data-work-item-url="javascript' not in js_rows[0]["detail"]
+            and "javascript:" not in js_rows[0]["detail"]
+        ), "Unsafe URL must not appear in data-work-item-url on the detail button"
+
+    def test_work_items_detail_button_safe_url_propagated(self):
+        """A valid GitHub URL must appear in data-work-item-url on the detail button."""
+        items = [
+            {
+                "id": "wi-safe",
+                "created_at": "2026-01-01T00:00:00.000Z",
+                "service": "api",
+                "signal_source": "metrics",
+                "signal_name": "latency",
+                "anomaly_state": "warning",
+                "anomaly_rule_id": "rule-abc",
+                "agent_rule_name": "Rule",
+                "agent_action": "github_issue",
+                "dedup_decision": "new_issue",
+                "issue_url": "https://github.com/abartrim/sobs/issues/42",
+                "issue_number": 42,
+                "issue_title": "Safe title",
+                "copilot_assignment_status": "",
+                "pr_url": "",
+                "pr_number": 0,
+                "analysis_summary": "",
+                "suggestion_summary": "",
+            }
+        ]
+        rows = sobs_app._work_items_table_rows(items)
+        row = rows[0]
+        # Safe GitHub URL propagates into both the visible link and the modal attribute.
+        assert "href=" in row["issue"], "Safe GitHub URL must render as a link in the issue cell"
+        assert "data-work-item-url=" in row["detail"], "detail button must carry data-work-item-url"
+        assert "github.com" in row["detail"], "Safe GitHub URL must appear in data-work-item-url"
+
+    def test_work_items_detail_button_unsafe_url_cleared(self):
+        """Unsafe issue_url must produce an empty data-work-item-url on the detail button.
+
+        The modal JS uses data-work-item-url to open a link; an unsafe scheme like
+        ``javascript:`` must never reach it even if the visible cell shows ``—``.
+        """
+        for bad_url in [
+            "javascript:alert(1)",
+            "data:text/html,<script>evil()</script>",
+            "http://evil.com/path",
+            "https://notgithub.com/x",
+        ]:
+            items = [
+                {
+                    "id": "wi-unsafe",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "service": "api",
+                    "signal_source": "metrics",
+                    "signal_name": "latency",
+                    "anomaly_state": "warning",
+                    "anomaly_rule_id": "rule-abc",
+                    "agent_rule_name": "Rule",
+                    "agent_action": "github_issue",
+                    "dedup_decision": "new_issue",
+                    "issue_url": bad_url,
+                    "issue_number": 1,
+                    "issue_title": "title",
+                    "copilot_assignment_status": "",
+                    "pr_url": "",
+                    "pr_number": 0,
+                    "analysis_summary": "",
+                    "suggestion_summary": "",
+                }
+            ]
+            rows = sobs_app._work_items_table_rows(items)
+            row = rows[0]
+            # Visible cell must not render an href.
+            assert "href=" not in row["issue"], (
+                f"Unsafe URL {bad_url!r} must not appear as href in issue cell"
+            )
+            # Detail button must carry an empty data-work-item-url attribute.
+            assert 'data-work-item-url=""' in row["detail"], (
+                f"Unsafe URL {bad_url!r} must result in empty data-work-item-url on detail button; "
+                f"got: {row['detail']}"
+            )
 
     def test_work_items_table_rows_empty_returns_empty_list(self):
         rows = sobs_app._work_items_table_rows([])
@@ -21375,7 +21463,23 @@ class TestJBSMigration:
         r = await client.get("/work-items?limit=50&offset=50")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
-        assert "data-jbs-component" in text
+        assert 'data-jbs-component="table"' in text
+
+    async def test_work_items_default_page_size_matches_old_limit_default(self, client):
+        """GET /work-items with no params must use page_size=100 (matches old limit=100 default).
+
+        The pre-migration default was ``limit=100``. This test asserts the JBS default
+        page size is also 100 so that existing users see the same result set size.
+        """
+        r = await client.get("/work-items")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        # The JBS table state embedded in the fragment/page must reflect page_size=100.
+        # The state is stored in data-jbs-state JSON on the table root element.
+        assert '"page_size": 100' in text or '"page_size":100' in text, (
+            "Default page_size must be 100 to match the pre-migration limit=100 default; "
+            "changing it is a user-visible behavioral regression"
+        )
 
     async def test_work_items_fragment_sort_key_changes_etag(self, client):
         """Different sort_by/sort_dir values must produce different ETags."""

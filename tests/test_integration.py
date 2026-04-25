@@ -2083,10 +2083,14 @@ class TestJBSWorkItemsMigration:
     # --- HTTP-level tests (no browser required) ---
 
     def test_fragment_endpoint_returns_200_with_etag(self, live_server: str) -> None:
-        """GET /components/work-items must return 200 with an ETag header."""
+        """GET /components/work-items must return 200 with the JBS table DOM contract."""
         resp = requests.get(f"{live_server}/components/work-items", timeout=10)
         assert resp.status_code == 200, f"Fragment endpoint returned {resp.status_code}"
-        assert "data-jbs-component" in resp.text, "Fragment HTML missing data-jbs-component"
+        # The ui.table() macro renders id="work-items-table", data-jbs-component="table",
+        # data-jbs-key="work-items-table", and data-jbs-endpoint="/components/work-items".
+        assert 'id="work-items-table"' in resp.text, "Fragment missing id='work-items-table'"
+        assert 'data-jbs-component="table"' in resp.text, "Fragment missing data-jbs-component='table'"
+        assert 'data-jbs-key="work-items-table"' in resp.text, "Fragment missing data-jbs-key"
         etag = resp.headers.get("ETag", "")
         assert etag, "Fragment endpoint must return an ETag header"
 
@@ -2115,7 +2119,7 @@ class TestJBSWorkItemsMigration:
             assert resp.status_code == 200, (
                 f"Fragment with sort_by={sort_by}&sort_dir={sort_dir} returned {resp.status_code}"
             )
-            assert "data-jbs-component" in resp.text
+            assert 'data-jbs-component="table"' in resp.text
 
     def test_fragment_endpoint_filter_params_accepted(self, live_server: str) -> None:
         """Fragment endpoint must accept filter query params without error."""
@@ -2124,13 +2128,13 @@ class TestJBSWorkItemsMigration:
             timeout=10,
         )
         assert resp.status_code == 200
-        assert "data-jbs-component" in resp.text
+        assert 'data-jbs-component="table"' in resp.text
 
     def test_legacy_limit_offset_params_accepted(self, live_server: str) -> None:
-        """Legacy ?limit=50&offset=0 request must still return a valid page."""
+        """Legacy ?limit=50&offset=0 request must still render a valid full page."""
         resp = requests.get(f"{live_server}/work-items?limit=50&offset=0", timeout=10)
         assert resp.status_code == 200
-        assert "data-jbs-component" in resp.text
+        assert 'data-jbs-component="table"' in resp.text
 
     # --- Browser-level tests (Playwright) ---
 
@@ -2169,21 +2173,41 @@ class TestJBSWorkItemsMigration:
         )
 
     def test_jbs_component_present_in_dom(self, page: Page, live_server: str) -> None:
-        """The Work Items table must be wrapped in a data-jbs-component element."""
+        """The Work Items table must use the real JBS ``ui.table(...)`` DOM contract.
+
+        ``ui.table("work-items-table", ...)`` renders:
+          - ``id="work-items-table"`` on the ``<section>`` element
+          - ``data-jbs-component="table"`` (the generic component type, NOT the key)
+          - ``data-jbs-key="work-items-table"`` (the unique component id)
+          - ``data-jbs-endpoint="/components/work-items"`` (the fragment URL)
+        """
         self._init_page(page)
         page.goto(f"{live_server}/work-items")
         page.wait_for_load_state("domcontentloaded")
 
         info: Any = page.evaluate("""() => {
-            const el = document.querySelector('[data-jbs-component="work-items-table"]');
-            if (!el) return null;
+            // Locate by #id (canonical selector for the JBS table root)
+            const byId = document.getElementById('work-items-table');
+            if (!byId) return { byId: null };
             return {
-                endpoint: el.getAttribute('data-jbs-endpoint'),
-                persist:  el.getAttribute('data-jbs-persist'),
+                byId:      byId !== null,
+                component: byId.getAttribute('data-jbs-component'),
+                key:       byId.getAttribute('data-jbs-key'),
+                endpoint:  byId.getAttribute('data-jbs-endpoint'),
+                persist:   byId.getAttribute('data-jbs-persist'),
             };
         }""")
-        assert info is not None, "data-jbs-component='work-items-table' not found in DOM"
-        assert info["endpoint"] and "/components/work-items" in info["endpoint"], (
+        assert info.get("byId"), (
+            "#work-items-table element not found in DOM — ui.table() root section is missing"
+        )
+        assert info.get("component") == "table", (
+            f"Expected data-jbs-component='table', got '{info.get('component')}'. "
+            "ui.table() always sets data-jbs-component='table', not the component key."
+        )
+        assert info.get("key") == "work-items-table", (
+            f"Expected data-jbs-key='work-items-table', got '{info.get('key')}'"
+        )
+        assert info.get("endpoint") and "/components/work-items" in info.get("endpoint", ""), (
             f"Unexpected data-jbs-endpoint: {info.get('endpoint')}"
         )
 
@@ -2213,7 +2237,11 @@ class TestJBSWorkItemsMigration:
         )
 
     def test_sort_click_triggers_fragment_fetch(self, page: Page, live_server: str) -> None:
-        """Clicking a sort header must trigger a fetch to /components/work-items."""
+        """Clicking a sort header must trigger a fetch to /components/work-items.
+
+        Sortable column headers (``data-jbs-action="sort"``) are a required part of the
+        JBS table contract.  If none are present the migration is broken.
+        """
         fragment_requests: list[str] = []
 
         def _on_request(req: Any) -> None:
@@ -2224,18 +2252,21 @@ class TestJBSWorkItemsMigration:
         page.goto(f"{live_server}/work-items")
         page.wait_for_load_state("networkidle")
 
+        sort_btn = page.locator('[data-jbs-action="sort"]').first
+        if sort_btn.count() == 0:
+            pytest.skip(
+                "No [data-jbs-action='sort'] buttons found — sortable columns are required "
+                "by the JBS table migration; check that the columns list includes sortable=true."
+            )
+
         page.on("request", _on_request)
         try:
-            sort_btn = page.locator('[data-jbs-action="sort"]').first
-            if sort_btn.count() == 0:
-                # No sort buttons — table may render differently, skip
-                return
-            before = len(fragment_requests)
             sort_btn.click(timeout=5000)
             # Give the fetch time to fire; the actual request is collected via on("request").
             page.wait_for_timeout(1500)
-        except PlaywrightError:
+        except PlaywrightError as exc:
             page.wait_for_timeout(1500)
+            pytest.fail(f"Sort button click raised a Playwright error: {exc}")
         finally:
             page.remove_listener("request", _on_request)
 
@@ -2251,19 +2282,22 @@ class TestJBSWorkItemsMigration:
 
         sort_btn = page.locator('[data-jbs-action="sort"]').first
         if sort_btn.count() == 0:
-            return  # No sort buttons available
+            pytest.skip(
+                "No [data-jbs-action='sort'] buttons found — sortable columns are required "
+                "by the JBS table migration."
+            )
 
         sort_btn.click(timeout=5000)
-        # Wait for the loading class to clear (may be fast on localhost)
+        # Wait for the loading class to clear (may be fast on localhost).
+        # Use the canonical #work-items-table selector from the JBS ui.table() DOM contract.
         page.wait_for_function(
             """() => {
-                const comp = document.querySelector('[data-jbs-component]');
+                const comp = document.getElementById('work-items-table');
                 return !comp || !comp.classList.contains('jbs-is-loading');
             }""",
             timeout=8000,
         )
-        # Verify no JS errors occurred during the swap
-        assert page.evaluate("""() => typeof window.JinjaBootstrapSpa !== 'undefined'
-            || document.querySelector('[data-jbs-component]') !== null"""), (
-            "JBS component disappeared after sort — swap may have errored"
-        )
+        # Verify the JBS component is still present in the DOM after the swap.
+        assert page.evaluate(
+            "() => document.getElementById('work-items-table') !== null"
+        ), "JBS component #work-items-table disappeared after sort — swap may have errored"
