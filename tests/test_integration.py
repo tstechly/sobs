@@ -2242,12 +2242,6 @@ class TestJBSWorkItemsMigration:
         Sortable column headers (``data-jbs-action="sort"``) are a required part of the
         JBS table contract.  If none are present the migration is broken.
         """
-        fragment_requests: list[str] = []
-
-        def _on_request(req: Any) -> None:
-            if "/components/work-items" in req.url:
-                fragment_requests.append(req.url)
-
         self._init_page(page)
         page.goto(f"{live_server}/work-items")
         page.wait_for_load_state("networkidle")
@@ -2259,19 +2253,15 @@ class TestJBSWorkItemsMigration:
                 "by the JBS table migration; check that the columns list includes sortable=true."
             )
 
-        page.on("request", _on_request)
-        try:
+        # Use expect_request to wait deterministically for the fragment fetch triggered by sort.
+        with page.expect_request(
+            lambda r: "/components/work-items" in r.url, timeout=6000
+        ) as request_info:
             sort_btn.click(timeout=5000)
-            # Give the fetch time to fire; the actual request is collected via on("request").
-            page.wait_for_timeout(1500)
-        except PlaywrightError as exc:
-            pytest.fail(f"Sort button click raised a Playwright error: {exc}")
-        finally:
-            page.remove_listener("request", _on_request)
 
-        assert len(fragment_requests) > 0, (
-            "Sort button click did not trigger a fetch to /components/work-items"
-        )
+        req = request_info.value
+        assert req is not None, "Sort button click did not trigger a fetch to /components/work-items"
+        assert "/components/work-items" in req.url
 
     def test_loading_state_clears_after_sort(self, page: Page, live_server: str) -> None:
         """The jbs-is-loading class must clear from the component after a fetch completes."""
