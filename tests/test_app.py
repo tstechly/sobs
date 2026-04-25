@@ -682,6 +682,14 @@ class TestOtlpCors:
         assert sobs_app._origin_allowed_for_otlp("not-an-origin") is False
         assert sobs_app._origin_allowed_for_otlp("") is False
 
+    def test_origin_allowed_for_otlp_rejects_invalid_port(self, monkeypatch):
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("https://example.com",),
+        )
+        assert sobs_app._origin_allowed_for_otlp("https://example.com:abc") is False
+
     # ------------------------------------------------------------------ _append_vary_header unit tests
     def test_append_vary_case_insensitive_dedup(self):
         from quart.wrappers import Response as QuartResponse
@@ -785,6 +793,27 @@ class TestOtlpCors:
         allow_headers = r.headers.get("Access-Control-Allow-Headers", "")
         assert "X-SOBS-Asset-Timestamp" in allow_headers
         assert "X-SOBS-Asset-Signature" in allow_headers
+
+    async def test_options_preflight_for_dynamic_asset_get(self, client, monkeypatch):
+        """Dynamic asset GET preflight should advertise GET/HEAD support."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_OTLP_CORS_ALLOWED_ORIGINS",
+            ("http://localhost:*",),
+        )
+        r = await client.options(
+            "/v1/rum/assets/test-id",
+            headers={
+                "Origin": self._allowed_origin(),
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Authorization",
+            },
+        )
+        assert r.status_code in {200, 204}
+        assert r.headers.get("Access-Control-Allow-Origin") == self._allowed_origin()
+        allow_methods = r.headers.get("Access-Control-Allow-Methods", "")
+        assert "GET" in allow_methods
+        assert "OPTIONS" in allow_methods
 
     # ------------------------------------------------------------------ CORS NOT applied to non-ingest routes
     @pytest.mark.parametrize(
