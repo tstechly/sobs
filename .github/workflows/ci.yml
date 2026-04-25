@@ -160,7 +160,7 @@ jobs:
             .github/cache-key-runtime.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest pytest-asyncio pytest-cov
+        run: pip install -r requirements.txt -r requirements-integration.txt
 
       - name: Run unit tests with coverage
         run: |
@@ -170,6 +170,9 @@ jobs:
             --cov=app --cov=masking --cov=mcp \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml
+
+      - name: Diff coverage gate
+        run: diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
