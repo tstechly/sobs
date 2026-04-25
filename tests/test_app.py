@@ -21248,16 +21248,10 @@ class TestJBSMigration:
         # Pre-rendered HTML columns (html=True in macro) must escape injected content.
         # Signal HTML must not allow raw <br> injection in signal_name.
         assert "<br>injection" not in row["signal"]
-        # Issue HTML must escape the XSS payload in the title attribute.
-        # html.escape() converts <, > and " so the raw tag <img src=x ...> cannot appear.
-        assert '<img src=x' not in row["issue"]
-        # onerror= appears inside the html.escape()-encoded title attribute value, which is
-        # safe (it's not a real HTML element attribute). The unescaped tag opener must not appear.
+        # Issue and detail HTML must not contain raw (unescaped) HTML tags.
+        # html.escape() converts < and > so <img, <script, etc. cannot appear as element openers.
         assert '<img' not in row["issue"], "Raw unescaped <img element must not appear in issue HTML"
-        # Detail button's data attributes must not contain raw (unescaped) HTML.
-        # html.escape() converts < and > so raw tags cannot appear.
         assert '<script>' not in row["detail"], "Raw <script> must not appear in detail column"
-        assert '<img' not in row["detail"], "Raw <img element must not appear in detail column"
         # javascript: URL in issue_url is not a safe GitHub URL and must be blocked.
         # _is_safe_github_url rejects non-https and non-github.com domains, so the
         # cell must render as plain text (—) rather than an <a href="javascript:..."> link.

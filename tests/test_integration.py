@@ -2232,11 +2232,7 @@ class TestJBSWorkItemsMigration:
                 return
             before = len(fragment_requests)
             sort_btn.click(timeout=5000)
-            page.wait_for_function(
-                f"() => document.querySelectorAll('/components/work-items') !== null",
-                timeout=6000,
-            )
-            # Give the fetch time to fire
+            # Give the fetch time to fire; the actual request is collected via on("request").
             page.wait_for_timeout(1500)
         except PlaywrightError:
             page.wait_for_timeout(1500)
