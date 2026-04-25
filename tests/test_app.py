@@ -539,6 +539,153 @@ class TestMasking:
         assert error_email not in body
         assert "****" in body
 
+    def test_none_value_inside_dict_passes_through(self):
+        import masking
+
+        result = masking.mask_value({"service": "svc", "detail": None})
+        assert result["detail"] is None
+        assert result["service"] == "svc"
+
+    def test_tuple_values_are_masked(self):
+        import masking
+
+        result = masking.mask_value(("normal", "api_key=supersecret"))
+        assert isinstance(result, tuple)
+        assert result[0] == "normal"
+        assert "supersecret" not in result[1]
+        assert "****" in result[1]
+
+    def test_tuple_with_sensitive_values_masked(self):
+        import masking
+
+        result = masking.mask_value(("safe", "john@example.com", 42))
+        assert isinstance(result, tuple)
+        assert result[0] == "safe"
+        assert "john@example.com" not in result[1]
+        assert result[2] == 42
+
+    def test_set_values_are_masked(self):
+        import masking
+
+        result = masking.mask_value({"safe_value_abc", "other_safe_xyz"})
+        assert isinstance(result, set)
+        assert len(result) == 2
+
+    def test_frozenset_values_are_masked(self):
+        import masking
+
+        result = masking.mask_value(frozenset({"safe_abc", "other_xyz"}))
+        assert isinstance(result, frozenset)
+        assert len(result) == 2
+
+    def test_circular_dict_reference_returns_mask(self):
+        import masking
+
+        d: dict = {"key": "value"}
+        d["self"] = d
+        result = masking.mask_value(d)
+        assert result["self"] == "****"
+        assert result["key"] == "value"
+
+    def test_circular_list_reference_returns_mask(self):
+        import masking
+
+        lst: list = ["item"]
+        lst.append(lst)
+        result = masking.mask_value(lst)
+        assert result[0] == "item"
+        assert result[1] == "****"
+
+    def test_unknown_immutable_object_returns_mask(self):
+        """object() deepcopy raises TypeError; _redact_value should return MASK."""
+        import masking
+
+        result = masking.mask_value(object())
+        assert result == "****"
+
+    def test_deepcopy_identity_returns_mask(self):
+        """When deepcopy returns the same object (identity), _redact_value returns MASK."""
+        import masking
+
+        class _SelfDeepCopy:
+            def __deepcopy__(self, memo):
+                return self
+
+        result = masking.mask_value(_SelfDeepCopy())
+        assert result == "****"
+
+    def test_validate_pattern_raises_on_empty_string(self):
+        import pytest
+
+        import masking
+
+        with pytest.raises(ValueError, match="Pattern is required"):
+            masking.validate_pattern("")
+
+    def test_validate_pattern_raises_on_whitespace_only(self):
+        import pytest
+
+        import masking
+
+        with pytest.raises(ValueError, match="Pattern is required"):
+            masking.validate_pattern("   ")
+
+    def test_configure_runtime_rules_with_custom_key_and_pattern(self):
+        import masking
+
+        original_keys = masking.SENSITIVE_KEYS
+        original_patterns = masking.SENSITIVE_PATTERNS
+        try:
+            masking.configure_runtime_rules(
+                custom_keys=["my_secret_field"],
+                custom_patterns=[r"CUSTOM-\d{6}"],
+            )
+            result = masking.mask_value({"my_secret_field": "should_be_masked"})
+            assert result["my_secret_field"] == "****"
+            result2 = masking.mask_value("token CUSTOM-123456 in log")
+            assert "CUSTOM-123456" not in result2
+        finally:
+            masking.SENSITIVE_KEYS = original_keys
+            masking.SENSITIVE_PATTERNS = original_patterns
+            masking.build_redacting_filter()
+
+    def test_configure_runtime_rules_deduplicates_patterns(self):
+        import masking
+
+        original_keys = masking.SENSITIVE_KEYS
+        original_patterns = masking.SENSITIVE_PATTERNS
+        try:
+            masking.configure_runtime_rules(
+                custom_patterns=[r"DUP-\d+", r"DUP-\d+"],
+            )
+            custom = [p for p in masking.SENSITIVE_PATTERNS if "DUP" in p]
+            assert len(custom) == 1
+        finally:
+            masking.SENSITIVE_KEYS = original_keys
+            masking.SENSITIVE_PATTERNS = original_patterns
+            masking.build_redacting_filter()
+
+    def test_get_filter_rebuilds_when_filter_is_none(self):
+        import masking
+
+        original_filter = masking._filter
+        try:
+            masking._filter = None
+            result = masking.mask_value("john@example.com")
+            assert "john@example.com" not in result
+            assert "****" in result
+        finally:
+            masking._filter = original_filter
+
+    def test_mask_string_json_dumps_exception_falls_back_to_str(self, monkeypatch):
+        import json
+
+        import masking
+
+        monkeypatch.setattr(json, "dumps", lambda *a, **kw: (_ for _ in ()).throw(ValueError("simulated")))
+        result = masking.mask_string({"service": "checkout", "status": "ok"})
+        assert isinstance(result, str)
+
 
 # ---------------------------------------------------------------------------
 # Compression helpers
