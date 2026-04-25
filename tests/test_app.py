@@ -22261,43 +22261,74 @@ class TestJBSMigration:
     # ------------------------------------------------------------------
 
     def test_map_limit_offset_converts_limit_50(self):
-        result = sobs_app._map_limit_offset_to_page_state({"limit": "50"})
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "50"})
         assert result["page_size"] == "50"
+        assert legacy_limit == 50
+        assert legacy_offset is None
 
     def test_map_limit_offset_converts_limit_100(self):
-        result = sobs_app._map_limit_offset_to_page_state({"limit": "100"})
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "100"})
         assert result["page_size"] == "100"
+        assert legacy_limit == 100
+        assert legacy_offset is None
+
+    def test_map_limit_offset_preserves_exact_limit_75(self):
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "75"})
+        assert result["page_size"] == "75"
+        assert legacy_limit == 75
+        assert legacy_offset is None
 
     def test_map_limit_offset_clamps_large_limit(self):
-        result = sobs_app._map_limit_offset_to_page_state({"limit": "9999"})
-        assert result["page_size"] == "100"
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "9999"})
+        assert result["page_size"] == "5000"
+        assert legacy_limit == 5000
+        assert legacy_offset is None
 
     def test_map_limit_offset_clamps_small_limit(self):
-        result = sobs_app._map_limit_offset_to_page_state({"limit": "1"})
-        assert result["page_size"] == "25"
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "1"})
+        assert result["page_size"] == "1"
+        assert legacy_limit == 1
+        assert legacy_offset is None
 
     def test_map_limit_offset_converts_offset_to_page(self):
         # offset=50, limit=50 → page=2
-        result = sobs_app._map_limit_offset_to_page_state({"limit": "50", "offset": "50"})
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "50", "offset": "50"})
         assert result["page_size"] == "50"
         assert result["page"] == "2"
+        assert legacy_limit == 50
+        assert legacy_offset == 50
+
+    def test_map_limit_offset_preserves_non_aligned_offset(self):
+        # offset=25, limit=50 keeps exact SQL offset even though page index is 1.
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"limit": "50", "offset": "25"})
+        assert result["page_size"] == "50"
+        assert result["page"] == "1"
+        assert legacy_limit == 50
+        assert legacy_offset == 25
 
     def test_map_limit_offset_does_not_override_existing_page_size(self):
         # If page_size already set, limit should not override it
-        result = sobs_app._map_limit_offset_to_page_state({"limit": "100", "page_size": "25"})
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state(
+            {"limit": "100", "page_size": "25"}
+        )
         assert result["page_size"] == "25"
+        assert legacy_limit is None
+        assert legacy_offset is None
 
     def test_map_limit_offset_does_not_override_existing_page(self):
         # If page already set, offset should not override it
-        result = sobs_app._map_limit_offset_to_page_state({"offset": "50", "page": "3"})
+        result, legacy_limit, legacy_offset = sobs_app._map_limit_offset_to_page_state({"offset": "50", "page": "3"})
         assert result["page"] == "3"
+        assert legacy_limit is None
+        assert legacy_offset is None
 
     async def test_work_items_page_handles_legacy_limit_offset(self, client):
-        """Legacy ?limit=50&offset=50 should still render a valid page (backward compat)."""
-        r = await client.get("/work-items?limit=50&offset=50")
+        """Legacy ?limit=75&offset=25 should preserve exact old semantics."""
+        r = await client.get("/work-items?limit=75&offset=25")
         assert r.status_code == 200
         text = (await r.get_data()).decode()
         assert 'data-jbs-component="table"' in text
+        assert '"page_size": 75' in text or '"page_size":75' in text
 
     async def test_work_items_default_page_size_matches_old_limit_default(self, client):
         """GET /work-items with no params must use page_size=100 (matches old limit=100 default).

@@ -18362,37 +18362,37 @@ _WORK_ITEMS_TABLE_STATE_KEYS = [
 ]
 
 
-def _map_limit_offset_to_page_state(args: Any) -> dict[str, Any]:
+def _map_limit_offset_to_page_state(args: Any) -> tuple[dict[str, Any], int | None, int | None]:
     """Convert legacy ``limit``/``offset`` query params to JBS ``page``/``page_size``.
 
-    Called only when ``limit`` or ``offset`` appear in the request args and the
-    canonical JBS params (``page``, ``page_size``) are absent, so existing
-    bookmarks like ``/work-items?limit=50&offset=50`` continue to work.
+    Returns ``(mapped_args, legacy_limit, legacy_offset)`` where the legacy values
+    preserve exact old semantics. ``legacy_offset`` is carried separately so SQL
+    OFFSET can stay exact even when it is not aligned to page boundaries.
     """
     result: dict[str, Any] = dict(args)
+    legacy_limit: int | None = None
+    legacy_offset: int | None = None
+
     if "limit" in args and "page_size" not in args:
         try:
-            limit = max(1, int(args["limit"]))
+            legacy_limit = max(1, min(int(args["limit"]), 5000))
         except (TypeError, ValueError):
-            limit = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
-        # Clamp to the nearest supported page size
-        if limit >= 100:
-            result["page_size"] = "100"
-        elif limit >= 50:
-            result["page_size"] = "50"
-        else:
-            result["page_size"] = "25"
+            legacy_limit = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+        result["page_size"] = str(legacy_limit)
+
     if "offset" in args and "page" not in args:
         try:
-            offset = max(0, int(args["offset"]))
+            legacy_offset = max(0, int(args["offset"]))
         except (TypeError, ValueError):
-            offset = 0
+            legacy_offset = 0
         try:
             page_size = int(result.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE))
         except (TypeError, ValueError):
             page_size = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
-        result["page"] = str((offset // page_size) + 1)
-    return result
+        page_size = max(1, min(page_size, 5000))
+        result["page"] = str((legacy_offset // page_size) + 1)
+
+    return result, legacy_limit, legacy_offset
 
 
 @app.route("/work-items")
@@ -18410,7 +18410,7 @@ async def view_work_items():
     from_ts, to_ts, time_error = _parse_time_window_args()
 
     # Map legacy limit/offset params → JBS page/page_size for backward compatibility.
-    compat_args = _map_limit_offset_to_page_state(request.args)
+    compat_args, legacy_limit, legacy_offset = _map_limit_offset_to_page_state(request.args)
 
     # Inject already-normalised timestamps so the shared data helper sees
     # consistent values regardless of window_s computation.
@@ -18420,13 +18420,21 @@ async def view_work_items():
     if to_ts:
         init_state["to_ts"] = to_ts
 
+    allowed_page_sizes = _WORK_ITEMS_TABLE_PAGE_SIZES
+    if legacy_limit is not None:
+        allowed_page_sizes = tuple(sorted({*allowed_page_sizes, legacy_limit}))
+
     table_state = parse_table_state(
         init_state,
         default_sort_by=_WORK_ITEMS_TABLE_DEFAULT_SORT_BY,
         default_page_size=_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE,
-        allowed_page_sizes=_WORK_ITEMS_TABLE_PAGE_SIZES,
+        allowed_page_sizes=allowed_page_sizes,
         filter_keys=["service", "rule_name", "action_type", "status", "from_ts", "to_ts"],
     )
+
+    # Preserve exact old offset semantics for legacy limit/offset callers.
+    if legacy_offset is not None:
+        table_state["offset"] = legacy_offset
 
     # Delegate data fetching to the shared helper (eliminates query duplication).
     items, total_items, services, rules = await _fetch_work_items_fragment_data(db, table_state)
@@ -18646,10 +18654,19 @@ async def _fetch_work_items_fragment_data(
 
     # Pagination
     page = max(1, int(state.get("page", 1) or 1))
-    page_size = int(state.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE) or _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE)
-    if page_size not in _WORK_ITEMS_TABLE_PAGE_SIZES:
-        page_size = _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
-    offset = (page - 1) * page_size
+    page_size_raw = int(
+        state.get("page_size", _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE) or _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+    )
+    legacy_offset_present = "offset" in state and state.get("offset") is not None
+    if legacy_offset_present:
+        # Legacy limit/offset callers keep exact limit semantics (up to old clamp 5000).
+        page_size = max(1, min(page_size_raw, 5000))
+        offset = max(0, int(state.get("offset", 0) or 0))
+    else:
+        page_size = (
+            page_size_raw if page_size_raw in _WORK_ITEMS_TABLE_PAGE_SIZES else _WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE
+        )
+        offset = (page - 1) * page_size
 
     # Sort
     sort_by_key = str(state.get("sort_by", _WORK_ITEMS_TABLE_DEFAULT_SORT_BY) or _WORK_ITEMS_TABLE_DEFAULT_SORT_BY)
@@ -18748,14 +18765,23 @@ async def work_items_table_component():
     """
     db = get_db()
 
+    compat_args, legacy_limit, legacy_offset = _map_limit_offset_to_page_state(request.args)
+    allowed_page_sizes = _WORK_ITEMS_TABLE_PAGE_SIZES
+    if legacy_limit is not None:
+        allowed_page_sizes = tuple(sorted({*allowed_page_sizes, legacy_limit}))
+
     state = parse_table_state(
-        request.args,
+        compat_args,
         request_headers=request.headers,
         default_sort_by=_WORK_ITEMS_TABLE_DEFAULT_SORT_BY,
         default_page_size=_WORK_ITEMS_TABLE_DEFAULT_PAGE_SIZE,
-        allowed_page_sizes=_WORK_ITEMS_TABLE_PAGE_SIZES,
+        allowed_page_sizes=allowed_page_sizes,
         filter_keys=["service", "rule_name", "action_type", "status", "from_ts", "to_ts"],
     )
+
+    # Preserve exact legacy offset semantics for direct fragment requests.
+    if legacy_offset is not None:
+        state["offset"] = legacy_offset
 
     items, total_items, services, rules = await _fetch_work_items_fragment_data(db, state)
     table_rows = _work_items_table_rows(items)
