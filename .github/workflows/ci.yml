@@ -43,7 +43,8 @@ jobs:
 
       - name: Audit Python dependencies
         # --strict is omitted because jinja-bootstrap-spa is a pinned Git dependency
-        # (not yet published on PyPI) and pip-audit cannot audit VCS packages from PyPI.
+        # (not yet published on PyPI); pip-audit --strict fails when it cannot resolve
+        # any dependency, and VCS packages are inherently unresolvable from PyPI.
         # All other PyPI packages are still audited normally; jinja-bootstrap-spa is
         # reported as "skipped: Dependency not found on PyPI" which is the expected
         # outcome for this intentional first-consumer POC dependency.
