@@ -18436,6 +18436,8 @@ async def view_work_items():
         "work_items.html",
         items=items,
         total_items=total_items,
+        rows=table_rows,
+        total_rows=total_items,
         table_state=table_state,
         table_rows=table_rows,
         table_state_keys=_WORK_ITEMS_TABLE_STATE_KEYS,
