@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import html
+import io
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock
@@ -5441,6 +5443,74 @@ class TestBasePathSupport:
         assert b'href="/sobs/logs"' in await r.get_data()
         assert b'href="/sobs/errors"' in await r.get_data()
         assert b'src="/sobs/static/bootstrap.bundle.min.js"' in await r.get_data()
+
+    async def test_forwarded_prefix_ai_page_uses_prefixed_api_urls(self, client):
+        """AI page JS should call prefixed API routes when deployed behind a forwarded path prefix."""
+        r = await client.get("/ai", headers={"X-Forwarded-Prefix": "/sobs"})
+        assert r.status_code == 200
+        body = await r.get_data()
+        assert b'var AI_CONVERSATION_URL = "/sobs/api/ai/conversation";' in body
+        assert b'var AI_SPAN_ATTRIBUTES_URL = "/sobs/api/ai/span-attributes";' in body
+
+    async def test_forwarded_prefix_ai_panel_endpoints_load_successfully(self, client):
+        """Prefixed AI panel lazy-load endpoints should return conversation HTML and raw attrs."""
+        import app as app_module
+
+        service = f"prefix-ai-panel-{time.time_ns()}"
+        ingest = await client.post(
+            "/v1/ai",
+            json={
+                "service": service,
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "prompt": "hello",
+                "response": "world",
+                "tokens_in": 5,
+                "tokens_out": 3,
+                "duration_ms": 100,
+            },
+        )
+        assert ingest.status_code == 200
+
+        row = (
+            app_module.get_db()
+            .execute(
+                "SELECT Timestamp, TraceId, SpanName FROM otel_traces "
+                "WHERE ServiceName=? ORDER BY Timestamp DESC LIMIT 1",
+                [service],
+            )
+            .fetchone()
+        )
+        assert row is not None
+
+        conv = await client.get(
+            "/sobs/api/ai/conversation",
+            query_string={
+                "ts": str(row["Timestamp"]),
+                "service": service,
+                "trace_id": str(row["TraceId"]),
+                "span_name": str(row["SpanName"]),
+            },
+            headers={"X-Forwarded-Prefix": "/sobs"},
+        )
+        assert conv.status_code == 200
+        conv_html = await conv.get_data(as_text=True)
+        assert "Conversation" in conv_html or "Prompt" in conv_html or "Messages" in conv_html
+
+        attrs = await client.get(
+            "/sobs/api/ai/span-attributes",
+            query_string={
+                "ts": str(row["Timestamp"]),
+                "service": service,
+                "trace_id": str(row["TraceId"]),
+                "span_name": str(row["SpanName"]),
+            },
+            headers={"X-Forwarded-Prefix": "/sobs"},
+        )
+        assert attrs.status_code == 200
+        payload = await attrs.get_json()
+        assert payload["ok"] is True
+        assert isinstance(payload.get("raw_attrs"), str)
 
 
 # ---------------------------------------------------------------------------
@@ -17575,6 +17645,269 @@ class TestWebTraffic:
             sobs_app._GITHUB_BACKFILL_MAX_RELEASES_SETTING,
             str(sobs_app._GITHUB_BACKFILL_MAX_RELEASES_DEFAULT),
         )
+
+    async def test_fetch_release_deps_from_github_uses_actions_artifact_snapshots(self, client, monkeypatch):
+        app_resp = await client.post(
+            "/v1/apps",
+            json={
+                "name": "GitHub Actions Backfill App",
+                "slug": f"github-actions-backfill-app-{time.time_ns()}",
+                "ownerTeam": "platform",
+                "repoUrl": "https://github.com/acme/actions-backfill",
+                "defaultEnvironment": "prod",
+            },
+        )
+        assert app_resp.status_code == 201
+        app_id = (await app_resp.get_json())["id"]
+
+        rel_resp = await client.post(
+            f"/v1/apps/{app_id}/releases",
+            json={"version": "3.4.5", "environment": "prod", "commitSha": "abc123def456"},
+        )
+        assert rel_resp.status_code == 201
+        release_id = (await rel_resp.get_json())["id"]
+
+        db = sobs_app.get_db()
+        sobs_app._save_ai_setting(db, "ai.github_token", "ghp-test-token")
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr("pip-freeze-linux-amd64.txt", "requests==2.32.3\nurllib3==2.2.2\n")
+            zip_file.writestr("pip-freeze-linux-arm64.txt", "requests==2.32.3\n")
+        archive_bytes = archive_buffer.getvalue()
+
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload: dict | None = None, content: bytes = b"{}"):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.content = content
+
+            def json(self):
+                return self._payload
+
+        class _FakeClient:
+            async def get(self, url, params=None, headers=None, timeout=None, follow_redirects=False):
+                if url.endswith("/actions/runs"):
+                    return _FakeResponse(
+                        200,
+                        {
+                            "workflow_runs": [
+                                {
+                                    "id": 1001,
+                                    "conclusion": "success",
+                                    "head_sha": "abc123def456",
+                                }
+                            ]
+                        },
+                    )
+                if url.endswith("/actions/runs/1001/artifacts"):
+                    return _FakeResponse(
+                        200,
+                        {
+                            "artifacts": [
+                                {
+                                    "id": 2002,
+                                    "name": "sobs-release-dependency-snapshots",
+                                    "expired": False,
+                                    "archive_download_url": "https://api.github.com/artifacts/2002/zip",
+                                }
+                            ]
+                        },
+                    )
+                if url == "https://api.github.com/artifacts/2002/zip":
+                    return _FakeResponse(200, content=archive_bytes)
+                return _FakeResponse(404, {})
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(sobs_app, "_get_async_http_client", _fake_get_client)
+
+        summary = await sobs_app._fetch_release_deps_from_github(db)
+        assert summary["attempted"] >= 1
+        assert summary["inserted"] >= 2
+
+        rows = db.execute(
+            "SELECT Name, Platform, Architecture, MetadataJson "
+            "FROM sobs_release_artifacts FINAL "
+            "WHERE ReleaseId=? AND ArtifactType='dependencies-lockfile' AND IsDeleted=0",
+            [release_id],
+        ).fetchall()
+        assert len(rows) >= 2
+        names = {str(row["Name"]) for row in rows}
+        assert "pip-freeze-linux-amd64" in names
+        assert "pip-freeze-linux-arm64" in names
+        amd64_row = next(row for row in rows if str(row["Name"]) == "pip-freeze-linux-amd64")
+        metadata = json.loads(str(amd64_row["MetadataJson"]))
+        assert metadata.get("source") == "github_actions_artifact"
+        deps = metadata.get("dependencies", [])
+        assert any(d.get("package") == "requests" and d.get("version") == "2.32.3" for d in deps)
+
+    async def test_fetch_release_deps_from_github_skips_actions_artifacts_without_commit_sha(self, client, monkeypatch):
+        app_resp = await client.post(
+            "/v1/apps",
+            json={
+                "name": "GitHub Actions No SHA App",
+                "slug": f"github-actions-no-sha-app-{time.time_ns()}",
+                "ownerTeam": "platform",
+                "repoUrl": "https://github.com/acme/actions-no-sha",
+                "defaultEnvironment": "prod",
+            },
+        )
+        assert app_resp.status_code == 201
+        app_id = (await app_resp.get_json())["id"]
+
+        rel_resp = await client.post(
+            f"/v1/apps/{app_id}/releases",
+            json={"version": "4.5.6", "environment": "prod"},
+        )
+        assert rel_resp.status_code == 201
+        release_id = (await rel_resp.get_json())["id"]
+
+        db = sobs_app.get_db()
+        sobs_app._save_ai_setting(db, "ai.github_token", "ghp-test-token")
+
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload: dict | None = None):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.content = b"{}"
+
+            def json(self):
+                return self._payload
+
+        class _FakeClient:
+            async def get(self, url, params=None, headers=None, timeout=None, follow_redirects=False):
+                if url.endswith("/contents/requirements.txt"):
+                    req_text = "requests==2.32.3\n"
+                    encoded = base64.b64encode(req_text.encode("utf-8")).decode("ascii")
+                    return _FakeResponse(200, {"encoding": "base64", "content": encoded})
+                return _FakeResponse(404, {})
+
+        async def _fake_get_client():
+            return _FakeClient()
+
+        monkeypatch.setattr(sobs_app, "_get_async_http_client", _fake_get_client)
+
+        summary = await sobs_app._fetch_release_deps_from_github(db)
+        assert summary["attempted"] >= 1
+        assert summary["inserted"] >= 1
+
+        rows = db.execute(
+            "SELECT Name, MetadataJson FROM sobs_release_artifacts FINAL "
+            "WHERE ReleaseId=? AND ArtifactType='dependencies-lockfile' AND IsDeleted=0 "
+            "ORDER BY UploadedAt DESC LIMIT 1",
+            [release_id],
+        ).fetchall()
+        assert rows
+        metadata = json.loads(str(rows[0]["MetadataJson"]))
+        assert metadata.get("source") == "github_contents_api"
+
+    async def test_sync_github_repo_health_once_persists_summary(self, client, monkeypatch):
+        db = sobs_app.get_db()
+
+        async def _fake_collect(_db):
+            return {
+                "ok": True,
+                "scanned_repos": 2,
+                "total_repos_considered": 3,
+                "open_issues": 4,
+                "open_prs": 5,
+                "security_items": 1,
+                "version_scoped": True,
+                "last_synced_at": "2026-04-25T00:00:00Z",
+                "repos": [],
+            }
+
+        monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", _fake_collect)
+
+        summary = await sobs_app._sync_github_repo_health_once(db)
+        assert summary["ok"] is True
+
+        last_sync = sobs_app._get_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING)
+        assert last_sync == "2026-04-25T00:00:00Z"
+
+        compact_raw = sobs_app._get_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING)
+        compact = json.loads(compact_raw)
+        assert compact["scanned_repos"] == 2
+        assert compact["total_repos_considered"] == 3
+        assert compact["open_issues"] == 4
+        assert compact["open_prs"] == 5
+        assert compact["security_items"] == 1
+
+    async def test_sync_github_repo_health_once_skips_persist_when_unchanged(self, client, monkeypatch):
+        db = sobs_app.get_db()
+        sobs_app._del_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING)
+        sobs_app._del_app_setting(db, sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING)
+        state = {"n": 0}
+
+        async def _fake_collect(_db):
+            state["n"] += 1
+            return {
+                "ok": True,
+                "scanned_repos": 2,
+                "total_repos_considered": 3,
+                "open_issues": 4,
+                "open_prs": 5,
+                "security_items": 1,
+                "version_scoped": True,
+                "last_synced_at": f"2026-04-25T00:00:0{state['n']}Z",
+                "repos": [],
+            }
+
+        original_set = sobs_app._set_app_setting
+        set_calls: list[str] = []
+
+        def _tracking_set(db_obj, key, value):
+            set_calls.append(str(key))
+            return original_set(db_obj, key, value)
+
+        monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", _fake_collect)
+        monkeypatch.setattr(sobs_app, "_set_app_setting", _tracking_set)
+
+        first = await sobs_app._sync_github_repo_health_once(db)
+        assert first["ok"] is True
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING) == 1
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) == 1
+
+        second = await sobs_app._sync_github_repo_health_once(db)
+        assert second["ok"] is True
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SYNC_SETTING) == 1
+        assert set_calls.count(sobs_app._GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) == 1
+
+    async def test_enrichment_libraries_returns_500_on_query_error(self, client, monkeypatch):
+        original_collect = sobs_app._collect_library_inventory
+
+        def _boom(_db):
+            raise RuntimeError("forced libraries failure")
+
+        monkeypatch.setattr(sobs_app, "_collect_library_inventory", _boom)
+        try:
+            r = await client.get("/api/enrichment/libraries")
+        finally:
+            monkeypatch.setattr(sobs_app, "_collect_library_inventory", original_collect)
+
+        assert r.status_code == 500
+        body = json.loads(await r.get_data())
+        assert body["ok"] is False
+        assert "forced libraries failure" in body["error"]
+
+    async def test_repo_health_endpoint_returns_500_when_summary_fails(self, client, monkeypatch):
+        original_collect = sobs_app._collect_github_repo_health_summary
+
+        async def _fake_collect(_db):
+            return {"ok": False, "error": "forced repo health failure"}
+
+        monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", _fake_collect)
+        try:
+            r = await client.get("/api/enrichment/github/repo-health")
+        finally:
+            monkeypatch.setattr(sobs_app, "_collect_github_repo_health_summary", original_collect)
+
+        assert r.status_code == 500
+        body = json.loads(await r.get_data())
+        assert body["ok"] is False
+        assert "forced repo health failure" in body["error"]
 
     async def test_web_traffic_geo_api_empty(self, client):
         r = await client.get("/api/web-traffic/geo")

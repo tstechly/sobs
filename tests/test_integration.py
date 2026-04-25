@@ -2240,18 +2240,19 @@ class TestJBSWorkItemsMigration:
         """Clicking a sort header must trigger a fetch to /components/work-items.
 
         Sortable column headers (``data-jbs-action="sort"``) are a required part of the
-        JBS table contract.  If none are present the migration is broken.
+        JBS table contract.  If none are present the migration is broken, so missing sort
+        buttons fail this test (not skip).
         """
         self._init_page(page)
         page.goto(f"{live_server}/work-items")
         page.wait_for_load_state("networkidle")
 
         sort_btn = page.locator('[data-jbs-action="sort"]').first
-        if sort_btn.count() == 0:
-            pytest.skip(
-                "No [data-jbs-action='sort'] buttons found — sortable columns are required "
-                "by the JBS table migration; check that the columns list includes sortable=true."
-            )
+        assert sort_btn.count() > 0, (
+            "No [data-jbs-action='sort'] buttons found in the Work Items table. "
+            "Sortable column headers are a required part of the JBS ui.table() migration: "
+            "check that the columns list includes sortable=true and the macro is rendering correctly."
+        )
 
         # Use expect_request to wait deterministically for the fragment fetch triggered by sort.
         with page.expect_request(
@@ -2264,17 +2265,19 @@ class TestJBSWorkItemsMigration:
         assert "/components/work-items" in req.url
 
     def test_loading_state_clears_after_sort(self, page: Page, live_server: str) -> None:
-        """The jbs-is-loading class must clear from the component after a fetch completes."""
+        """The jbs-is-loading class must clear from the component after a fetch completes.
+
+        Sortable headers are required JBS behavior; missing sort buttons fail this test.
+        """
         self._init_page(page)
         page.goto(f"{live_server}/work-items")
         page.wait_for_load_state("networkidle")
 
         sort_btn = page.locator('[data-jbs-action="sort"]').first
-        if sort_btn.count() == 0:
-            pytest.skip(
-                "No [data-jbs-action='sort'] buttons found — sortable columns are required "
-                "by the JBS table migration."
-            )
+        assert sort_btn.count() > 0, (
+            "No [data-jbs-action='sort'] buttons found in the Work Items table. "
+            "Sortable column headers are a required part of the JBS ui.table() migration."
+        )
 
         sort_btn.click(timeout=5000)
         # Wait for the loading class to clear (may be fast on localhost).
