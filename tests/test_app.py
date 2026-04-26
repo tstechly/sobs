@@ -15,6 +15,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -20829,6 +20830,116 @@ class TestDataManagementSettings:
         assert r.status_code == 200
         text = (await r.get_data()).decode()
         assert "const pruneRequiresBackupWarning = true;" in text
+
+    def test_get_dm_prune_lock_returns_lock(self):
+        """_get_dm_prune_lock() returns the module-level lock object."""
+        lock = sobs_app._get_dm_prune_lock()
+        assert lock is not None
+        assert isinstance(lock, threading.Lock)
+
+    def test_parse_dm_prune_period_error_when_unit_without_value(self):
+        """_parse_dm_prune_period raises ValueError when unit provided without value."""
+        with pytest.raises(ValueError, match="prune_period_value is required"):
+            sobs_app._parse_dm_prune_period({"prune_period_unit": "days"})
+
+    def test_parse_dm_prune_period_error_when_value_without_unit(self):
+        """_parse_dm_prune_period raises ValueError when value provided without unit."""
+        with pytest.raises(ValueError, match="prune_period_unit is required"):
+            sobs_app._parse_dm_prune_period({"prune_period_value": 7})
+
+    def test_parse_dm_prune_period_error_on_invalid_unit(self):
+        """_parse_dm_prune_period raises ValueError for unsupported unit."""
+        with pytest.raises(ValueError, match="prune_period_unit must be 'hours' or 'days'"):
+            sobs_app._parse_dm_prune_period({"prune_period_value": 7, "prune_period_unit": "weeks"})
+
+    def test_parse_dm_prune_period_error_on_non_integer_value(self):
+        """_parse_dm_prune_period raises ValueError for non-integer period_value."""
+        with pytest.raises(ValueError, match="prune_period_value must be a positive integer"):
+            sobs_app._parse_dm_prune_period({"prune_period_value": "not_a_number", "prune_period_unit": "days"})
+
+    def test_get_dm_column_type_returns_none_on_describe_exception(self):
+        """_get_dm_column_type returns None when DESCRIBE TABLE raises an exception."""
+
+        class _FailDb:
+            def execute(self, sql: str):
+                raise RuntimeError("table not found")
+
+        result = sobs_app._get_dm_column_type(_FailDb(), "otel_metrics_60_3", "TimeUnixMs")  # type: ignore[arg-type]
+        assert result is None
+
+    def test_get_dm_column_type_returns_none_when_column_not_found(self):
+        """_get_dm_column_type returns None when column is not in DESCRIBE result."""
+
+        class _DescribeResult:
+            def fetchall(self):
+                return [("SomeOtherColumn", "String")]
+
+        class _TypeAwareDb:
+            def execute(self, sql: str):
+                if sql.startswith("DESCRIBE TABLE"):
+                    return _DescribeResult()
+                return None
+
+        result = sobs_app._get_dm_column_type(
+            _TypeAwareDb(), "otel_metrics_60_3", "TimeUnixMs"  # type: ignore[arg-type]
+        )
+        assert result is None
+
+    def test_run_dm_prune_fallback_when_primary_metric_delete_fails(self):
+        """_run_dm_prune executes fallback SQL when primary metric DELETE fails."""
+        executed: list[str] = []
+
+        class _FallbackDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                if "otel_metrics_" in sql and "toDateTime(intDiv(" in sql:
+                    raise RuntimeError("ILLEGAL_TYPE_OF_ARGUMENT")
+
+        result = sobs_app._run_dm_prune(_FallbackDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        # Verify both primary (failed) and fallback (succeeded) SQLs were executed for metrics
+        assert sum(1 for s in executed if "toDateTime(intDiv(" in s) >= 3
+        assert sum(1 for s in executed if "DELETE WHERE TimeUnixMs <" in s) == 3
+
+    def test_run_dm_prune_error_on_optimize_table_failure(self):
+        """_run_dm_prune returns error when OPTIMIZE TABLE fails."""
+        executed: list[str] = []
+
+        class _OptimizeFailDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                if "OPTIMIZE TABLE" in sql:
+                    raise RuntimeError("lock timeout")
+
+        result = sobs_app._run_dm_prune(_OptimizeFailDb())  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert "lock timeout" in result["message"]
+
+    def test_run_dm_prune_custom_period_with_errors_includes_period_in_message(self):
+        """_run_dm_prune success with custom period includes period details in message."""
+
+        class _SuccessDb:
+            def execute(self, sql: str):
+                pass
+
+        result = sobs_app._run_dm_prune(_SuccessDb(), prune_period=(14, "days"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert "14 days" in result["message"]
+        assert "custom period" in result["message"]
+
+    def test_run_dm_prune_fallback_both_fail_and_optimize_fails(self):
+        """_run_dm_prune returns errors when both primary and fallback DELETE fail, and OPTIMIZE fails."""
+        executed: list[str] = []
+
+        class _BothFailDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                raise RuntimeError("column not found")
+
+        result = sobs_app._run_dm_prune(_BothFailDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert "errors" in result["message"]
+        assert "column not found" in result["message"]
 
 
 # ---------------------------------------------------------------------------
