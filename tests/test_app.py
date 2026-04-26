@@ -20680,11 +20680,11 @@ class TestDataManagementSettings:
         """_run_dm_prune returns ok=True when all OPTIMIZE TABLE calls succeed."""
         executed: list[str] = []
 
-        class FakeDb:
+        class _SuccessDb:
             def execute(self, sql: str):
                 executed.append(sql)
 
-        result = sobs_app._run_dm_prune(FakeDb())  # type: ignore[arg-type]
+        result = sobs_app._run_dm_prune(_SuccessDb())  # type: ignore[arg-type]
         assert result["ok"] is True
         assert len(executed) == 6  # 3 TTL tables + 3 metric tables
         assert all("OPTIMIZE TABLE" in s and "FINAL" in s for s in executed)
@@ -20692,11 +20692,11 @@ class TestDataManagementSettings:
     def test_run_dm_prune_returns_error_on_exception(self, monkeypatch):
         """_run_dm_prune returns ok=False and includes error message when a table fails."""
 
-        class FakeDb:
+        class _FailDb:
             def execute(self, sql: str):
                 raise RuntimeError("table not found")
 
-        result = sobs_app._run_dm_prune(FakeDb())  # type: ignore[arg-type]
+        result = sobs_app._run_dm_prune(_FailDb())  # type: ignore[arg-type]
         assert result["ok"] is False
         assert "errors" in result["message"]
 
