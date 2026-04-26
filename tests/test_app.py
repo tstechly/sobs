@@ -20706,6 +20706,18 @@ class TestDataManagementSettings:
         assert data["ok"] is False
         assert "JSON object" in data["message"]
 
+    async def test_prune_api_rejects_malformed_json_payload(self, client):
+        """POST /api/data-management/prune returns 400 when request JSON is malformed."""
+        r = await client.post(
+            "/api/data-management/prune",
+            data='{"prune_period_value":',
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "invalid JSON" in data["message"]
+
     async def test_prune_api_prevents_concurrent_runs(self, client, monkeypatch):
         """POST /api/data-management/prune returns 409 if already in progress."""
         # Simulate lock already held
@@ -20800,6 +20812,23 @@ class TestDataManagementSettings:
         text = (await r.get_data()).decode()
         assert "Prune Tables Now" in text
         assert "btnPruneTables" in text
+
+    async def test_data_management_settings_page_sets_prune_backup_warning_when_backup_disabled(
+        self, client, monkeypatch
+    ):
+        """Prune confirmation warning flag renders true when coupling is enabled and backup is disabled."""
+        base_settings = {k: "" for k in sobs_app._DM_SETTING_KEYS}
+        base_settings["data_management.ttl_backup_coupling_enabled"] = "1"
+        base_settings["data_management.backup_enabled"] = "0"
+        base_settings["data_management.backup_schedule_full"] = ""
+
+        monkeypatch.setattr(
+            sobs_app, "_load_dm_settings", lambda db, include_sensitive_values=False: dict(base_settings)
+        )
+        r = await client.get("/settings/data-management")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "const pruneRequiresBackupWarning = true;" in text
 
 
 # ---------------------------------------------------------------------------

@@ -32248,7 +32248,12 @@ async def api_dm_restore():
 @require_basic_auth
 async def api_dm_prune():
     """Trigger an immediate prune of all TTL-managed tables via OPTIMIZE TABLE … FINAL."""
-    payload = await request.get_json(silent=True) or {}
+    payload = await request.get_json(silent=True)
+    raw_body = (await request.get_data()).strip()
+    if payload is None:
+        if raw_body and request.is_json:
+            return jsonify({"ok": False, "message": "request body contains invalid JSON"}), 400
+        payload = {}
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "message": "request body must be a JSON object"}), 400
     try:

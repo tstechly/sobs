@@ -779,8 +779,10 @@
   const pruneApiUrl = {{ url_for('api_dm_prune') | tojson }};
   const pruneRequiresBackupWarning = {{ (
     dm_settings.get('data_management.ttl_backup_coupling_enabled') == '1'
-    and dm_settings.get('data_management.backup_enabled') == '1'
-    and not dm_settings.get('data_management.backup_schedule_full', '').strip()
+    and (
+      dm_settings.get('data_management.backup_enabled') != '1'
+      or not dm_settings.get('data_management.backup_schedule_full', '').strip()
+    )
   ) | tojson }};
   let pruneTimeout = null;
 
@@ -835,7 +837,7 @@
       ? `This run will apply a one-time prune window of ${periodInfo.label} before optimizing tables.`
       : 'This run will use current table TTL settings and optimize tables now.';
     const backupNote = pruneRequiresBackupWarning
-      ? ' Backup warning: no full backup schedule is configured while TTL-backup coupling is enabled.'
+      ? ' Backup warning: backup is disabled or no full backup schedule is configured while TTL-backup coupling is enabled.'
       : '';
     const msg = `Run prune now across all managed tables? ${detail}${backupNote}`;
 
@@ -860,7 +862,7 @@
     pruneBtn.disabled = true;
     showPruneMsg('Pruning tables... this may take a moment.', 'info');
     try {
-      const body = periodInfo ? periodInfo.payload : undefined;
+      const body = periodInfo ? periodInfo.payload : {};
       const resp = await callPruneApi(body);
       if (resp.status === 409) {
         showPruneMsg(resp.data.message || 'A prune operation is already in progress.', 'warning');
