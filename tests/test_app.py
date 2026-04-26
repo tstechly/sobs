@@ -6624,8 +6624,8 @@ class TestGenAICompliance:
         assert "trace-svc-b" in body
         assert "2 calls" in body
 
-    async def test_ai_view_trace_mode_operation_filter_keeps_trace_context(self, client):
-        """Trace mode operation filter should still show other GenAI calls within matching traces."""
+    async def test_ai_view_trace_mode_operation_filter_filters_trace_detail_rows(self, client):
+        """Trace mode operation filter should only show grouped detail rows that match the active filter."""
         trace_id = "trace-group-filter-xyz"
         r1 = await client.post(
             "/v1/ai",
@@ -6663,7 +6663,7 @@ class TestGenAICompliance:
         assert r3.status_code == 200
         body = await r3.get_data(as_text=True)
         assert "trace-chat-svc" in body
-        assert "trace-embed-svc" in body
+        assert "trace-embed-svc" not in body
 
     async def test_ai_view_trace_mode_has_full_detail_tabs(self, client):
         """Trace group mode should preserve full per-call detail tabs."""
