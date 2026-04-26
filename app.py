@@ -31959,6 +31959,19 @@ def _parse_dm_prune_period(payload: dict[str, object]) -> tuple[int, str] | None
     return period_value, raw_unit
 
 
+def _get_dm_column_type(db: "ChDbConnection", table: str, column: str) -> str | None:
+    try:
+        describe_result = db.execute(f"DESCRIBE TABLE {table}")
+        rows = describe_result.fetchall() if hasattr(describe_result, "fetchall") else []
+    except Exception:
+        return None
+
+    for row in rows:
+        if row and str(row[0]) == column:
+            return str(row[1]).strip().lower()
+    return None
+
+
 def _run_dm_prune(db: "ChDbConnection", prune_period: tuple[int, str] | None = None) -> dict[str, object]:
     """Force TTL processing on all data-management tables.
 
@@ -31976,14 +31989,31 @@ def _run_dm_prune(db: "ChDbConnection", prune_period: tuple[int, str] | None = N
             except Exception as exc:
                 errors.append(f"{table}: {exc}")
         for table, ts_col in _DM_METRIC_TABLES:
+            detected_col_type = _get_dm_column_type(db, table, ts_col)
+            use_ms_expr = detected_col_type is None or "datetime" not in detected_col_type
+
+            primary_sql = (
+                "ALTER TABLE "
+                f"{table} DELETE WHERE toDateTime(intDiv({ts_col}, 1000)) < now() - INTERVAL "
+                f"{prune_value} {unit_sql}"
+                if use_ms_expr
+                else "ALTER TABLE " f"{table} DELETE WHERE {ts_col} < now() - INTERVAL {prune_value} {unit_sql}"
+            )
+            fallback_sql = (
+                "ALTER TABLE " f"{table} DELETE WHERE {ts_col} < now() - INTERVAL {prune_value} {unit_sql}"
+                if use_ms_expr
+                else "ALTER TABLE "
+                f"{table} DELETE WHERE toDateTime(intDiv({ts_col}, 1000)) < now() - INTERVAL "
+                f"{prune_value} {unit_sql}"
+            )
+
             try:
-                db.execute(
-                    "ALTER TABLE "
-                    f"{table} DELETE WHERE toDateTime(intDiv({ts_col}, 1000)) < now() - INTERVAL "
-                    f"{prune_value} {unit_sql}"
-                )
+                db.execute(primary_sql)
             except Exception as exc:
-                errors.append(f"{table}: {exc}")
+                try:
+                    db.execute(fallback_sql)
+                except Exception as fallback_exc:
+                    errors.append(f"{table}: {fallback_exc} (fallback after: {exc})")
 
     for table in all_tables:
         try:

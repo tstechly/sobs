@@ -20742,9 +20742,45 @@ class TestDataManagementSettings:
 
         result = sobs_app._run_dm_prune(_SuccessDb(), prune_period=(7, "days"))  # type: ignore[arg-type]
         assert result["ok"] is True
-        assert len(executed) == 12
+        assert len(executed) == 15
+        assert sum(1 for s in executed if s.startswith("DESCRIBE TABLE otel_metrics_")) == 3
         assert sum(1 for s in executed if "DELETE WHERE" in s) == 6
         assert sum(1 for s in executed if "OPTIMIZE TABLE" in s and "FINAL" in s) == 6
+
+    def test_run_dm_prune_custom_period_metric_delete_fallback_for_datetime(self):
+        """_run_dm_prune falls back when intDiv-based metric delete expression is not supported."""
+        executed: list[str] = []
+
+        class _MetricDeleteFallbackDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                if "otel_metrics_" in sql and "toDateTime(intDiv(" in sql:
+                    raise RuntimeError("ILLEGAL_TYPE_OF_ARGUMENT")
+
+        result = sobs_app._run_dm_prune(_MetricDeleteFallbackDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert sum(1 for s in executed if "otel_metrics_" in s and "toDateTime(intDiv(" in s) == 3
+        assert sum(1 for s in executed if "otel_metrics_" in s and "DELETE WHERE TimeUnixMs < now()" in s) == 3
+        assert sum(1 for s in executed if "OPTIMIZE TABLE" in s and "FINAL" in s) == 6
+
+    def test_run_dm_prune_custom_period_uses_datetime_metric_expression_when_detected(self):
+        """_run_dm_prune chooses DateTime predicate directly for DateTime metric columns."""
+        executed: list[str] = []
+
+        class _DescribeResult:
+            def fetchall(self):
+                return [("TimeUnixMs", "DateTime64(3)")]
+
+        class _TypeAwareDb:
+            def execute(self, sql: str):
+                if sql.startswith("DESCRIBE TABLE otel_metrics_"):
+                    return _DescribeResult()
+                executed.append(sql)
+
+        result = sobs_app._run_dm_prune(_TypeAwareDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert sum(1 for s in executed if "otel_metrics_" in s and "DELETE WHERE TimeUnixMs < now()" in s) == 3
+        assert sum(1 for s in executed if "otel_metrics_" in s and "toDateTime(intDiv(" in s) == 0
 
     def test_run_dm_prune_returns_error_on_exception(self, monkeypatch):
         """_run_dm_prune returns ok=False and includes error message when a table fails."""
