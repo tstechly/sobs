@@ -20637,6 +20637,77 @@ class TestDataManagementSettings:
         assert sobs_app._is_sensitive_dm_setting_key("data_management.s3_bucket") is False
         assert sobs_app._is_sensitive_dm_setting_key("data_management.backup_enabled") is False
 
+    async def test_prune_api_returns_ok_on_success(self, client, monkeypatch):
+        """POST /api/data-management/prune returns {ok: true} when prune succeeds."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_run_dm_prune",
+            lambda db: {"ok": True, "message": "Prune completed successfully (6 tables processed)"},
+        )
+        r = await client.post("/api/data-management/prune")
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        assert "Prune completed" in data["message"]
+
+    async def test_prune_api_returns_error_on_failure(self, client, monkeypatch):
+        """POST /api/data-management/prune returns {ok: false} when prune fails."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_run_dm_prune",
+            lambda db: {"ok": False, "message": "Prune completed with errors: otel_logs: some error"},
+        )
+        r = await client.post("/api/data-management/prune")
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "errors" in data["message"]
+
+    async def test_prune_api_prevents_concurrent_runs(self, client, monkeypatch):
+        """POST /api/data-management/prune returns 409 if already in progress."""
+        # Simulate lock already held
+        sobs_app._dm_prune_lock.acquire()
+        try:
+            r = await client.post("/api/data-management/prune")
+            assert r.status_code == 409
+            data = json.loads(await r.get_data())
+            assert data["ok"] is False
+            assert "already in progress" in data["message"]
+        finally:
+            sobs_app._dm_prune_lock.release()
+
+    def test_run_dm_prune_returns_ok_when_all_succeed(self, monkeypatch):
+        """_run_dm_prune returns ok=True when all OPTIMIZE TABLE calls succeed."""
+        executed: list[str] = []
+
+        class FakeDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+
+        result = sobs_app._run_dm_prune(FakeDb())  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert len(executed) == 6  # 3 TTL tables + 3 metric tables
+        assert all("OPTIMIZE TABLE" in s and "FINAL" in s for s in executed)
+
+    def test_run_dm_prune_returns_error_on_exception(self, monkeypatch):
+        """_run_dm_prune returns ok=False and includes error message when a table fails."""
+
+        class FakeDb:
+            def execute(self, sql: str):
+                raise RuntimeError("table not found")
+
+        result = sobs_app._run_dm_prune(FakeDb())  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert "errors" in result["message"]
+
+    async def test_data_management_settings_page_shows_prune_button(self, client):
+        """GET /settings/data-management page includes the Prune Tables Now button."""
+        r = await client.get("/settings/data-management")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "Prune Tables Now" in text
+        assert "btnPruneTables" in text
+
 
 # ---------------------------------------------------------------------------
 # Sidebar version tag and icon semantics

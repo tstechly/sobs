@@ -31770,6 +31770,9 @@ _DM_AWS_ACCESS_KEY_RE = re.compile(r"^[A-Za-z0-9]*$")
 _DM_AWS_SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9/+=]*$")
 _DM_BACKUP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 
+#: Lock to prevent concurrent manual prune operations.
+_dm_prune_lock = threading.Lock()
+
 # Tables managed by data-management TTL settings and the timestamp column to
 # use in the ALTER TABLE … MODIFY TTL expression.
 _DM_TTL_TABLES: tuple[tuple[str, str, str], ...] = (
@@ -31915,6 +31918,25 @@ def _apply_dm_ttl(db: "ChDbConnection", settings: dict[str, str]) -> list[str]:
             errors.append("metrics: TTL hours must be a positive integer")
 
     return errors
+
+
+def _run_dm_prune(db: "ChDbConnection") -> dict[str, object]:
+    """Force TTL processing on all data-management tables via OPTIMIZE TABLE … FINAL.
+
+    This replicates what ClickHouse TTL would do automatically on the next merge
+    cycle, immediately materialising deletions for expired rows.  Returns a dict
+    with keys ``ok`` (bool) and ``message`` (str).
+    """
+    all_tables: list[str] = [table for table, *_ in _DM_TTL_TABLES] + [table for table, _ in _DM_METRIC_TABLES]
+    errors: list[str] = []
+    for table in all_tables:
+        try:
+            db.execute(f"OPTIMIZE TABLE {table} FINAL")
+        except Exception as exc:
+            errors.append(f"{table}: {exc}")
+    if errors:
+        return {"ok": False, "message": "Prune completed with errors: " + "; ".join(errors)}
+    return {"ok": True, "message": f"Prune completed successfully ({len(all_tables)} tables processed)"}
 
 
 def _build_s3_backup_dest(settings: dict[str, str], backup_name: str) -> str:
@@ -32125,6 +32147,20 @@ async def api_dm_restore():
     settings = _load_dm_settings(db)
     result = _run_dm_restore(db, settings, backup_name)
     return jsonify({"ok": result["ok"] == "true", "message": result["message"]})
+
+
+@app.route("/api/data-management/prune", methods=["POST"])
+@require_basic_auth
+async def api_dm_prune():
+    """Trigger an immediate prune of all TTL-managed tables via OPTIMIZE TABLE … FINAL."""
+    if not _dm_prune_lock.acquire(blocking=False):
+        return jsonify({"ok": False, "message": "A prune operation is already in progress"}), 409
+    try:
+        db = get_db()
+        result = _run_dm_prune(db)
+        return jsonify(result)
+    finally:
+        _dm_prune_lock.release()
 
 
 # ---------------------------------------------------------------------------

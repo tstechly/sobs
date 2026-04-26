@@ -196,11 +196,15 @@
       </div>
 
       <!-- ── TTL Action ─────────────────────────────────────────────────── -->
-      <div class="d-flex gap-2 flex-wrap mb-3">
+      <div class="d-flex gap-2 flex-wrap mb-2">
         <button type="submit" class="btn btn-sm btn-warning" name="apply_ttl" value="1">
           <i class="bi bi-hourglass-split me-1"></i><span class="dm-btn-label">Save &amp; Apply TTL to Tables</span>
         </button>
+        <button type="button" class="btn btn-sm btn-outline-danger" id="btnPruneTables" title="Prune Tables Now">
+          <i class="bi bi-trash3 me-1"></i><span class="dm-btn-label">Prune Tables Now</span>
+        </button>
       </div>
+      <div id="pruneActionMsg" class="alert d-none mb-3" role="alert"></div>
     </div>
   </div>
 
@@ -735,6 +739,49 @@
   minuteEl.addEventListener('input', updatePreview);
   updatePreview();
   window.__dmCronBuilderInit = true;
+})();
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  const pruneBtn = document.getElementById('btnPruneTables');
+  const pruneMsgEl = document.getElementById('pruneActionMsg');
+  if (!pruneBtn || !pruneMsgEl) return;
+
+  const PRUNE_MSG_TIMEOUT_MS = 10000;
+  const pruneApiUrl = {{ url_for('api_dm_prune') | tojson }};
+  let pruneTimeout = null;
+
+  function showPruneMsg(text, type) {
+    pruneMsgEl.className = 'alert alert-' + type + ' mb-3';
+    pruneMsgEl.textContent = text;
+    pruneMsgEl.classList.remove('d-none');
+    if (pruneTimeout) clearTimeout(pruneTimeout);
+    pruneTimeout = setTimeout(() => pruneMsgEl.classList.add('d-none'), PRUNE_MSG_TIMEOUT_MS);
+  }
+
+  pruneBtn.addEventListener('click', async () => {
+    pruneBtn.disabled = true;
+    showPruneMsg('Pruning tables… this may take a moment.', 'info');
+    try {
+      const resp = await fetch(pruneApiUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+      });
+      const data = await resp.json();
+      if (resp.status === 409) {
+        showPruneMsg(data.message || 'A prune operation is already in progress.', 'warning');
+      } else {
+        showPruneMsg(data.message || (data.ok ? 'Prune completed.' : 'Prune failed.'), data.ok ? 'success' : 'danger');
+      }
+    } catch (err) {
+      showPruneMsg('Prune request failed: ' + err.message, 'danger');
+    } finally {
+      pruneBtn.disabled = false;
+    }
+  });
 })();
 </script>
 {% endblock %}
