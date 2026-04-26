@@ -18681,12 +18681,12 @@ async def view_ai():
                 trace_ids = [str(r["TraceId"]) for r in trace_rows if str(r["TraceId"])]
                 if trace_ids:
                     placeholders = ",".join(["?"] * len(trace_ids))
+                    detail_where = f"{trace_where} AND TraceId IN ({placeholders})"
                     rows = db.execute(
                         f"SELECT Timestamp, ServiceName, TraceId, SpanName, Duration, SpanAttributes "
-                        f"FROM otel_traces WHERE TraceId IN ({placeholders}) "
-                        f"AND {_AI_SPAN_CONDITION} "
+                        f"FROM otel_traces {detail_where} "
                         "ORDER BY Timestamp ASC",
-                        trace_ids,
+                        params + trace_ids,
                     ).fetchall()
             else:
                 total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
