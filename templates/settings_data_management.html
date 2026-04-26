@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% from "_page_header_macros.html" import render_page_header %}
 {% block title %}Data Management Settings{% endblock %}
-{% block styles %}{{ super() }}{% endblock %}
+{% block styles %}{{ super() }}<style>
+  @media (max-width: {{ mobile_breakpoint_max }}) {
+    .dm-btn-label { display: none; }
+    .btn:has(> .dm-btn-label) i { margin-right: 0 !important; }
+  }
+</style>{% endblock %}
 {% block content %}
 {% set settings_data_management_header_actions %}
   <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('view_settings') }}" title="Back to Settings">
@@ -196,11 +201,33 @@
       </div>
 
       <!-- ── TTL Action ─────────────────────────────────────────────────── -->
-      <div class="d-flex gap-2 flex-wrap mb-3">
+      <div class="d-flex gap-2 flex-wrap mb-2">
         <button type="submit" class="btn btn-sm btn-warning" name="apply_ttl" value="1">
           <i class="bi bi-hourglass-split me-1"></i><span class="dm-btn-label">Save &amp; Apply TTL to Tables</span>
         </button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnPruneTables" title="Prune Tables Now">
+          <i class="bi bi-trash3 me-1"></i><span class="dm-btn-label">Prune Tables Now</span>
+        </button>
       </div>
+      <div class="row g-2 align-items-end mb-3">
+        <div class="col-12 col-sm-4">
+          <label for="prunePeriodValue" class="form-label small fw-semibold mb-1">Temporary prune period</label>
+          <input type="number" id="prunePeriodValue" class="form-control form-control-sm" min="1" step="1" placeholder="Leave blank for TTL">
+        </div>
+        <div class="col-12 col-sm-3">
+          <label for="prunePeriodUnit" class="form-label small fw-semibold mb-1">Unit</label>
+          <select id="prunePeriodUnit" class="form-select form-select-sm">
+            <option value="days">Days</option>
+            <option value="hours">Hours</option>
+          </select>
+        </div>
+        <div class="col-12 col-sm-5">
+          <div class="form-text mt-0">
+            Leave period blank to prune using current table TTL settings only.
+          </div>
+        </div>
+      </div>
+      <div id="pruneActionMsg" class="alert d-none mb-3" role="alert"></div>
     </div>
   </div>
 
@@ -735,6 +762,124 @@
   minuteEl.addEventListener('input', updatePreview);
   updatePreview();
   window.__dmCronBuilderInit = true;
+})();
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  const pruneBtn = document.getElementById('btnPruneTables');
+  const pruneMsgEl = document.getElementById('pruneActionMsg');
+  const prunePeriodValueEl = document.getElementById('prunePeriodValue');
+  const prunePeriodUnitEl = document.getElementById('prunePeriodUnit');
+  if (!pruneBtn || !pruneMsgEl || !prunePeriodValueEl || !prunePeriodUnitEl) return;
+
+  const PRUNE_MSG_TIMEOUT_MS = 10000;
+  const pruneApiUrl = {{ url_for('api_dm_prune') | tojson }};
+  const pruneRequiresBackupWarning = {{ (
+    dm_settings.get('data_management.ttl_backup_coupling_enabled') == '1'
+    and (
+      dm_settings.get('data_management.backup_enabled') != '1'
+      or not dm_settings.get('data_management.backup_schedule_full', '').strip()
+    )
+  ) | tojson }};
+  let pruneTimeout = null;
+
+  function showPruneMsg(text, type) {
+    pruneMsgEl.className = `alert alert-${type} mb-3`;
+    pruneMsgEl.textContent = text;
+    pruneMsgEl.classList.remove('d-none');
+    if (pruneTimeout) clearTimeout(pruneTimeout);
+    pruneTimeout = setTimeout(() => pruneMsgEl.classList.add('d-none'), PRUNE_MSG_TIMEOUT_MS);
+  }
+
+  async function callPruneApi(body) {
+    const resp = await fetch(pruneApiUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data;
+    try {
+      data = await resp.json();
+    } catch (_err) {
+      data = {ok: false, message: 'Unexpected response from prune endpoint'};
+    }
+    return {status: resp.status, data};
+  }
+
+  function buildPrunePeriodPayload() {
+    const rawValue = prunePeriodValueEl.value.trim();
+    const unit = prunePeriodUnitEl.value;
+    if (!rawValue) return null;
+
+    const value = Number.parseInt(rawValue, 10);
+    if (!Number.isFinite(value) || value <= 0) {
+      showPruneMsg('Temporary prune period must be a positive integer.', 'warning');
+      return false;
+    }
+    if (unit !== 'days' && unit !== 'hours') {
+      showPruneMsg('Temporary prune period unit must be days or hours.', 'warning');
+      return false;
+    }
+    return {
+      payload: {
+        prune_period_value: value,
+        prune_period_unit: unit,
+      },
+      label: `${value} ${unit}`,
+    };
+  }
+
+  async function confirmPrune(periodInfo) {
+    const detail = periodInfo
+      ? `This run will apply a one-time prune window of ${periodInfo.label} before optimizing tables.`
+      : 'This run will use current table TTL settings and optimize tables now.';
+    const backupNote = pruneRequiresBackupWarning
+      ? ' Backup warning: backup is disabled or no full backup schedule is configured while TTL-backup coupling is enabled.'
+      : '';
+    const msg = `Run prune now across all managed tables? ${detail}${backupNote}`;
+
+    if (window.SOBS && typeof window.SOBS.confirm === 'function') {
+      return window.SOBS.confirm({
+        title: 'Confirm Prune',
+        message: msg,
+        okLabel: 'Prune Now',
+        okClass: 'btn-warning'
+      });
+    }
+    return window.confirm(msg);
+  }
+
+  pruneBtn.addEventListener('click', async () => {
+    const periodInfo = buildPrunePeriodPayload();
+    if (periodInfo === false) return;
+
+    const confirmed = await confirmPrune(periodInfo);
+    if (!confirmed) return;
+
+    pruneBtn.disabled = true;
+    showPruneMsg('Pruning tables... this may take a moment.', 'info');
+    try {
+      const body = periodInfo ? periodInfo.payload : {};
+      const resp = await callPruneApi(body);
+      if (resp.status === 409) {
+        showPruneMsg(resp.data.message || 'A prune operation is already in progress.', 'warning');
+      } else if (resp.status >= 400) {
+        showPruneMsg(resp.data.message || 'Prune request failed.', 'danger');
+      } else {
+        showPruneMsg(
+          resp.data.message || (resp.data.ok ? 'Prune completed.' : 'Prune failed.'),
+          resp.data.ok ? 'success' : 'danger'
+        );
+      }
+    } catch (err) {
+      showPruneMsg('Prune request failed: ' + err.message, 'danger');
+    } finally {
+      pruneBtn.disabled = false;
+    }
+  });
 })();
 </script>
 {% endblock %}

@@ -15,6 +15,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -20636,6 +20637,309 @@ class TestDataManagementSettings:
         assert sobs_app._is_sensitive_dm_setting_key("data_management.s3_secret_access_key") is True
         assert sobs_app._is_sensitive_dm_setting_key("data_management.s3_bucket") is False
         assert sobs_app._is_sensitive_dm_setting_key("data_management.backup_enabled") is False
+
+    async def test_prune_api_returns_ok_on_success(self, client, monkeypatch):
+        """POST /api/data-management/prune returns {ok: true} when prune succeeds."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_run_dm_prune",
+            lambda db, prune_period=None: {"ok": True, "message": "Prune completed successfully (6 tables processed)"},
+        )
+        r = await client.post("/api/data-management/prune")
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        assert "Prune completed" in data["message"]
+
+    async def test_prune_api_returns_error_on_failure(self, client, monkeypatch):
+        """POST /api/data-management/prune returns {ok: false} when prune fails."""
+        monkeypatch.setattr(
+            sobs_app,
+            "_run_dm_prune",
+            lambda db, prune_period=None: {
+                "ok": False,
+                "message": "Prune completed with errors: otel_logs: some error",
+            },
+        )
+        r = await client.post("/api/data-management/prune")
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "errors" in data["message"]
+
+    async def test_prune_api_accepts_custom_period(self, client, monkeypatch):
+        """POST /api/data-management/prune forwards a valid custom period."""
+        captured: dict[str, object] = {}
+
+        def _fake_prune(db, prune_period=None):
+            captured["period"] = prune_period
+            return {"ok": True, "message": "Prune completed successfully (6 tables processed, custom period: 7 days)"}
+
+        monkeypatch.setattr(sobs_app, "_run_dm_prune", _fake_prune)
+        r = await client.post(
+            "/api/data-management/prune",
+            json={"prune_period_value": 7, "prune_period_unit": "days"},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        assert captured.get("period") == (7, "days")
+
+    async def test_prune_api_rejects_invalid_custom_period(self, client):
+        """POST /api/data-management/prune returns 400 for invalid custom period payload."""
+        r = await client.post(
+            "/api/data-management/prune",
+            json={"prune_period_value": 0, "prune_period_unit": "days"},
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "positive integer" in data["message"]
+
+    async def test_prune_api_rejects_non_object_json_payload(self, client):
+        """POST /api/data-management/prune returns 400 when request JSON is not an object."""
+        r = await client.post(
+            "/api/data-management/prune",
+            json=[{"prune_period_value": 7, "prune_period_unit": "days"}],
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "JSON object" in data["message"]
+
+    async def test_prune_api_rejects_malformed_json_payload(self, client):
+        """POST /api/data-management/prune returns 400 when request JSON is malformed."""
+        r = await client.post(
+            "/api/data-management/prune",
+            data='{"prune_period_value":',
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "invalid JSON" in data["message"]
+
+    async def test_prune_api_prevents_concurrent_runs(self, client, monkeypatch):
+        """POST /api/data-management/prune returns 409 if already in progress."""
+        # Simulate lock already held
+        sobs_app._dm_prune_lock.acquire()
+        try:
+            r = await client.post("/api/data-management/prune")
+            assert r.status_code == 409
+            data = json.loads(await r.get_data())
+            assert data["ok"] is False
+            assert "already in progress" in data["message"]
+        finally:
+            sobs_app._dm_prune_lock.release()
+
+    def test_run_dm_prune_returns_ok_when_all_succeed(self, monkeypatch):
+        """_run_dm_prune returns ok=True when all OPTIMIZE TABLE calls succeed."""
+        executed: list[str] = []
+
+        class _SuccessDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+
+        result = sobs_app._run_dm_prune(_SuccessDb())  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert len(executed) == 6  # 3 TTL tables + 3 metric tables
+        assert all("OPTIMIZE TABLE" in s and "FINAL" in s for s in executed)
+
+    def test_run_dm_prune_with_custom_period_runs_delete_then_optimize(self):
+        """_run_dm_prune emits DELETE and OPTIMIZE for each table with a custom period."""
+        executed: list[str] = []
+
+        class _SuccessDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+
+        result = sobs_app._run_dm_prune(_SuccessDb(), prune_period=(7, "days"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert len(executed) == 15
+        assert sum(1 for s in executed if s.startswith("DESCRIBE TABLE otel_metrics_")) == 3
+        assert sum(1 for s in executed if "DELETE WHERE" in s) == 6
+        assert sum(1 for s in executed if "OPTIMIZE TABLE" in s and "FINAL" in s) == 6
+
+    def test_run_dm_prune_custom_period_metric_delete_fallback_for_datetime(self):
+        """_run_dm_prune falls back when intDiv-based metric delete expression is not supported."""
+        executed: list[str] = []
+
+        class _MetricDeleteFallbackDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                if "otel_metrics_" in sql and "toDateTime(intDiv(" in sql:
+                    raise RuntimeError("ILLEGAL_TYPE_OF_ARGUMENT")
+
+        result = sobs_app._run_dm_prune(_MetricDeleteFallbackDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert sum(1 for s in executed if "otel_metrics_" in s and "toDateTime(intDiv(" in s) == 3
+        assert sum(1 for s in executed if "otel_metrics_" in s and "DELETE WHERE TimeUnixMs < now()" in s) == 3
+        assert sum(1 for s in executed if "OPTIMIZE TABLE" in s and "FINAL" in s) == 6
+
+    def test_run_dm_prune_custom_period_uses_datetime_metric_expression_when_detected(self):
+        """_run_dm_prune chooses DateTime predicate directly for DateTime metric columns."""
+        executed: list[str] = []
+
+        class _DescribeResult:
+            def fetchall(self):
+                return [("TimeUnixMs", "DateTime64(3)")]
+
+        class _TypeAwareDb:
+            def execute(self, sql: str):
+                if sql.startswith("DESCRIBE TABLE otel_metrics_"):
+                    return _DescribeResult()
+                executed.append(sql)
+
+        result = sobs_app._run_dm_prune(_TypeAwareDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert sum(1 for s in executed if "otel_metrics_" in s and "DELETE WHERE TimeUnixMs < now()" in s) == 3
+        assert sum(1 for s in executed if "otel_metrics_" in s and "toDateTime(intDiv(" in s) == 0
+
+    def test_run_dm_prune_returns_error_on_exception(self, monkeypatch):
+        """_run_dm_prune returns ok=False and includes error message when a table fails."""
+
+        class _FailDb:
+            def execute(self, sql: str):
+                raise RuntimeError("table not found")
+
+        result = sobs_app._run_dm_prune(_FailDb())  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert "errors" in result["message"]
+
+    async def test_data_management_settings_page_shows_prune_button(self, client):
+        """GET /settings/data-management page includes the Prune Tables Now button."""
+        r = await client.get("/settings/data-management")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "Prune Tables Now" in text
+        assert "btnPruneTables" in text
+
+    async def test_data_management_settings_page_sets_prune_backup_warning_when_backup_disabled(
+        self, client, monkeypatch
+    ):
+        """Prune confirmation warning flag renders true when coupling is enabled and backup is disabled."""
+        base_settings = {k: "" for k in sobs_app._DM_SETTING_KEYS}
+        base_settings["data_management.ttl_backup_coupling_enabled"] = "1"
+        base_settings["data_management.backup_enabled"] = "0"
+        base_settings["data_management.backup_schedule_full"] = ""
+
+        monkeypatch.setattr(
+            sobs_app, "_load_dm_settings", lambda db, include_sensitive_values=False: dict(base_settings)
+        )
+        r = await client.get("/settings/data-management")
+        assert r.status_code == 200
+        text = (await r.get_data()).decode()
+        assert "const pruneRequiresBackupWarning = true;" in text
+
+    def test_get_dm_prune_lock_returns_lock(self):
+        """_get_dm_prune_lock() returns the module-level lock object."""
+        lock = sobs_app._get_dm_prune_lock()
+        assert lock is not None
+        assert isinstance(lock, threading.Lock)
+
+    def test_parse_dm_prune_period_error_when_unit_without_value(self):
+        """_parse_dm_prune_period raises ValueError when unit provided without value."""
+        with pytest.raises(ValueError, match="prune_period_value is required"):
+            sobs_app._parse_dm_prune_period({"prune_period_unit": "days"})
+
+    def test_parse_dm_prune_period_error_when_value_without_unit(self):
+        """_parse_dm_prune_period raises ValueError when value provided without unit."""
+        with pytest.raises(ValueError, match="prune_period_unit is required"):
+            sobs_app._parse_dm_prune_period({"prune_period_value": 7})
+
+    def test_parse_dm_prune_period_error_on_invalid_unit(self):
+        """_parse_dm_prune_period raises ValueError for unsupported unit."""
+        with pytest.raises(ValueError, match="prune_period_unit must be 'hours' or 'days'"):
+            sobs_app._parse_dm_prune_period({"prune_period_value": 7, "prune_period_unit": "weeks"})
+
+    def test_parse_dm_prune_period_error_on_non_integer_value(self):
+        """_parse_dm_prune_period raises ValueError for non-integer period_value."""
+        with pytest.raises(ValueError, match="prune_period_value must be a positive integer"):
+            sobs_app._parse_dm_prune_period({"prune_period_value": "not_a_number", "prune_period_unit": "days"})
+
+    def test_get_dm_column_type_returns_none_on_describe_exception(self):
+        """_get_dm_column_type returns None when DESCRIBE TABLE raises an exception."""
+
+        class _FailDb:
+            def execute(self, sql: str):
+                raise RuntimeError("table not found")
+
+        result = sobs_app._get_dm_column_type(_FailDb(), "otel_metrics_60_3", "TimeUnixMs")  # type: ignore[arg-type]
+        assert result is None
+
+    def test_get_dm_column_type_returns_none_when_column_not_found(self):
+        """_get_dm_column_type returns None when column is not in DESCRIBE result."""
+
+        class _DescribeResult:
+            def fetchall(self):
+                return [("SomeOtherColumn", "String")]
+
+        class _TypeAwareDb:
+            def execute(self, sql: str):
+                if sql.startswith("DESCRIBE TABLE"):
+                    return _DescribeResult()
+                return None
+
+        result = sobs_app._get_dm_column_type(
+            _TypeAwareDb(), "otel_metrics_60_3", "TimeUnixMs"  # type: ignore[arg-type]
+        )
+        assert result is None
+
+    def test_run_dm_prune_fallback_when_primary_metric_delete_fails(self):
+        """_run_dm_prune executes fallback SQL when primary metric DELETE fails."""
+        executed: list[str] = []
+
+        class _FallbackDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                if "otel_metrics_" in sql and "toDateTime(intDiv(" in sql:
+                    raise RuntimeError("ILLEGAL_TYPE_OF_ARGUMENT")
+
+        result = sobs_app._run_dm_prune(_FallbackDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        # Verify both primary (failed) and fallback (succeeded) SQLs were executed for metrics
+        assert sum(1 for s in executed if "toDateTime(intDiv(" in s) >= 3
+        assert sum(1 for s in executed if "DELETE WHERE TimeUnixMs <" in s) == 3
+
+    def test_run_dm_prune_error_on_optimize_table_failure(self):
+        """_run_dm_prune returns error when OPTIMIZE TABLE fails."""
+        executed: list[str] = []
+
+        class _OptimizeFailDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                if "OPTIMIZE TABLE" in sql:
+                    raise RuntimeError("lock timeout")
+
+        result = sobs_app._run_dm_prune(_OptimizeFailDb())  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert "lock timeout" in result["message"]
+
+    def test_run_dm_prune_custom_period_with_errors_includes_period_in_message(self):
+        """_run_dm_prune success with custom period includes period details in message."""
+
+        class _SuccessDb:
+            def execute(self, sql: str):
+                pass
+
+        result = sobs_app._run_dm_prune(_SuccessDb(), prune_period=(14, "days"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert "14 days" in result["message"]
+        assert "custom period" in result["message"]
+
+    def test_run_dm_prune_fallback_both_fail_and_optimize_fails(self):
+        """_run_dm_prune returns errors when both primary and fallback DELETE fail, and OPTIMIZE fails."""
+        executed: list[str] = []
+
+        class _BothFailDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+                raise RuntimeError("column not found")
+
+        result = sobs_app._run_dm_prune(_BothFailDb(), prune_period=(1, "hours"))  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert "errors" in result["message"]
+        assert "column not found" in result["message"]
 
 
 # ---------------------------------------------------------------------------
