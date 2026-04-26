@@ -33156,6 +33156,11 @@ extract resolved dependency snapshots from the built container image for each
 target architecture (for example linux/amd64 and linux/arm64), then register
 each snapshot with provenance fields (size/checksum/storageRef/platform/architecture):
 
+For GitHub Actions, prefer a visible artifact directory/path for dependency
+snapshots (for example `sobs-release/pip-freeze-linux-amd64.txt`). Hidden
+directories such as `.sobs-release/` are excluded by `actions/upload-artifact`
+unless `include-hidden-files: true` is set explicitly.
+
 ```bash
 curl -sS -X POST "${{SOBS_URL}}/v1/releases/${{RELEASE_ID}}/artifacts/meta" \\
         -H "X-API-Key: ${{SOBS_INGEST_API_KEY}}" \\
@@ -33183,6 +33188,10 @@ Dependency capture requirements:
 - Derive snapshots from the built/published container image, not from a host-only
     resolver run.
 - Track per-arch snapshots independently for multi-arch releases.
+- Fail CI early if any expected dependency snapshot file is missing or empty
+    before artifact upload and metadata registration.
+- Verify the dependency snapshot artifact upload succeeds before release/artifact
+    registration continues.
 - Include provenance fields (`storageRef`, `checksumSha256`, `size`, `platform`,
   `architecture`) on every dependency artifact.
 
@@ -33258,6 +33267,7 @@ Recommended correlation keys:
 
 - Confirm first pushed release appears in Sobs
 - Confirm lockfile artifact metadata is visible for each architecture
+- Confirm dependency snapshot artifacts upload successfully from non-hidden CI paths
 - Confirm dependency artifacts include provenance fields (size/checksum/storageRef/platform/architecture)
 - Confirm release version matches OTEL `service.version`
 - Confirm CVE findings reflect the container-derived dependency snapshots
