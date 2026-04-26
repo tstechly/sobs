@@ -31773,6 +31773,11 @@ _DM_BACKUP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 #: Lock to prevent concurrent manual prune operations.
 _dm_prune_lock = threading.Lock()
 
+_DM_PRUNE_PERIOD_UNITS: dict[str, str] = {
+    "hours": "HOUR",
+    "days": "DAY",
+}
+
 # Tables managed by data-management TTL settings and the timestamp column to
 # use in the ALTER TABLE … MODIFY TTL expression.
 _DM_TTL_TABLES: tuple[tuple[str, str, str], ...] = (
@@ -31920,15 +31925,66 @@ def _apply_dm_ttl(db: "ChDbConnection", settings: dict[str, str]) -> list[str]:
     return errors
 
 
-def _run_dm_prune(db: "ChDbConnection") -> dict[str, object]:
-    """Force TTL processing on all data-management tables via OPTIMIZE TABLE … FINAL.
+def _get_dm_prune_lock() -> threading.Lock:
+    return _dm_prune_lock
 
-    This replicates what ClickHouse TTL would do automatically on the next merge
-    cycle, immediately materialising deletions for expired rows.  Returns a dict
-    with keys ``ok`` (bool) and ``message`` (str).
+
+def _acquire_dm_prune_lock() -> threading.Lock | None:
+    lock = _get_dm_prune_lock()
+    if not lock.acquire(blocking=False):
+        return None
+    return lock
+
+
+def _parse_dm_prune_period(payload: dict[str, object]) -> tuple[int, str] | None:
+    raw_value = payload.get("prune_period_value")
+    raw_unit = str(payload.get("prune_period_unit", "")).strip().lower()
+
+    if raw_value in (None, "") and not raw_unit:
+        return None
+    if raw_value in (None, ""):
+        raise ValueError("prune_period_value is required when prune_period_unit is provided")
+    if not raw_unit:
+        raise ValueError("prune_period_unit is required when prune_period_value is provided")
+    if raw_unit not in _DM_PRUNE_PERIOD_UNITS:
+        raise ValueError("prune_period_unit must be 'hours' or 'days'")
+
+    try:
+        period_value = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("prune_period_value must be a positive integer") from None
+    if period_value <= 0:
+        raise ValueError("prune_period_value must be a positive integer")
+
+    return period_value, raw_unit
+
+
+def _run_dm_prune(db: "ChDbConnection", prune_period: tuple[int, str] | None = None) -> dict[str, object]:
+    """Force TTL processing on all data-management tables.
+
+    When ``prune_period`` is provided, a one-time DELETE window is applied before
+    OPTIMIZE TABLE … FINAL runs across managed tables.
     """
     all_tables: list[str] = [table for table, *_ in _DM_TTL_TABLES] + [table for table, _ in _DM_METRIC_TABLES]
     errors: list[str] = []
+    if prune_period is not None:
+        prune_value, prune_unit = prune_period
+        unit_sql = _DM_PRUNE_PERIOD_UNITS[prune_unit]
+        for table, ts_col, _ in _DM_TTL_TABLES:
+            try:
+                db.execute(f"ALTER TABLE {table} DELETE WHERE {ts_col} < now() - INTERVAL {prune_value} {unit_sql}")
+            except Exception as exc:
+                errors.append(f"{table}: {exc}")
+        for table, ts_col in _DM_METRIC_TABLES:
+            try:
+                db.execute(
+                    "ALTER TABLE "
+                    f"{table} DELETE WHERE toDateTime(intDiv({ts_col}, 1000)) < now() - INTERVAL "
+                    f"{prune_value} {unit_sql}"
+                )
+            except Exception as exc:
+                errors.append(f"{table}: {exc}")
+
     for table in all_tables:
         try:
             db.execute(f"OPTIMIZE TABLE {table} FINAL")
@@ -31936,6 +31992,15 @@ def _run_dm_prune(db: "ChDbConnection") -> dict[str, object]:
             errors.append(f"{table}: {exc}")
     if errors:
         return {"ok": False, "message": "Prune completed with errors: " + "; ".join(errors)}
+    if prune_period is not None:
+        prune_value, prune_unit = prune_period
+        return {
+            "ok": True,
+            "message": (
+                "Prune completed successfully "
+                f"({len(all_tables)} tables processed, custom period: {prune_value} {prune_unit})"
+            ),
+        }
     return {"ok": True, "message": f"Prune completed successfully ({len(all_tables)} tables processed)"}
 
 
@@ -32153,14 +32218,23 @@ async def api_dm_restore():
 @require_basic_auth
 async def api_dm_prune():
     """Trigger an immediate prune of all TTL-managed tables via OPTIMIZE TABLE … FINAL."""
-    if not _dm_prune_lock.acquire(blocking=False):
+    payload = await request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "message": "request body must be a JSON object"}), 400
+    try:
+        prune_period = _parse_dm_prune_period(payload)
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+
+    prune_lock = _acquire_dm_prune_lock()
+    if prune_lock is None:
         return jsonify({"ok": False, "message": "A prune operation is already in progress"}), 409
     try:
         db = get_db()
-        result = _run_dm_prune(db)
+        result = _run_dm_prune(db, prune_period=prune_period)
         return jsonify(result)
     finally:
-        _dm_prune_lock.release()
+        prune_lock.release()
 
 
 # ---------------------------------------------------------------------------

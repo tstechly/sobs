@@ -20642,7 +20642,7 @@ class TestDataManagementSettings:
         monkeypatch.setattr(
             sobs_app,
             "_run_dm_prune",
-            lambda db: {"ok": True, "message": "Prune completed successfully (6 tables processed)"},
+            lambda db, prune_period=None: {"ok": True, "message": "Prune completed successfully (6 tables processed)"},
         )
         r = await client.post("/api/data-management/prune")
         assert r.status_code == 200
@@ -20655,13 +20655,56 @@ class TestDataManagementSettings:
         monkeypatch.setattr(
             sobs_app,
             "_run_dm_prune",
-            lambda db: {"ok": False, "message": "Prune completed with errors: otel_logs: some error"},
+            lambda db, prune_period=None: {
+                "ok": False,
+                "message": "Prune completed with errors: otel_logs: some error",
+            },
         )
         r = await client.post("/api/data-management/prune")
         assert r.status_code == 200
         data = json.loads(await r.get_data())
         assert data["ok"] is False
         assert "errors" in data["message"]
+
+    async def test_prune_api_accepts_custom_period(self, client, monkeypatch):
+        """POST /api/data-management/prune forwards a valid custom period."""
+        captured: dict[str, object] = {}
+
+        def _fake_prune(db, prune_period=None):
+            captured["period"] = prune_period
+            return {"ok": True, "message": "Prune completed successfully (6 tables processed, custom period: 7 days)"}
+
+        monkeypatch.setattr(sobs_app, "_run_dm_prune", _fake_prune)
+        r = await client.post(
+            "/api/data-management/prune",
+            json={"prune_period_value": 7, "prune_period_unit": "days"},
+        )
+        assert r.status_code == 200
+        data = json.loads(await r.get_data())
+        assert data["ok"] is True
+        assert captured.get("period") == (7, "days")
+
+    async def test_prune_api_rejects_invalid_custom_period(self, client):
+        """POST /api/data-management/prune returns 400 for invalid custom period payload."""
+        r = await client.post(
+            "/api/data-management/prune",
+            json={"prune_period_value": 0, "prune_period_unit": "days"},
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "positive integer" in data["message"]
+
+    async def test_prune_api_rejects_non_object_json_payload(self, client):
+        """POST /api/data-management/prune returns 400 when request JSON is not an object."""
+        r = await client.post(
+            "/api/data-management/prune",
+            json=[{"prune_period_value": 7, "prune_period_unit": "days"}],
+        )
+        assert r.status_code == 400
+        data = json.loads(await r.get_data())
+        assert data["ok"] is False
+        assert "JSON object" in data["message"]
 
     async def test_prune_api_prevents_concurrent_runs(self, client, monkeypatch):
         """POST /api/data-management/prune returns 409 if already in progress."""
@@ -20688,6 +20731,20 @@ class TestDataManagementSettings:
         assert result["ok"] is True
         assert len(executed) == 6  # 3 TTL tables + 3 metric tables
         assert all("OPTIMIZE TABLE" in s and "FINAL" in s for s in executed)
+
+    def test_run_dm_prune_with_custom_period_runs_delete_then_optimize(self):
+        """_run_dm_prune emits DELETE and OPTIMIZE for each table with a custom period."""
+        executed: list[str] = []
+
+        class _SuccessDb:
+            def execute(self, sql: str):
+                executed.append(sql)
+
+        result = sobs_app._run_dm_prune(_SuccessDb(), prune_period=(7, "days"))  # type: ignore[arg-type]
+        assert result["ok"] is True
+        assert len(executed) == 12
+        assert sum(1 for s in executed if "DELETE WHERE" in s) == 6
+        assert sum(1 for s in executed if "OPTIMIZE TABLE" in s and "FINAL" in s) == 6
 
     def test_run_dm_prune_returns_error_on_exception(self, monkeypatch):
         """_run_dm_prune returns ok=False and includes error message when a table fails."""
