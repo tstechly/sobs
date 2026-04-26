@@ -22043,6 +22043,9 @@ class TestOnboardingWizard:
         body = sobs_app._build_ci_metadata_issue_body("myorg", "myrepo", has_github_actions=True)
         assert "Register a release" in body
         assert "Upload dependency lockfile" in body
+        assert "actions/upload-artifact" in body
+        assert "include-hidden-files: true" in body
+        assert "Fail CI early if any expected dependency snapshot file is missing or empty" in body
         assert "Upload JS source maps" in body
         assert "Trigger a CVE scan" in body
         assert "myorg/myrepo" in body
