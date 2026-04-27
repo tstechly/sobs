@@ -8764,7 +8764,9 @@ def _insert_rows_json_each_row(db, table_name: str, rows: list[dict]) -> int:
             item["Events"]["Timestamp"] = [_normalize_ch_timestamp(v) for v in item["Events"]["Timestamp"]]
         normalized_rows.append(item)
     payload = "\n".join(json.dumps(row, ensure_ascii=False) for row in normalized_rows)
-    with _telemetry.span("sobs.storage.write", **{"storage.engine": "chdb", "table": table_name, "row.count": len(normalized_rows)}):
+    with _telemetry.span(
+        "sobs.storage.write", **{"storage.engine": "chdb", "table": table_name, "row.count": len(normalized_rows)}
+    ):
         db.execute(f"INSERT INTO {table_name} FORMAT JSONEachRow\n" + payload)
     return len(normalized_rows)
 

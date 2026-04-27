@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helper: reset the telemetry module state between tests
 # ---------------------------------------------------------------------------
@@ -342,9 +341,9 @@ class TestNoRawPayloadInSpans:
                 pass
 
         for key in captured_keys:
-            assert key in allowed_attribute_keys, (
-                f"Unexpected attribute key '{key}' – check that no raw payloads are included"
-            )
+            assert (
+                key in allowed_attribute_keys
+            ), f"Unexpected attribute key '{key}' – check that no raw payloads are included"
 
 
 # ---------------------------------------------------------------------------
