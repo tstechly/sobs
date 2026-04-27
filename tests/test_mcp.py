@@ -791,6 +791,8 @@ class TestMcpKeyManagementApi:
         assert "key" in data
         assert data["key"].startswith("smcp_")
         assert data["label"] == "my-copilot-key"
+        assert data["created_at"].endswith("Z")
+        assert "T" in data["created_at"]
         _clear_mcp_keys(db)
 
     async def test_delete_key_removes_it(self, client):

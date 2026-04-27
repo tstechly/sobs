@@ -489,16 +489,16 @@
       // Create row
       const tr = document.createElement('tr');
       tr.id = 'key-row-' + d.id;
-      const nowIso = new Date().toISOString();
-      const nowDisplay = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
-        ? window.sobsTimezone.formatUtc(nowIso)
-        : nowIso.slice(0, 19).replace('T', ' ');
+      const createdAtIso = d.created_at || new Date().toISOString();
+      const createdAtDisplay = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
+        ? window.sobsTimezone.formatUtc(createdAtIso)
+        : createdAtIso.slice(0, 19).replace('T', ' ');
       const expiryHtml = expiryDate
         ? `<span class="mcp-expiry-badge">${expiryDate}</span>`
         : '<span class="text-secondary">Never</span>';
       tr.innerHTML = `
         <td class="font-monospace small" data-label="Label">${d.label || 'API Key'}</td>
-        <td class="small text-secondary" data-label="Created"><span class="sobs-tz-ts" data-utc-ts="${nowIso}">${nowDisplay}</span></td>
+        <td class="small text-secondary" data-label="Created"><span class="sobs-tz-ts" data-utc-ts="${createdAtIso}">${createdAtDisplay}</span></td>
         <td class="small" data-label="Expires">${expiryHtml}</td>
         <td data-label="Actions">
           <button class="btn btn-sm btn-outline-danger delete-key-btn" data-key-id="${d.id}" title="Delete key">

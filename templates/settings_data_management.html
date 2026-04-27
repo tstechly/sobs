@@ -528,14 +528,6 @@
     </div>
   </div>
 </div>
-
-<script>
-(function () {
-  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
-    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
-  }
-})();
-</script>
 <script>
 (function () {
   'use strict';
@@ -902,3 +894,11 @@
 })();
 </script>
 {% endblock %}
+
+{% block scripts %}{{ super() }}<script>
+(function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>{% endblock %}
