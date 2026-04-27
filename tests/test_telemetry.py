@@ -93,6 +93,20 @@ class TestTelemetryDisabledByDefault:
             configure_telemetry()
         assert not is_sdk_initialised()
 
+    def test_configure_telemetry_clears_cached_manual_tracer_when_disabled(self):
+        from telemetry.setup import configure_telemetry
+        from telemetry.spans import span
+
+        cached_tracer = MagicMock()
+        cached_tracer.start_as_current_span.return_value.__enter__.return_value = MagicMock()
+        with patch("telemetry.setup._tracer", cached_tracer), patch("telemetry.setup._sdk_initialised", True):
+            with patch.dict(os.environ, {"SOBS_TELEMETRY_ENABLED": "false"}):
+                configure_telemetry()
+            with span("sobs.test"):
+                pass
+
+        cached_tracer.start_as_current_span.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 3 – OTEL_SDK_DISABLED respected
@@ -256,6 +270,27 @@ class TestInvalidExporterConfig:
             configure_telemetry()
 
         assert not is_sdk_initialised()
+
+    def test_configure_telemetry_only_initialises_sdk_once(self):
+        from telemetry.setup import configure_telemetry
+
+        mock_app = MagicMock()
+        with patch.dict(
+            os.environ,
+            {
+                "SOBS_TELEMETRY_ENABLED": "true",
+                "SOBS_TELEMETRY_EXPORTER": "console",
+            },
+        ):
+            with (
+                patch("telemetry.setup._setup_sdk") as mock_setup,
+                patch("telemetry.setup._instrument_app") as mock_instrument,
+            ):
+                configure_telemetry(app=mock_app)
+                configure_telemetry(app=mock_app)
+
+        mock_setup.assert_called_once()
+        assert mock_instrument.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +470,14 @@ class TestMetricsHelpers:
         from telemetry.metrics import record_dashboard_request_duration
 
         record_dashboard_request_duration(45.0, "errors")
+
+    def test_record_span_duration_routes_ingest_request_metrics(self):
+        from telemetry.metrics import record_span_duration
+
+        with patch("telemetry.metrics.record_ingest_duration") as mock_record:
+            record_span_duration("sobs.ingest.request", 12.5, {"event.type": "log"})
+
+        mock_record.assert_called_once_with(12.5, "log")
 
 
 # ---------------------------------------------------------------------------

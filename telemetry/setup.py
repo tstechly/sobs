@@ -19,12 +19,17 @@ from .config import (
 
 _log = logging.getLogger("sobs.telemetry")
 
+_APP_INSTRUMENTED_ATTR = "_sobs_telemetry_instrumented"
+_APP_INSTRUMENTATION_KIND_ATTR = "_sobs_telemetry_instrumentation_kind"
+_APP_ORIGINAL_ASGI_ATTR = "_sobs_telemetry_original_asgi_app"
+
 # Module-level flag indicating whether SDK was successfully initialised.
 _sdk_initialised = False
 
 # Cached tracer / meter (set when SDK is active).
 _tracer = None
 _meter = None
+_tracer_provider = None
 
 
 def is_sdk_initialised() -> bool:
@@ -46,28 +51,59 @@ def configure_telemetry(app=None) -> None:  # noqa: ANN001
     global _sdk_initialised
 
     if not telemetry_enabled():
+        _reset_runtime_state(app=app)
         _log.info("Sobs telemetry disabled; using no-op telemetry.")
         return
 
     exporter_type = get_exporter_type()
     if exporter_type == "none":
+        _reset_runtime_state(app=app)
         _log.info("Sobs telemetry enabled but SOBS_TELEMETRY_EXPORTER=none; using no-op telemetry.")
+        return
+
+    if _sdk_initialised:
+        if app is not None:
+            _instrument_app(app, _tracer_provider)
         return
 
     try:
         _setup_sdk(exporter_type, app=app)
         _sdk_initialised = True
     except Exception as exc:  # noqa: BLE001
+        _reset_runtime_state(app=app)
         _log.warning(
             "Sobs telemetry configuration invalid; continuing with no-op telemetry. Error: %s",
             exc,
         )
-        _sdk_initialised = False
+
+
+def _reset_runtime_state(app=None) -> None:  # noqa: ANN001
+    global _sdk_initialised
+
+    _sdk_initialised = False
+
+    if app is None or not getattr(app, _APP_INSTRUMENTED_ATTR, False):
+        return
+
+    instrumentation_kind = getattr(app, _APP_INSTRUMENTATION_KIND_ATTR, "")
+    if instrumentation_kind == "asgi" and hasattr(app, _APP_ORIGINAL_ASGI_ATTR):
+        app.asgi_app = getattr(app, _APP_ORIGINAL_ASGI_ATTR)
+    elif instrumentation_kind == "flask":
+        try:
+            from opentelemetry.instrumentation.flask import FlaskInstrumentor  # type: ignore[import]
+
+            FlaskInstrumentor().uninstrument_app(app)
+        except Exception:  # noqa: BLE001
+            pass
+
+    for attr_name in (_APP_INSTRUMENTED_ATTR, _APP_INSTRUMENTATION_KIND_ATTR, _APP_ORIGINAL_ASGI_ATTR):
+        if hasattr(app, attr_name):
+            delattr(app, attr_name)
 
 
 def _setup_sdk(exporter_type: str, app=None) -> None:  # noqa: ANN001
     """Internal: build and register TracerProvider + MeterProvider."""
-    global _tracer
+    global _tracer, _tracer_provider
 
     from opentelemetry import trace as otel_trace  # type: ignore[import]
     from opentelemetry.sdk.resources import Resource  # type: ignore[import]
@@ -100,13 +136,12 @@ def _setup_sdk(exporter_type: str, app=None) -> None:  # noqa: ANN001
     elif exporter_type == "otlp":
         endpoint = get_otlp_endpoint()
         if not endpoint:
-            raise ValueError(
-                "SOBS_TELEMETRY_EXPORTER=otlp but SOBS_TELEMETRY_OTLP_ENDPOINT is not set"
-            )
+            raise ValueError("SOBS_TELEMETRY_EXPORTER=otlp but SOBS_TELEMETRY_OTLP_ENDPOINT is not set")
         _add_otlp_span_exporter(tracer_provider, endpoint)
         _log.info("Sobs telemetry enabled with OTLP exporter (endpoint=%s).", endpoint)
 
     otel_trace.set_tracer_provider(tracer_provider)
+    _tracer_provider = tracer_provider
     _tracer = tracer_provider.get_tracer(service_name)
 
     # ---- Meter provider ----
@@ -138,13 +173,11 @@ def _add_otlp_span_exporter(tracer_provider, endpoint: str) -> None:  # noqa: AN
         tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
     except ImportError:
         try:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[import]
-                OTLPSpanExporter as OTLPSpanExporterHTTP,
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter as OTLPSpanExporterHTTP,  # type: ignore[import]
             )
 
-            tracer_provider.add_span_processor(
-                BatchSpanProcessor(OTLPSpanExporterHTTP(endpoint=endpoint))
-            )
+            tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporterHTTP(endpoint=endpoint)))
         except ImportError as exc:
             raise ImportError(
                 "OTLP exporter requires 'opentelemetry-exporter-otlp'. "
@@ -182,16 +215,14 @@ def _setup_meter_provider(resource, exporter_type: str) -> None:  # noqa: ANN001
                 readers.append(PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint)))
             except ImportError:
                 try:
-                    from opentelemetry.exporter.otlp.proto.http.metric_exporter import (  # type: ignore[import]
-                        OTLPMetricExporter as OTLPMetricExporterHTTP,
+                    from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                        OTLPMetricExporter as OTLPMetricExporterHTTP,  # type: ignore[import]
                     )
                     from opentelemetry.sdk.metrics.export import (  # type: ignore[import]
                         PeriodicExportingMetricReader,
                     )
 
-                    readers.append(
-                        PeriodicExportingMetricReader(OTLPMetricExporterHTTP(endpoint=endpoint))
-                    )
+                    readers.append(PeriodicExportingMetricReader(OTLPMetricExporterHTTP(endpoint=endpoint)))
                 except ImportError:
                     pass
 
@@ -202,16 +233,22 @@ def _setup_meter_provider(resource, exporter_type: str) -> None:  # noqa: ANN001
 
 def _instrument_app(app, tracer_provider) -> None:  # noqa: ANN001
     """Apply ASGI/request auto-instrumentation to the Quart app."""
+    if getattr(app, _APP_INSTRUMENTED_ATTR, False):
+        return
+
     # Quart uses ASGI; try opentelemetry-instrumentation-asgi first.
     excluded_urls = "/health,/healthz,/static,/favicon.ico"
     try:
         from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware  # type: ignore[import]
 
+        setattr(app, _APP_ORIGINAL_ASGI_ATTR, app.asgi_app)
         app.asgi_app = OpenTelemetryMiddleware(
             app.asgi_app,
             tracer_provider=tracer_provider,
             excluded_urls=excluded_urls,
         )
+        setattr(app, _APP_INSTRUMENTED_ATTR, True)
+        setattr(app, _APP_INSTRUMENTATION_KIND_ATTR, "asgi")
         _log.debug("Sobs: ASGI OpenTelemetry middleware applied.")
         return
     except ImportError:
@@ -222,6 +259,8 @@ def _instrument_app(app, tracer_provider) -> None:  # noqa: ANN001
         from opentelemetry.instrumentation.flask import FlaskInstrumentor  # type: ignore[import]
 
         FlaskInstrumentor().instrument_app(app, tracer_provider=tracer_provider)
+        setattr(app, _APP_INSTRUMENTED_ATTR, True)
+        setattr(app, _APP_INSTRUMENTATION_KIND_ATTR, "flask")
         _log.debug("Sobs: Flask OpenTelemetry instrumentation applied.")
     except (ImportError, Exception) as exc:  # noqa: BLE001
         _log.debug("Sobs: auto-instrumentation unavailable: %s", exc)
@@ -229,6 +268,8 @@ def _instrument_app(app, tracer_provider) -> None:  # noqa: ANN001
 
 def get_tracer(name: str = "sobs"):
     """Return the active tracer, or a no-op tracer when telemetry is disabled."""
+    if not _sdk_initialised:
+        return _NoOpTracer()
     if _tracer is not None:
         return _tracer
     try:
@@ -241,6 +282,8 @@ def get_tracer(name: str = "sobs"):
 
 def get_meter(name: str = "sobs"):
     """Return the active meter, or a no-op meter when telemetry is disabled."""
+    if not _sdk_initialised:
+        return _NoOpMeter()
     if _meter is not None:
         return _meter
     try:

@@ -33,6 +33,7 @@ import zipfile
 import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
@@ -1992,23 +1993,32 @@ class ChDbConnection:
             raise
 
     def execute(self, query: str, params=None):
+        query_name = _classify_chdb_query_name(query)
         _last_exc: Exception | None = None
-        for _attempt in range(2):
-            try:
-                with self._lock:
-                    cur = self._conn.cursor()
-                    if params:
-                        cur.execute(query, params)
-                    else:
-                        cur.execute(query)
-                    columns = [d[0] for d in (cur.description or [])]
-                    rows = cur.fetchall() or []
-                return ChDbResult(columns, rows)
-            except Exception as exc:
-                _last_exc = exc
-                if _attempt == 0:
-                    log.warning("chDB: transient query error (will retry): %s", exc)
-                    time.sleep(0.05)
+        with (
+            _telemetry.span(
+                "sobs.storage.query",
+                **{"storage.engine": "chdb", "query.name": query_name},
+            )
+            if query_name
+            else nullcontext()
+        ):
+            for _attempt in range(2):
+                try:
+                    with self._lock:
+                        cur = self._conn.cursor()
+                        if params:
+                            cur.execute(query, params)
+                        else:
+                            cur.execute(query)
+                        columns = [d[0] for d in (cur.description or [])]
+                        rows = cur.fetchall() or []
+                    return ChDbResult(columns, rows)
+                except Exception as exc:
+                    _last_exc = exc
+                    if _attempt == 0:
+                        log.warning("chDB: transient query error (will retry): %s", exc)
+                        time.sleep(0.05)
         assert _last_exc is not None
         raise _last_exc
 
@@ -2028,6 +2038,16 @@ class ChDbConnection:
                 return
             self._conn.close()
             self._closed = True
+
+
+def _classify_chdb_query_name(query: str) -> str:
+    raw_query = (query or "").lstrip()
+    if not raw_query:
+        return ""
+    query_name = raw_query.split(None, 1)[0].upper()
+    if query_name in {"SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"}:
+        return query_name
+    return ""
 
 
 _global_db: ChDbConnection | None = None

@@ -120,3 +120,37 @@ def record_rules_evaluate_duration(duration_ms: float, rule_count: int, event_co
         ).record(duration_ms, {"rule.count": rule_count, "event.count": event_count})
     except Exception:  # noqa: BLE001
         pass
+
+
+def record_span_duration(span_name: str, duration_ms: float, attributes: dict[str, Any]) -> None:
+    """Route span durations to the matching metric helper when applicable."""
+    if span_name == "sobs.ingest.request":
+        event_type = str(attributes.get("event.type") or "")
+        if event_type:
+            record_ingest_duration(duration_ms, event_type)
+        return
+
+    if span_name == "sobs.storage.write":
+        table = str(attributes.get("table") or "")
+        if table:
+            record_storage_write_duration(duration_ms, table)
+        return
+
+    if span_name == "sobs.storage.query":
+        query_name = str(attributes.get("query.name") or "")
+        if query_name:
+            record_storage_query_duration(duration_ms, query_name)
+        return
+
+    if span_name == "sobs.dashboard.query":
+        dashboard_name = str(attributes.get("dashboard.name") or "")
+        if dashboard_name:
+            record_dashboard_request_duration(duration_ms, dashboard_name)
+        return
+
+    if span_name == "sobs.rules.evaluate":
+        record_rules_evaluate_duration(
+            duration_ms,
+            int(attributes.get("rule.count") or 0),
+            int(attributes.get("event.count") or 0),
+        )

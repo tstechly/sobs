@@ -6,8 +6,9 @@ decorator ``traced_view(span_name, **attributes)`` that are no-ops when
 telemetry is disabled or OpenTelemetry packages are not installed.
 """
 
-import asyncio
 import functools
+import inspect
+import time
 from contextlib import contextmanager
 from typing import Any, Generator
 
@@ -36,6 +37,7 @@ def span(name: str, **attributes: Any) -> Generator[Any, None, None]:
         Raw payloads, secrets, or PII must **never** be passed here.
     """
     tracer = get_tracer()
+    started_at = time.perf_counter()
     try:
         with tracer.start_as_current_span(name) as current_span:
             for key, value in attributes.items():
@@ -60,6 +62,13 @@ def span(name: str, **attributes: Any) -> Generator[Any, None, None]:
     except AttributeError:
         # Tracer stub doesn't support context-manager protocol; fall through.
         yield None
+    finally:
+        try:
+            from .metrics import record_span_duration
+
+            record_span_duration(name, (time.perf_counter() - started_at) * 1000.0, attributes)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def traced_view(span_name: str, **attributes: Any):
@@ -77,7 +86,8 @@ def traced_view(span_name: str, **attributes: Any):
     """
 
     def decorator(func):
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
+
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs):
                 with span(span_name, **attributes):
@@ -85,6 +95,7 @@ def traced_view(span_name: str, **attributes: Any):
 
             return async_wrapper
         else:
+
             @functools.wraps(func)
             def sync_wrapper(*args, **kwargs):
                 with span(span_name, **attributes):
