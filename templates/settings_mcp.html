@@ -327,8 +327,16 @@
 
 <script>
 (function () {
-  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+  function initTimezonePage() {
+    if (!window.sobsTimezone || typeof window.sobsTimezone.initPage !== 'function') {
+      return false;
+    }
     window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+    return true;
+  }
+
+  if (!initTimezonePage()) {
+    window.addEventListener('load', initTimezonePage, { once: true });
   }
 })();
 </script>
