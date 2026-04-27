@@ -155,7 +155,7 @@
         {% for k in mcp_keys %}
         <tr id="key-row-{{ k.id }}" class="{% if k.expires_at and k.expires_at < now_iso %}mcp-key-expired{% endif %}">
           <td class="font-monospace small" data-label="Label">{{ k.label }}</td>
-          <td class="small text-secondary" data-label="Created">{{ k.created_at[:10] if k.created_at else 'Unknown' }}</td>
+          <td class="small text-secondary" data-label="Created"><span class="sobs-tz-ts" data-utc-ts="{{ k.created_at }}">{{ k.created_at[:19] if k.created_at else 'Unknown' }}</span></td>
           <td class="small" data-label="Expires">
             {% if k.expires_at %}
               <span class="mcp-expiry-badge">{{ k.expires_at[:10] }}</span>
@@ -327,6 +327,13 @@
 
 <script>
 (function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>
+<script>
+(function () {
   // Utility: copy to clipboard
   function copyToClipboard(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -482,13 +489,16 @@
       // Create row
       const tr = document.createElement('tr');
       tr.id = 'key-row-' + d.id;
-      const now = new Date().toISOString().slice(0, 10);
+      const nowIso = new Date().toISOString();
+      const nowDisplay = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
+        ? window.sobsTimezone.formatUtc(nowIso)
+        : nowIso.slice(0, 19).replace('T', ' ');
       const expiryHtml = expiryDate
         ? `<span class="mcp-expiry-badge">${expiryDate}</span>`
         : '<span class="text-secondary">Never</span>';
       tr.innerHTML = `
         <td class="font-monospace small" data-label="Label">${d.label || 'API Key'}</td>
-        <td class="small text-secondary" data-label="Created">${now}</td>
+        <td class="small text-secondary" data-label="Created"><span class="sobs-tz-ts" data-utc-ts="${nowIso}">${nowDisplay}</span></td>
         <td class="small" data-label="Expires">${expiryHtml}</td>
         <td data-label="Actions">
           <button class="btn btn-sm btn-outline-danger delete-key-btn" data-key-id="${d.id}" title="Delete key">
