@@ -302,7 +302,7 @@
         </div>
         <div class="small text-secondary">
           {% if cve_overview.last_scan %}
-          Last scan: {{ cve_overview.last_scan[:19] }}
+          Last scan: <span class="sobs-tz-ts" data-utc-ts="{{ cve_overview.last_scan }}">{{ cve_overview.last_scan[:19] }}</span>
           {% else %}
           No completed scan recorded yet.
           {% endif %}

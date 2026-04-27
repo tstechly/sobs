@@ -528,7 +528,6 @@
     </div>
   </div>
 </div>
-
 <script>
 (function () {
   'use strict';
@@ -566,26 +565,38 @@
       }
       let html = '<div class="table-responsive"><table class="table table-sm table-hover mb-0 align-middle small dm-backups-table">'
         + '<thead><tr><th>Name</th><th>Status</th><th>Started</th><th>Ended</th><th>Files</th><th>Size</th></tr></thead><tbody>';
+      const fmtTs = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
+        ? window.sobsTimezone.formatUtc
+        : function (v) { return String(v || '').slice(0, 19).replace('T', ' '); };
       data.backups.forEach(b => {
         const size = b.total_size ? (parseInt(b.total_size, 10) / BYTES_TO_MB).toFixed(1) + ' MB' : '—';
+        const startHtml = b.start_time
+          ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.start_time) + '">' + escHtml(fmtTs(b.start_time)) + '</span>'
+          : '—';
+        const endHtml = b.end_time
+          ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.end_time) + '">' + escHtml(fmtTs(b.end_time)) + '</span>'
+          : '—';
         html += '<tr>'
           + '<td class="font-monospace" data-label="Name">' + escHtml(b.name) + '</td>'
           + '<td data-label="Status">' + escHtml(b.status) + '</td>'
-          + '<td data-label="Started">' + escHtml(b.start_time) + '</td>'
-          + '<td data-label="Ended">' + escHtml(b.end_time) + '</td>'
+          + '<td data-label="Started">' + startHtml + '</td>'
+          + '<td data-label="Ended">' + endHtml + '</td>'
           + '<td data-label="Files">' + escHtml(b.num_files) + '</td>'
           + '<td data-label="Size">' + size + '</td>'
           + '</tr>';
       });
       html += '</tbody></table></div>';
       container.innerHTML = html;
+      if (window.sobsTimezone && typeof window.sobsTimezone.refreshTimestamps === 'function') {
+        window.sobsTimezone.refreshTimestamps('.sobs-tz-ts[data-utc-ts]');
+      }
     } catch (e) {
       container.innerHTML = '<p class="text-danger small py-3 px-3 mb-0">Failed to load backups: ' + escHtml(String(e)) + '</p>';
     }
   }
 
   function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
   function clampInt(value, min, max, fallback) {
@@ -883,3 +894,11 @@
 })();
 </script>
 {% endblock %}
+
+{% block scripts %}{{ super() }}<script>
+(function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>{% endblock %}

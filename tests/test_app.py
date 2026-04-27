@@ -17693,7 +17693,9 @@ class TestWebTraffic:
             html = (await r.get_data()).decode()
             assert "Security Overview (CVE)" in html
             assert "View All" in html
-            assert "Last scan: 2026-04-04T12:34:56" in html
+            assert "Last scan:" in html
+            assert 'class="sobs-tz-ts" data-utc-ts="2026-04-04T12:34:56Z"' in html
+            assert "timestampSelector: '.sobs-tz-ts[data-utc-ts]'" in html
         finally:
             sobs_app._set_app_setting(db, sobs_app._CVE_ENABLED_SETTING, old_enabled or "true")
             sobs_app._set_app_setting(db, sobs_app._CVE_LAST_SCAN_SETTING, old_last_scan or "")
@@ -20398,6 +20400,9 @@ class TestDataManagementSettings:
         assert "ClickHouse TTL" in text
         assert "S3 Backup" in text
         assert "TTL" in text and "Backup" in text
+        tz_helper_idx = text.index("sobs-timezone.js")
+        tz_init_idx = text.index("window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });")
+        assert tz_helper_idx < tz_init_idx
 
     async def test_data_management_settings_page_shows_restore_visibility_hint_when_disabled(self, client):
         """When backup is disabled, page should explain why restore UI is hidden."""
