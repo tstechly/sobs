@@ -508,6 +508,9 @@
       `;
       tbody.appendChild(tr);
       tr.querySelector('.delete-key-btn').addEventListener('click', handleDeleteClick);
+      if (window.sobsTimezone && typeof window.sobsTimezone.refreshTimestamps === 'function') {
+        window.sobsTimezone.refreshTimestamps('.sobs-tz-ts[data-utc-ts]');
+      }
     } catch (e) {
       alert('Request failed.');
     }

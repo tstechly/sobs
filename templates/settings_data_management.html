@@ -573,11 +573,11 @@
       }
       let html = '<div class="table-responsive"><table class="table table-sm table-hover mb-0 align-middle small dm-backups-table">'
         + '<thead><tr><th>Name</th><th>Status</th><th>Started</th><th>Ended</th><th>Files</th><th>Size</th></tr></thead><tbody>';
+      const fmtTs = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
+        ? window.sobsTimezone.formatUtc
+        : function (v) { return String(v || '').slice(0, 19).replace('T', ' '); };
       data.backups.forEach(b => {
         const size = b.total_size ? (parseInt(b.total_size, 10) / BYTES_TO_MB).toFixed(1) + ' MB' : '—';
-        const fmtTs = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
-          ? window.sobsTimezone.formatUtc
-          : function (v) { return String(v || '').slice(0, 19).replace('T', ' '); };
         const startHtml = b.start_time
           ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.start_time) + '">' + escHtml(fmtTs(b.start_time)) + '</span>'
           : '—';
@@ -604,7 +604,7 @@
   }
 
   function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
   function clampInt(value, min, max, fallback) {
