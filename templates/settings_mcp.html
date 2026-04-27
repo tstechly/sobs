@@ -155,7 +155,7 @@
         {% for k in mcp_keys %}
         <tr id="key-row-{{ k.id }}" class="{% if k.expires_at and k.expires_at < now_iso %}mcp-key-expired{% endif %}">
           <td class="font-monospace small" data-label="Label">{{ k.label }}</td>
-          <td class="small text-secondary" data-label="Created"><span class="sobs-tz-ts" data-utc-ts="{{ k.created_at }}">{{ k.created_at[:19] if k.created_at else 'Unknown' }}</span></td>
+          <td class="small text-secondary" data-label="Created">{% if k.created_at %}<span class="sobs-tz-ts" data-utc-ts="{{ k.created_at }}">{{ k.created_at[:19] }}</span>{% else %}Unknown{% endif %}</td>
           <td class="small" data-label="Expires">
             {% if k.expires_at %}
               <span class="mcp-expiry-badge">{{ k.expires_at[:10] }}</span>

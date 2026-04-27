@@ -577,12 +577,12 @@
         const size = b.total_size ? (parseInt(b.total_size, 10) / BYTES_TO_MB).toFixed(1) + ' MB' : '—';
         const fmtTs = (window.sobsTimezone && typeof window.sobsTimezone.formatUtc === 'function')
           ? window.sobsTimezone.formatUtc
-          : function (v) { return escHtml(String(v || '').slice(0, 19).replace('T', ' ')); };
+          : function (v) { return String(v || '').slice(0, 19).replace('T', ' '); };
         const startHtml = b.start_time
-          ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.start_time) + '">' + fmtTs(b.start_time) + '</span>'
+          ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.start_time) + '">' + escHtml(fmtTs(b.start_time)) + '</span>'
           : '—';
         const endHtml = b.end_time
-          ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.end_time) + '">' + fmtTs(b.end_time) + '</span>'
+          ? '<span class="sobs-tz-ts" data-utc-ts="' + escHtml(b.end_time) + '">' + escHtml(fmtTs(b.end_time)) + '</span>'
           : '—';
         html += '<tr>'
           + '<td class="font-monospace" data-label="Name">' + escHtml(b.name) + '</td>'
