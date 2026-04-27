@@ -84,12 +84,12 @@ def traced_view(span_name: str, **attributes: Any):
                     return await func(*args, **kwargs)
 
             return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                with span(span_name, **attributes):
+                    return func(*args, **kwargs)
 
-        @functools.wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            with span(span_name, **attributes):
-                return func(*args, **kwargs)
-
-        return sync_wrapper
+            return sync_wrapper
 
     return decorator

@@ -88,8 +88,6 @@ class TestTelemetryDisabledByDefault:
 
     def test_configure_telemetry_no_op_without_packages(self):
         """configure_telemetry() must not raise even if otel packages are missing."""
-        import sys
-
         from telemetry.setup import configure_telemetry, is_sdk_initialised
 
         with patch.dict(os.environ, {"SOBS_TELEMETRY_ENABLED": "false"}):
@@ -190,7 +188,6 @@ class TestSpanNoOp:
         # This test ensures that the instrumentation in the ingest routes
         # does not pass raw event bodies.
         sensitive_body = '{"password": "hunter2", "token": "abc123"}'
-        passed_attrs = {}
 
         mock_span = MagicMock()
         mock_span.__enter__ = MagicMock(return_value=mock_span)
@@ -219,14 +216,10 @@ class TestInvalidExporterConfig:
         _reset_telemetry()
 
     def test_invalid_exporter_name_falls_back_to_none(self):
-        import logging
-
         from telemetry.config import get_exporter_type
 
         with patch.dict(os.environ, {"SOBS_TELEMETRY_EXPORTER": "invalid_exporter"}):
-            with pytest.raises(Exception) if False else __import__("contextlib").suppress():
-                result = get_exporter_type()
-            # get_exporter_type logs a warning and returns 'none'
+            # get_exporter_type logs a warning and returns 'none' for unknown values
             result = get_exporter_type()
         assert result == "none"
 

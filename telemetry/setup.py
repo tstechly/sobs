@@ -282,12 +282,12 @@ class _NoOpTracer:
 
 
 class _NoOpCounter:
-    def add(self, amount: float, attributes: dict | None = None) -> None:
+    def add(self, amount: float, attributes: "dict | None" = None) -> None:
         pass
 
 
 class _NoOpHistogram:
-    def record(self, amount: float, attributes: dict | None = None) -> None:
+    def record(self, amount: float, attributes: "dict | None" = None) -> None:
         pass
 
 
