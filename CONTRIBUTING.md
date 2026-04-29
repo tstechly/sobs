@@ -27,7 +27,7 @@ Run unit tests with a terminal coverage summary and an XML report:
 
 ```bash
 pytest tests --ignore=tests/test_integration.py \
-    --cov=app --cov=masking --cov=mcp \
+    --cov=app --cov=config --cov=masking --cov=mcp --cov=shared \
     --cov-report=term-missing \
     --cov-report=xml:coverage.xml
 ```
@@ -74,10 +74,10 @@ If formatters update files, the hook re-stages those files automatically.
 Run these before opening or updating a PR:
 
 ```bash
-isort *.py tests/ scripts
-black *.py tests/ scripts
-flake8 *.py tests/ scripts
-mypy app.py tests scripts
+isort *.py shared/ tests/ scripts
+black *.py shared/ tests/ scripts
+flake8 *.py shared/ tests/ scripts
+mypy app.py config.py shared/ tests scripts
 python3 scripts/run_djlint.py --reformat --lint templates
 python3 scripts/run_djlint.py --check --lint templates
 pytest tests/

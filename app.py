@@ -485,132 +485,65 @@ async def _apply_security_headers(response: Response):
     return response
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+# ---------------------------------------------------------------------------
+# Config helpers — imported from config.py (see that module for full docs)
+# ---------------------------------------------------------------------------
+from config import (  # noqa: E402
+    _BEHIND_TLS,
+    _SETTINGS_ENCRYPTION_KEY_ENV,
+    _SETTINGS_ENCRYPTION_KEY_FILE_ENV,
+    _SETTINGS_ENCRYPTION_PREFIX,
+    _SETTINGS_ENCRYPTION_SECRET,
+    _decrypt_secret_value,
+    _encrypt_secret_value,
+    _env_flag,
+    _load_settings_encryption_secret,
+    _merge_script_name,
+    _normalize_base_path,
+    _read_env_or_file,
+    _read_file_or_env,
+    APP_REGISTRY_SEED_JSON_ENV,
+    APP_REGISTRY_SEED_JSON_FILE_ENV,
+    API_KEY,
+    BASE_PATH,
+    BASIC_AUTH_PASSWORD,
+    BASIC_AUTH_USERNAME,
+    BUILD_VERSION,
+    CHDB_CONFIG_FILE_ENV,
+    CHDB_EXPECT_DISK_ENV,
+    CHDB_EXPECT_POLICY_ENV,
+    CHDB_MARK_CACHE_MB_ENV,
+    CHDB_MAX_SERVER_MB_ENV,
+    CHDB_MAX_THREADS_ENV,
+    CHDB_SPILL_GROUP_BY_MB_ENV,
+    CHDB_SPILL_SORT_MB_ENV,
+    CHDB_UNCOMPRESSED_CACHE_MB_ENV,
+    CSRF_ORIGIN_CHECK,
+    DATA_DIR,
+    DB_PATH,
+    EXTERNAL_AUTH_URL,
+    MOBILE_BREAKPOINT_MAX,
+    RUM_ASSET_DIR,
+    RUM_ASSET_MAX_BYTES,
+    RUM_ASSET_SIGN_WINDOW_SEC,
+    RUM_ASSET_SIGNING_KEY,
+    RUM_CLIENT_AUTH_MODE,
+    RUM_CLIENT_SIGNING_KEY,
+    RUM_CLIENT_TOKEN_TTL_SEC,
+    SOURCE_MAP_DIR,
+    SOURCE_MAP_ENABLE,
+)
 
-
-def _normalize_base_path(value: str) -> str:
-    """Normalize base path values to either '' or '/segment[/subsegment]'."""
-    if not value:
-        return ""
-    normalized = re.sub(r"/+", "/", str(value).strip())
-    if not normalized or normalized == "/":
-        return ""
-    if not normalized.startswith("/"):
-        normalized = "/" + normalized
-    normalized = normalized.rstrip("/")
-    return normalized if normalized != "/" else ""
-
-
-def _merge_script_name(script_name: str, base_path: str) -> str:
-    """Append base path to SCRIPT_NAME once."""
-    if not script_name:
-        return script_name or ""
-    current = script_name or ""
-    if current.endswith(base_path):
-        return current
-    if not current:
-        return base_path
-    return current.rstrip("/") + base_path
-
-
-BASE_PATH = _normalize_base_path(os.environ.get("SOBS_BASE_PATH", ""))
 app.config["APPLICATION_ROOT"] = BASE_PATH or "/"
 app.config["SECRET_KEY"] = os.environ.get("SOBS_SECRET_KEY", "sobs-dev-secret-key")
 app.config["SESSION_COOKIE_NAME"] = os.environ.get("SOBS_SESSION_COOKIE_NAME", "sobs_session")
 app.config["ENABLE_FIRST_RUN_TOUR"] = _env_flag("SOBS_ENABLE_FIRST_RUN_TOUR", True)
-_BEHIND_TLS = _env_flag("SOBS_BEHIND_TLS", False)
 _session_cookie_samesite = str(os.environ.get("SOBS_SESSION_COOKIE_SAMESITE", "Lax") or "Lax").strip().lower()
 if _session_cookie_samesite not in {"lax", "strict", "none"}:
     _session_cookie_samesite = "lax"
 app.config["SESSION_COOKIE_SECURE"] = _BEHIND_TLS
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = _session_cookie_samesite.capitalize()
-
-_SETTINGS_ENCRYPTION_PREFIX = "enc:v1:"
-_SETTINGS_ENCRYPTION_KEY_ENV = "SOBS_SETTINGS_ENCRYPTION_KEY"
-_SETTINGS_ENCRYPTION_KEY_FILE_ENV = "SOBS_SETTINGS_ENCRYPTION_KEY_FILE"
-
-
-def _read_env_or_file(env_var: str, file_env_var: str = "") -> str:
-    value = os.environ.get(env_var, "").strip()
-    if value:
-        return value
-    if not file_env_var:
-        return ""
-    file_path = os.environ.get(file_env_var, "").strip()
-    if not file_path:
-        return ""
-    try:
-        with open(file_path, encoding="utf-8") as handle:
-            return handle.read().strip()
-    except Exception as exc:
-        logging.getLogger("sobs").warning("Failed to read %s from file %s: %s", env_var, file_path, exc)
-        return ""
-
-
-def _read_file_or_env(env_var: str, file_env_var: str = "") -> str:
-    if file_env_var:
-        file_path = os.environ.get(file_env_var, "").strip()
-        if file_path:
-            try:
-                with open(file_path, encoding="utf-8") as handle:
-                    file_value = handle.read().strip()
-                if file_value:
-                    return file_value
-            except Exception as exc:
-                logging.getLogger("sobs").warning("Failed to read %s from file %s: %s", env_var, file_path, exc)
-    return os.environ.get(env_var, "").strip()
-
-
-def _load_settings_encryption_secret() -> str:
-    return _read_env_or_file(_SETTINGS_ENCRYPTION_KEY_ENV, _SETTINGS_ENCRYPTION_KEY_FILE_ENV)
-
-
-_SETTINGS_ENCRYPTION_SECRET = _load_settings_encryption_secret()
-
-
-def _encrypt_secret_value(value: str) -> str:
-    if not value or not _SETTINGS_ENCRYPTION_SECRET:
-        return value
-    if value.startswith(_SETTINGS_ENCRYPTION_PREFIX):
-        return value
-    try:
-        from cryptography.fernet import Fernet
-
-        digest = hashlib.sha256(_SETTINGS_ENCRYPTION_SECRET.encode("utf-8")).digest()
-        key = base64.urlsafe_b64encode(digest)
-        token = Fernet(key).encrypt(value.encode("utf-8")).decode("utf-8")
-        return _SETTINGS_ENCRYPTION_PREFIX + token
-    except Exception as exc:
-        logging.getLogger("sobs").warning("Failed to encrypt secret setting: %s", exc)
-        return value
-
-
-def _decrypt_secret_value(value: str) -> str:
-    if not value:
-        return value
-    if not value.startswith(_SETTINGS_ENCRYPTION_PREFIX):
-        return value
-    if not _SETTINGS_ENCRYPTION_SECRET:
-        logging.getLogger("sobs").warning("Encrypted setting found but no decryption key is configured")
-        return ""
-    token = value[len(_SETTINGS_ENCRYPTION_PREFIX) :]
-    try:
-        from cryptography.fernet import Fernet, InvalidToken
-
-        digest = hashlib.sha256(_SETTINGS_ENCRYPTION_SECRET.encode("utf-8")).digest()
-        key = base64.urlsafe_b64encode(digest)
-        return Fernet(key).decrypt(token.encode("utf-8")).decode("utf-8")
-    except InvalidToken:
-        logging.getLogger("sobs").warning("Failed to decrypt setting value: invalid encryption key")
-        return ""
-    except Exception as exc:
-        logging.getLogger("sobs").warning("Failed to decrypt secret setting: %s", exc)
-        return ""
 
 
 class BasePathMiddleware:
@@ -666,35 +599,6 @@ class BasePathMiddleware:
 
 app.asgi_app = BasePathMiddleware(app.asgi_app, BASE_PATH)  # type: ignore[method-assign]
 app.register_blueprint(_mcp.mcp_bp)
-
-DATA_DIR = os.environ.get("SOBS_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-DB_PATH = os.path.join(DATA_DIR, "sobs.chdb")
-RUM_ASSET_DIR = os.path.join(DATA_DIR, "rum_assets")
-API_KEY = os.environ.get("SOBS_API_KEY", "")  # empty = no auth required
-BASIC_AUTH_USERNAME = os.environ.get("SOBS_BASIC_AUTH_USERNAME", "")  # empty = no basic auth
-BASIC_AUTH_PASSWORD = os.environ.get("SOBS_BASIC_AUTH_PASSWORD", "")
-EXTERNAL_AUTH_URL = os.environ.get("SOBS_EXTERNAL_AUTH_URL", "")  # empty = disabled
-RUM_ASSET_SIGNING_KEY = os.environ.get("SOBS_RUM_ASSET_SIGNING_KEY", "")
-RUM_ASSET_SIGN_WINDOW_SEC = int(os.environ.get("SOBS_RUM_ASSET_SIGN_WINDOW_SEC", "300"))
-RUM_ASSET_MAX_BYTES = int(os.environ.get("SOBS_RUM_ASSET_MAX_BYTES", str(8 * 1024 * 1024)))
-RUM_CLIENT_AUTH_MODE = os.environ.get("SOBS_RUM_CLIENT_AUTH_MODE", "none").strip().lower()
-RUM_CLIENT_SIGNING_KEY = os.environ.get("SOBS_RUM_CLIENT_SIGNING_KEY", "")
-RUM_CLIENT_TOKEN_TTL_SEC = int(os.environ.get("SOBS_RUM_CLIENT_TOKEN_TTL_SEC", "900"))
-CSRF_ORIGIN_CHECK = _env_flag("SOBS_CSRF_ORIGIN_CHECK", _BEHIND_TLS)
-SOURCE_MAP_DIR = os.environ.get("SOBS_SOURCE_MAP_DIR", "").strip()
-SOURCE_MAP_ENABLE = _env_flag("SOBS_SOURCE_MAP_ENABLE", False)
-BUILD_VERSION = os.environ.get("SOBS_BUILD_VERSION", "").strip()
-APP_REGISTRY_SEED_JSON_ENV = "SOBS_APP_REGISTRY_SEED_JSON"
-APP_REGISTRY_SEED_JSON_FILE_ENV = "SOBS_APP_REGISTRY_SEED_JSON_FILE"
-CHDB_CONFIG_FILE_ENV = "SOBS_CLICKHOUSE_CONFIG_FILE"
-CHDB_EXPECT_DISK_ENV = "SOBS_CHDB_EXPECT_DISK"
-CHDB_EXPECT_POLICY_ENV = "SOBS_CHDB_EXPECT_STORAGE_POLICY"
-CHDB_MAX_SERVER_MB_ENV = "SOBS_CHDB_MAX_SERVER_MB"
-CHDB_MARK_CACHE_MB_ENV = "SOBS_CHDB_MARK_CACHE_MB"
-CHDB_UNCOMPRESSED_CACHE_MB_ENV = "SOBS_CHDB_UNCOMPRESSED_CACHE_MB"
-CHDB_MAX_THREADS_ENV = "SOBS_CHDB_MAX_THREADS"
-CHDB_SPILL_GROUP_BY_MB_ENV = "SOBS_CHDB_SPILL_GROUP_BY_MB"
-CHDB_SPILL_SORT_MB_ENV = "SOBS_CHDB_SPILL_SORT_MB"
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(RUM_ASSET_DIR, exist_ok=True)
@@ -3376,9 +3280,6 @@ def _kubernetes_enabled() -> bool:
         return value == "1"
     except Exception:
         return False
-
-
-MOBILE_BREAKPOINT_MAX = "575.98px"
 
 
 @app.context_processor
@@ -7530,29 +7431,9 @@ async def _sse_broadcast(event: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Compression helpers
+# Compression helpers — imported from shared.serialization
 # ---------------------------------------------------------------------------
-def compress(text: str) -> str:
-    """Compress text and return as a base64-encoded string (chDB-safe)."""
-    return base64.b64encode(zlib.compress(text.encode("utf-8"), level=9)).decode("ascii")
-
-
-def decompress(data) -> str:
-    """Decompress a base64-encoded compressed value. Returns '' for None/empty."""
-    if not data:
-        return ""
-    raw = base64.b64decode(data) if isinstance(data, str) else data
-    return zlib.decompress(raw).decode("utf-8")
-
-
-def compress_json(obj) -> str:
-    return compress(json.dumps(obj, ensure_ascii=False))
-
-
-def decompress_json(data):
-    if data is None:
-        return {}
-    return json.loads(decompress(data))
+from shared.serialization import compress, compress_json, decompress, decompress_json  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
@@ -9101,91 +8982,18 @@ def _proto_kvlist_to_dict(attributes) -> dict:
     return {kv.key: _proto_any_value_to_python(kv.value) for kv in attributes}
 
 
-@dataclass
-class LogEvent:
-    ts: str
-    level: str
-    service: str
-    body: str
-    attrs: dict
-    resource_attrs: dict
-    scope_attrs: dict
-    trace_id: str
-    span_id: str
-
-
-@dataclass
-class SpanEvent:
-    ts: str
-    trace_id: str
-    span_id: str
-    parent_span_id: str
-    name: str
-    service: str
-    duration_ms: float
-    status: str
-    attrs: dict
-    resource_attrs: dict
-    scope_attrs: dict
-
-
-@dataclass
-class ErrorEvent:
-    ts: str
-    service: str
-    err_type: str
-    message: str
-    stack: str
-    attrs: dict
-    trace_id: str
-    span_id: str
-
-
-@dataclass
-class MetricEvent:
-    ts: str
-    service: str
-    name: str
-    attrs: dict
-
-
-# Attribute key prefixes excluded from the metric series fingerprint (high-cardinality
-# resource attributes that do not differentiate metric series).
-_FINGERPRINT_SKIP_PREFIXES = ("telemetry.", "process.", "os.", "runtime.")
-
-
-def _attr_fingerprint(attrs: dict) -> str:
-    """Compute a stable, low-cardinality fingerprint of data-point attributes.
-
-    Excludes high-cardinality resource/runtime attribute prefixes and limits
-    to the first 8 sorted key=value pairs to keep cardinality manageable.
-    """
-    pairs = sorted(
-        f"{k}={v}" for k, v in attrs.items() if not any(k.startswith(p) for p in _FINGERPRINT_SKIP_PREFIXES)
-    )[:8]
-    # MD5 is used here for non-cryptographic cardinality reduction only (16-hex fingerprint).
-    return hashlib.md5("|".join(pairs).encode()).hexdigest()[:16]
-
-
-@dataclass
-class TypedMetricEvent:
-    """A single OTEL metric data point with type information and value extracted."""
-
-    ts: str
-    service: str
-    metric_name: str
-    metric_description: str
-    metric_unit: str
-    metric_kind: str  # 'gauge', 'sum', or 'histogram'
-    value: float
-    attrs: dict  # data-point-level attributes
-    attr_fp: str  # stable fingerprint for series identity
-    is_monotonic: int = 0
-    aggregation_temporality: int = 0
-    histogram_count: int = 0
-    histogram_sum: float = 0.0
-    histogram_buckets: list = field(default_factory=list)
-    histogram_bounds: list = field(default_factory=list)
+# ---------------------------------------------------------------------------
+# Event dataclasses & attribute fingerprinting — imported from shared.events
+# ---------------------------------------------------------------------------
+from shared.events import (  # noqa: E402,F401
+    ErrorEvent,
+    LogEvent,
+    MetricEvent,
+    SpanEvent,
+    TypedMetricEvent,
+    _FINGERPRINT_SKIP_PREFIXES,
+    _attr_fingerprint,
+)
 
 
 def _proto_logs_to_events(msg: ExportLogsServiceRequest) -> list[LogEvent]:
@@ -31978,7 +31786,7 @@ def _get_dm_prune_lock() -> threading.Lock:
     return _dm_prune_lock
 
 
-def _acquire_dm_prune_lock() -> threading.Lock | None:
+def _acquire_dm_prune_lock() -> "threading.Lock | None":
     lock = _get_dm_prune_lock()
     if not lock.acquire(blocking=False):
         return None

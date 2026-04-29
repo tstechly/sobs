@@ -2,7 +2,7 @@
 
 **Date:** April 4, 2026  
 **Owner:** Engineering Team  
-**Status:** Pre-Implementation Planning  
+**Status:** Phase 1 (Foundation) Complete — POC merged  
 **Review Required Before Merge:** Yes (validation tests must pass)
 
 ---
@@ -119,25 +119,32 @@ tests/
 
 ## Implementation Phases
 
-### Phase 1: Foundation
+### Phase 1: Foundation ✅ (POC complete)
 
 **Goal:** Extract leaf modules with no interdependencies on new code.
 
 **Checklist:**
-- [ ] Create directory structure (`database/`, `shared/`, `ai/`, `features/`, `agents/`)
-- [ ] Extract `config.py` (env vars, encryption, feature flags)
-- [ ] Extract `shared/utils.py` (timestamp, parsing, encoding helpers)
-- [ ] Extract `shared/events.py` (LogEvent, SpanEvent dataclasses)
-- [ ] Extract `shared/auth.py` (API key, Basic Auth decorators)
-- [ ] Extract `shared/serialization.py` (JSON, compression)
-- [ ] Update imports in `app.py`
-- [ ] Run all existing tests (should pass without changes)
-- [ ] Verify no circular imports: `python -m modulefinder app.py`
+- [x] Create `shared/` directory structure
+- [x] Extract `config.py` (env vars, encryption, runtime constants)
+- [x] Extract `shared/events.py` (LogEvent, SpanEvent, ErrorEvent, MetricEvent, TypedMetricEvent, `_attr_fingerprint`)
+- [x] Extract `shared/serialization.py` (JSON, compression)
+- [x] Update imports in `app.py` (backward-compat re-exports maintained)
+- [x] Fix pre-existing Python 3.12 annotation bug (`threading.Lock | None`)
+- [x] Verify no circular imports
+- [x] Add focused unit tests: `tests/test_config.py`, `tests/test_shared.py` (64 new tests)
+- [x] Create `docs/ARCHITECTURE.md`
+- [ ] Extract `shared/utils.py` (timestamp, parsing, encoding helpers) — deferred to Phase 1b
+- [ ] Extract `shared/auth.py` (API key, Basic Auth decorators) — deferred (auth helpers depend on `get_db()`)
+- [ ] Create `database/`, `ai/`, `features/`, `agents/` directories — deferred to later phases
 
 **Success Criteria:**
-- All tests pass
-- No circular imports
-- app.py reduced to ~15k lines
+- All tests pass ✅
+- No circular imports ✅
+- `config.py`, `shared/serialization.py`, `shared/events.py` independently importable ✅
+
+**Notes:**
+- `app.py` still re-exports all moved symbols for full backward compatibility
+- The `threading.Lock | None` annotation bug was fixed (affected Python 3.12; production uses Python 3.14)
 
 ---
 

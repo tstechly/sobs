@@ -21,7 +21,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["app", "masking", "mcp", "telemetry"]
+source = ["app", "config", "masking", "mcp", "shared", "telemetry"]
 omit = [
     "tests/*",
     "scripts/*",
