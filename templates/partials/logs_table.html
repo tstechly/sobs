@@ -1,0 +1,18 @@
+{% import "jinja_bootstrap_spa/bootstrap_macros.html" as ui %}
+{{ ui.table(
+    "logs-table",
+    "/components/logs",
+    columns=[
+        {"key": "ts",      "label": "Timestamp", "sortable": true,  "html": true, "header_class": ""},
+        {"key": "level",   "label": "Level",     "sortable": true,  "html": true},
+        {"key": "service", "label": "Service",   "sortable": true,  "html": true},
+        {"key": "body",    "label": "Message",   "sortable": false, "html": true},
+        {"key": "trace",   "label": "Trace",     "sortable": false, "html": true},
+    ],
+    rows=rows,
+    state=table_state,
+    total_rows=total_rows,
+    class_name="logs-mobile-card-table border-0 shadow-none bg-transparent rounded-0",
+    persist="header",
+    state_keys=table_state_keys
+) }}

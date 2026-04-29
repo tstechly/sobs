@@ -25,6 +25,55 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Visual parity: remove the JBS card chrome so the Logs table looks like
+     the pre-migration table-responsive wrapper (no border, no shadow). */
+  #logs-table.card {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+  /* Restore table-sm compact padding (JBS default is .5rem; original was .25rem). */
+  #logs-table table {
+    --bs-table-cell-padding-x: .25rem;
+    --bs-table-cell-padding-y: .25rem;
+  }
+  /* Original Timestamp column width. */
+  #logs-table th:nth-child(1) { width: 155px; }
+  /* Original Level column width. */
+  #logs-table th:nth-child(2) { width: 90px; }
+  /* Original Service column width. */
+  #logs-table th:nth-child(3) { width: 100px; }
+  /* Original Trace column width. */
+  #logs-table th:nth-child(5) { width: 120px; }
+  /* Mobile card mode for JBS-rendered Logs table (JBS <td> elements lack
+     data-label; override ::before content via nth-child selectors). */
+  @media (max-width: {{ mobile_breakpoint_max }}) {
+    #logs-table table thead { display: none; }
+    #logs-table table,
+    #logs-table table tbody,
+    #logs-table table tr,
+    #logs-table table td { display: block; width: 100%; }
+    #logs-table table tr {
+      border: 1px solid var(--bs-border-color);
+      border-radius: 0.5rem;
+      margin-bottom: 0.75rem;
+      padding: 0.5rem 0.625rem;
+    }
+    #logs-table table td { border: 0; padding: 0.2rem 0; }
+    #logs-table table td::before {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--bs-secondary-color);
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      margin-bottom: 0.1rem;
+    }
+    #logs-table table td:nth-child(1)::before { content: "Timestamp"; }
+    #logs-table table td:nth-child(2)::before { content: "Level"; }
+    #logs-table table td:nth-child(3)::before { content: "Service"; }
+    #logs-table table td:nth-child(4)::before { content: "Message"; }
+    #logs-table table td:nth-child(5)::before { content: "Trace"; }
+  }
 </style>{% endblock %}
 {% block content %}
 {% set live = request.args.get('live', '') %}
@@ -326,103 +375,7 @@
 </div>
 {% endif %}
 
-<div id="logsTableContainer" class="table-responsive{% if not logs %} d-none{% endif %}">
-  <table class="table table-sm table-hover align-middle logs-mobile-card-table">
-    <thead>
-      {% set ts_next_dir = 'asc' if (sort_by == 'Timestamp' and sort_dir == 'desc') else 'desc' %}
-      {% set level_next_dir = 'asc' if (sort_by == 'SeverityText' and sort_dir == 'desc') else 'desc' %}
-      {% set svc_next_dir = 'asc' if (sort_by == 'ServiceName' and sort_dir == 'desc') else 'desc' %}
-      <tr>
-        <th style="width:155px;">
-          <a href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, analyze=analyze, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
-            Timestamp {% if sort_by == 'Timestamp' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
-          </a>
-        </th>
-        <th style="width:90px;">
-          <a href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, analyze=analyze, sort_by='SeverityText', sort_dir=level_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
-            Level {% if sort_by == 'SeverityText' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
-          </a>
-        </th>
-        <th style="width:100px;">
-          <a href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, analyze=analyze, sort_by='ServiceName', sort_dir=svc_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
-            Service {% if sort_by == 'ServiceName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
-          </a>
-        </th>
-        <th>Message</th>
-        <th style="width:120px;">Trace</th>
-      </tr>
-    </thead>
-    <tbody id="logsTableBody">
-      {% for log in logs %}
-      <tr>
-        <td class="text-secondary small font-monospace sobs-tz-ts" data-utc-ts="{{ log.ts }}" data-label="Timestamp">{{ log.ts[:23] }}</td>
-        <td data-label="Level"><span class="badge badge-level-{{ log.level }}">{{ log.level }}</span></td>
-        <td data-label="Service"><span class="badge bg-secondary">{{ log.service or '—' }}</span></td>
-        <td class="log-body" data-label="Message">
-          <span class="log-body-text">{{ log.body }}</span>
-          {% if log.tags %}
-          <div class="d-flex flex-wrap gap-1 mt-1">
-            {% for tag in log.tags %}
-            {% set safe_tag_key = tag.key | replace("'", "''") %}
-            {% set safe_tag_val = tag.value | replace("'", "''") %}
-            <a href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql="has_tag('" + safe_tag_key + "','" + safe_tag_val + "')", from_ts=from_ts, to_ts=to_ts, live=live, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=0, stats='1') }}"
-               class="badge {% if tag.is_auto %}bg-info-subtle text-info-emphasis{% else %}bg-success-subtle text-success-emphasis{% endif %} text-decoration-none"
-               title="{{ 'Auto-tag' if tag.is_auto else 'Manual tag' }}: {{ tag.key }}={{ tag.value }}">
-              <i class="bi bi-tag me-1"></i>{{ tag.key }}={{ tag.value }}
-            </a>
-            {% endfor %}
-          </div>
-          {% endif %}
-        </td>
-        <td data-label="Trace">
-          {% if log.trace_id %}
-          <a href="{{ url_for('view_traces', trace_id=log.trace_id, from_ts=from_ts, to_ts=to_ts) }}" class="trace-link text-truncate d-inline-block" style="max-width:110px;" title="{{ log.trace_id }}">
-            {{ log.trace_id[:12] }}…
-          </a>
-          {% else %}
-          <span class="text-secondary">—</span>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-{% if logs %}
-<!-- Pagination -->
-{% set prev_offset = [offset - limit, 0] | max %}
-{% set next_offset = offset + limit %}
-<nav class="d-flex justify-content-between align-items-center">
-  <div class="d-flex align-items-center gap-2">
-    <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + logs | length, total] | min }} of {{ total }}</small>
-    <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
-      {% for n in [10, 25, 50, 100, 200] %}
-      <option value="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
-      {% endfor %}
-    </select>
-  </div>
-  <ul class="pagination pagination-sm mb-0">
-    {% if offset > 0 %}
-    <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, live=live, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
-    </li>
-    {% endif %}
-    {% if next_offset < total %}
-    <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_logs', q=q, level=level, service=service, trace_id=trace_id, trace_ids=trace_ids_csv, sql=sql_where, from_ts=from_ts, to_ts=to_ts, live=live, analyze=analyze, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
-    </li>
-    {% endif %}
-  </ul>
-</nav>
-{% endif %}
-
-{% if not logs %}
-<div id="logsEmptyState" class="text-center py-5 text-secondary">
-  <i class="bi bi-journal-x" style="font-size:2rem;"></i>
-  <p class="mt-2">No logs found{% if q %} matching <code>{{ q }}</code>{% endif %}</p>
-</div>
-{% endif %}
+{% include "partials/logs_table.html" %}
 {% endblock %}
 
 {% block scripts %}
@@ -442,7 +395,7 @@
   let ansiCtx = null;
   if (window.sobsAnsi && typeof window.sobsAnsi.initPage === 'function') {
     ansiCtx = window.sobsAnsi.initPage({
-      containerId: 'logsTableContainer',
+      containerId: 'logs-table',
       buttonId: 'logs-ansi-btn'
     });
   }
@@ -451,13 +404,23 @@
   const liveInput = document.getElementById("liveModeInput");
   const newCountBtn = document.getElementById("liveNewCountBtn");
   const statusBadge = document.getElementById("liveModeStatus");
-  const tableContainer = document.getElementById("logsTableContainer");
-  const tableBody = document.getElementById("logsTableBody");
-  const emptyState = document.getElementById("logsEmptyState");
+  // JBS renders the table inside #logs-table; acquire references dynamically so
+  // they remain valid after a JBS component swap (sort/filter/page change).
+  let tableContainer = document.querySelector('#logs-table .table-responsive');
+  let tableBody = document.querySelector('#logs-table tbody');
+  const emptyState = null;  // JBS handles the empty state via empty_message param
   const advancedAnalysisBtn = document.getElementById("advancedAnalysisBtn");
   const statsPanel = document.getElementById("statsPanel");
   const statsSnapshotAge = document.getElementById("statsSnapshotAge");
   const statsSnapshotIso = {{ stats_generated_at_iso|tojson }};
+
+  // Re-acquire tbody/tableContainer references after JBS swaps #logs-table.
+  document.addEventListener('jbs:after-swap', function (e) {
+    if (e.target && e.target.id === 'logs-table') {
+      tableContainer = e.target.querySelector('.table-responsive');
+      tableBody = e.target.querySelector('tbody');
+    }
+  });
 
   if (!toggleBtn || !statusBadge) {
     return;

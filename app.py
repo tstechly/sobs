@@ -11481,10 +11481,30 @@ async def view_logs():
         ).fetchall()
     ]
 
+    # Compute JBS table state for the Logs component (additive; does not change
+    # existing sort/limit/offset behavior for the full-page render).
+    _jbs_compat_args, _jbs_legacy_limit, _jbs_legacy_offset = _map_limit_offset_to_page_state(request.args)
+    _jbs_allowed_page_sizes = _LOGS_TABLE_PAGE_SIZES
+    if _jbs_legacy_limit is not None:
+        _jbs_allowed_page_sizes = tuple(sorted({*_jbs_allowed_page_sizes, _jbs_legacy_limit}))
+    _logs_table_state = parse_table_state(
+        _jbs_compat_args,
+        default_sort_by=_LOGS_TABLE_DEFAULT_SORT_BY,
+        default_page_size=_LOGS_TABLE_DEFAULT_PAGE_SIZE,
+        allowed_page_sizes=_jbs_allowed_page_sizes,
+        filter_keys=_LOGS_TABLE_STATE_KEYS,
+    )
+    if _jbs_legacy_offset is not None:
+        _logs_table_state["offset"] = _jbs_legacy_offset
+
     return await render_template(
         "logs.html",
         logs=log_rows,
+        rows=_logs_table_rows(log_rows),
         total=total,
+        total_rows=total,
+        table_state=_logs_table_state,
+        table_state_keys=_LOGS_TABLE_STATE_KEYS,
         limit=limit,
         offset=offset,
         q=q,
@@ -18843,6 +18863,297 @@ async def work_items_table_component():
         services=services,
         rules=rules,
         table_state_keys=_WORK_ITEMS_TABLE_STATE_KEYS,
+    )
+    return conditional_fragment_response(content, request.headers)
+
+
+# ---------------------------------------------------------------------------
+# jinja-bootstrap-spa – Logs table fragment helpers
+# ---------------------------------------------------------------------------
+
+# Constants shared between view_logs and the fragment endpoint.
+# Default page size matches the pre-migration limit=200 default so
+# /logs with no query params returns the same row count as before.
+_LOGS_TABLE_DEFAULT_PAGE_SIZE = 200
+_LOGS_TABLE_DEFAULT_SORT_BY = "Timestamp"
+_LOGS_TABLE_DEFAULT_SORT_DIR = "desc"
+_LOGS_TABLE_PAGE_SIZES = (25, 50, 100, 200, 500)
+_LOGS_TABLE_SORT_MAP: dict[str, str] = {
+    "Timestamp": "Timestamp",
+    "SeverityText": "SeverityText",
+    "ServiceName": "ServiceName",
+}
+_LOGS_TABLE_STATE_KEYS: list[str] = [
+    "page",
+    "page_size",
+    "sort_by",
+    "sort_dir",
+    "q",
+    "level",
+    "service",
+    "from_ts",
+    "to_ts",
+]
+
+
+def _logs_table_rows(log_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert serialised log-row dicts into JBS data-grid row dicts.
+
+    Columns marked ``html=True`` in the partial template are pre-rendered here
+    with explicit ``html.escape()`` for all user-controlled content.  Plain-text
+    columns rely on Jinja auto-escaping at render time.
+    """
+    rows: list[dict[str, Any]] = []
+    for item in log_rows:
+        ts_raw = str(item.get("ts", "") or "")
+        ts_display = ts_raw[:23] if ts_raw else "—"
+        ts_html = (
+            f'<span class="text-secondary small font-monospace sobs-tz-ts"'
+            f' data-utc-ts="{html.escape(ts_raw)}">{html.escape(ts_display)}</span>'
+            if ts_raw
+            else "—"
+        )
+
+        level = str(item.get("level", "") or "").upper()
+        level_html = (
+            f'<span class="badge badge-level-{html.escape(level)}">{html.escape(level)}</span>'
+            if level
+            else '<span class="text-secondary">—</span>'
+        )
+
+        service = str(item.get("service", "") or "")
+        service_html = (
+            f'<span class="badge bg-secondary">{html.escape(service)}</span>'
+            if service
+            else '<span class="text-secondary">—</span>'
+        )
+
+        body = str(item.get("body", "") or "")
+        body_html = f'<span class="log-body-text">{html.escape(body)}</span>'
+
+        # Tags (supplementary; list of {key, value, is_auto} dicts)
+        tags: list[dict] = item.get("tags", []) or []
+        if tags:
+            tag_parts = []
+            for tag in tags:
+                tag_key = str(tag.get("key", ""))
+                tag_val = str(tag.get("value", ""))
+                is_auto = bool(tag.get("is_auto", False))
+                css = "bg-info-subtle text-info-emphasis" if is_auto else "bg-success-subtle text-success-emphasis"
+                auto_label = "Auto-tag" if is_auto else "Manual tag"
+                tag_parts.append(
+                    f'<span class="badge {css}" title="{html.escape(auto_label)}: {html.escape(tag_key)}={html.escape(tag_val)}">'
+                    f'<i class="bi bi-tag me-1"></i>{html.escape(tag_key)}={html.escape(tag_val)}</span>'
+                )
+            body_html += '<div class="d-flex flex-wrap gap-1 mt-1">' + "".join(tag_parts) + "</div>"
+
+        trace_id = str(item.get("trace_id", "") or "")
+        if trace_id:
+            try:
+                trace_url = url_for("view_traces", trace_id=trace_id)
+            except Exception:
+                trace_url = f"/traces?trace_id={html.escape(trace_id)}"
+            trace_html = (
+                f'<a href="{html.escape(trace_url)}" class="trace-link text-truncate d-inline-block"'
+                f' style="max-width:110px;" title="{html.escape(trace_id)}">'
+                f"{html.escape(trace_id[:12])}…</a>"
+            )
+        else:
+            trace_html = '<span class="text-secondary">—</span>'
+
+        rows.append(
+            {
+                "ts": ts_html,
+                "level": level_html,
+                "service": service_html,
+                "body": body_html,
+                "trace": trace_html,
+            }
+        )
+    return rows
+
+
+async def _fetch_logs_fragment_data(
+    db: "ChDbConnection",
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    """Fetch logs for the JBS fragment endpoint.
+
+    Supports the common filter subset (q, level, service, from_ts, to_ts,
+    sort, pagination).  SQL/regex/trace-ID filters are not supported here and
+    fall back to the full-page view when present.
+
+    Returns ``(log_rows, total)`` where ``log_rows`` are dicts suitable for
+    ``_logs_table_rows()``.
+    """
+    q = str(state.get("q", "") or "")
+    level = str(state.get("level", "") or "")
+    service = str(state.get("service", "") or "")
+    from_ts_raw = str(state.get("from_ts", "") or "")
+    to_ts_raw = str(state.get("to_ts", "") or "")
+
+    try:
+        from_ts = _normalize_ch_timestamp(from_ts_raw) if from_ts_raw else ""
+        to_ts = _normalize_ch_timestamp(to_ts_raw) if to_ts_raw else ""
+    except (TypeError, ValueError):
+        from_ts = ""
+        to_ts = ""
+
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if level:
+        conditions.append("SeverityText = ?")
+        params.append(level.upper())
+    if service:
+        conditions.append("ServiceName = ?")
+        params.append(service)
+    _append_time_window_filter(conditions, params, "Timestamp", from_ts, to_ts)
+
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
+    if q:
+        try:
+            include_patterns, exclude_patterns, regex_error = _prepare_re2_filter_patterns(db, q)
+            if regex_error:
+                q = ""  # fall back to no text filter on bad regex
+        except Exception:
+            q = ""
+
+    where = _where_clause(conditions)
+
+    sort_by_key = str(state.get("sort_by", _LOGS_TABLE_DEFAULT_SORT_BY) or _LOGS_TABLE_DEFAULT_SORT_BY)
+    sort_col = _LOGS_TABLE_SORT_MAP.get(sort_by_key, "Timestamp")
+    sort_dir = str(state.get("sort_dir", _LOGS_TABLE_DEFAULT_SORT_DIR) or _LOGS_TABLE_DEFAULT_SORT_DIR)
+    if sort_dir not in ("asc", "desc"):
+        sort_dir = _LOGS_TABLE_DEFAULT_SORT_DIR
+
+    page = max(1, int(state.get("page", 1) or 1))
+    page_size_raw = int(state.get("page_size", _LOGS_TABLE_DEFAULT_PAGE_SIZE) or _LOGS_TABLE_DEFAULT_PAGE_SIZE)
+    legacy_offset_present = "offset" in state and state.get("offset") is not None
+    if legacy_offset_present:
+        page_size = max(1, min(page_size_raw, 5000))
+        offset = max(0, int(state.get("offset", 0) or 0))
+    else:
+        page_size = page_size_raw if page_size_raw in _LOGS_TABLE_PAGE_SIZES else _LOGS_TABLE_DEFAULT_PAGE_SIZE
+        offset = (page - 1) * page_size
+
+    try:
+        query_where = where
+        query_params = list(params)
+        if q and include_patterns:
+            regex_conditions: list[str] = []
+            _append_regex_expression_clauses(
+                conditions=regex_conditions,
+                params=query_params,
+                column="Body",
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+            )
+            if regex_conditions:
+                regex_sql = " AND ".join(regex_conditions)
+                query_where = f"{query_where} AND {regex_sql}" if query_where else f"WHERE {regex_sql}"
+
+        if not query_where:
+            total = _active_part_rows(db, "otel_logs")
+        else:
+            total = db.execute(f"SELECT COUNT(*) FROM otel_logs {query_where}", query_params).fetchone()[0]
+
+        rows = db.execute(
+            f"SELECT Timestamp, SeverityText, ServiceName, Body, TraceId, SpanId "
+            f"FROM otel_logs {query_where} "
+            f"ORDER BY {sort_col} {'ASC' if sort_dir == 'asc' else 'DESC'} "
+            f"LIMIT {page_size} OFFSET {offset}",
+            query_params,
+        ).fetchall()
+
+        # Batch-fetch tags for visible rows
+        row_record_ids = [
+            _record_id_for_log(str(r["Timestamp"]), str(r["ServiceName"]), str(r["TraceId"]), str(r["SpanId"]))
+            for r in rows
+        ]
+        tags_by_record_id: dict[str, list[dict]] = {}
+        if row_record_ids:
+            try:
+                placeholders = ",".join(["?"] * len(row_record_ids))
+                tag_rows_raw = db.execute(
+                    f"SELECT RecordId, TagKey, TagValue, IsAuto "
+                    f"FROM sobs_record_tags FINAL "
+                    f"WHERE RecordType='log' AND RecordId IN ({placeholders}) AND IsDeleted=0 "
+                    f"ORDER BY RecordId, TagKey",
+                    row_record_ids,
+                ).fetchall()
+                for tr in tag_rows_raw:
+                    rid = str(tr["RecordId"])
+                    entry = {
+                        "key": str(tr["TagKey"]),
+                        "value": str(tr["TagValue"]),
+                        "is_auto": bool(tr["IsAuto"]),
+                    }
+                    tags_by_record_id.setdefault(rid, []).append(entry)
+            except Exception:
+                pass
+
+        log_rows = []
+        for r in rows:
+            rid = _record_id_for_log(str(r["Timestamp"]), str(r["ServiceName"]), str(r["TraceId"]), str(r["SpanId"]))
+            log_rows.append(
+                {
+                    "ts": str(r["Timestamp"]),
+                    "level": str(r["SeverityText"]),
+                    "service": str(r["ServiceName"]),
+                    "body": str(r["Body"]),
+                    "trace_id": str(r["TraceId"]),
+                    "span_id": str(r["SpanId"]),
+                    "record_id": rid,
+                    "tags": tags_by_record_id.get(rid, []),
+                }
+            )
+        return log_rows, int(total)
+
+    except Exception as exc:
+        app.logger.warning("Error loading logs fragment data: %s", exc)
+        return [], 0
+
+
+@app.route("/components/logs")
+@require_basic_auth
+async def logs_table_component():
+    """jinja-bootstrap-spa fragment endpoint for the Logs data grid.
+
+    Returns the table fragment HTML with ETag/304 support so the runtime
+    can swap only the table without reloading the full page.
+
+    Supports common filters: q (text search), level, service, from_ts, to_ts,
+    sort_by, sort_dir, page, page_size, and legacy limit/offset params.
+    """
+    db = get_db()
+
+    compat_args, legacy_limit, legacy_offset = _map_limit_offset_to_page_state(request.args)
+    allowed_page_sizes = _LOGS_TABLE_PAGE_SIZES
+    if legacy_limit is not None:
+        allowed_page_sizes = tuple(sorted({*allowed_page_sizes, legacy_limit}))
+
+    state = parse_table_state(
+        compat_args,
+        request_headers=request.headers,
+        default_sort_by=_LOGS_TABLE_DEFAULT_SORT_BY,
+        default_page_size=_LOGS_TABLE_DEFAULT_PAGE_SIZE,
+        allowed_page_sizes=allowed_page_sizes,
+        filter_keys=_LOGS_TABLE_STATE_KEYS,
+    )
+    if legacy_offset is not None:
+        state["offset"] = legacy_offset
+
+    log_rows, total = await _fetch_logs_fragment_data(db, state)
+    table_rows = _logs_table_rows(log_rows)
+
+    content = await render_template(
+        "partials/logs_table.html",
+        rows=table_rows,
+        total_rows=total,
+        table_state=state,
+        table_state_keys=_LOGS_TABLE_STATE_KEYS,
     )
     return conditional_fragment_response(content, request.headers)
 

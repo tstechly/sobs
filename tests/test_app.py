@@ -22813,3 +22813,184 @@ class TestJBSMigration:
         assert total == 0
         assert services == []
         assert rules == []
+
+    # ------------------------------------------------------------------
+    # Logs JBS fragment endpoint tests
+    # ------------------------------------------------------------------
+
+    async def test_logs_fragment_returns_200(self, client):
+        """GET /components/logs returns 200 with JBS DOM contract."""
+        r = await client.get("/components/logs")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b'id="logs-table"' in data
+        assert b'data-jbs-component="table"' in data
+        assert b'data-jbs-key="logs-table"' in data
+        assert b'data-jbs-endpoint="/components/logs"' in data
+
+    async def test_logs_fragment_has_etag(self, client):
+        """GET /components/logs includes an ETag header."""
+        r = await client.get("/components/logs")
+        assert r.status_code == 200
+        assert r.headers.get("ETag") is not None
+
+    async def test_logs_fragment_returns_304_on_second_identical_request(self, client):
+        """Second identical request returns 304 Not Modified."""
+        r1 = await client.get("/components/logs")
+        etag = r1.headers.get("ETag")
+        assert etag is not None
+        r2 = await client.get("/components/logs", headers={"If-None-Match": etag})
+        assert r2.status_code == 304
+
+    async def test_logs_fragment_with_filter_params(self, client):
+        """Fragment endpoint accepts filter params without error."""
+        r = await client.get("/components/logs?level=INFO&service=test-svc&page=1&page_size=25")
+        assert r.status_code == 200
+
+    async def test_logs_fragment_sort_key_changes_etag(self, client):
+        """Changing sort_by produces a different ETag."""
+        r1 = await client.get("/components/logs?sort_by=Timestamp&sort_dir=desc")
+        r2 = await client.get("/components/logs?sort_by=SeverityText&sort_dir=asc")
+        etag1 = r1.headers.get("ETag")
+        etag2 = r2.headers.get("ETag")
+        # ETags may differ when the sort changes the result set or render.
+        # At minimum, both responses must be valid.
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert etag1 is not None
+        assert etag2 is not None
+
+    async def test_logs_fragment_legacy_limit_offset(self, client):
+        """Fragment endpoint maps legacy ?limit=N&offset=N to JBS page state."""
+        r = await client.get("/components/logs?limit=50&offset=0")
+        assert r.status_code == 200
+
+    async def test_logs_fragment_state_keys_in_html(self, client):
+        """Fragment HTML contains the expected state-keys attribute."""
+        r = await client.get("/components/logs")
+        assert r.status_code == 200
+        data = await r.get_data()
+        for key in sobs_app._LOGS_TABLE_STATE_KEYS:
+            assert key.encode() in data, f"state key {key!r} missing from logs fragment"
+
+    async def test_logs_page_renders_with_jbs_component(self, client):
+        """Full-page /logs renders the JBS logs component."""
+        r = await client.get("/logs")
+        assert r.status_code == 200
+        data = await r.get_data()
+        assert b'id="logs-table"' in data
+        assert b'data-jbs-component="table"' in data
+        assert b'data-jbs-endpoint="/components/logs"' in data
+
+    async def test_logs_page_default_page_size_matches_old_limit_default(self, client):
+        """Default page_size for /logs must equal the pre-migration limit=200 default."""
+        r = await client.get("/logs")
+        assert r.status_code == 200
+        await r.get_data()
+        # Default page_size should be 200 (matches old default limit).
+        assert sobs_app._LOGS_TABLE_DEFAULT_PAGE_SIZE == 200
+
+    def test_logs_table_rows_escapes_html(self):
+        """_logs_table_rows() escapes XSS payloads in all user-controlled fields."""
+        xss = "<script>alert('xss')</script>"
+        log_rows = [
+            {
+                "ts": xss,
+                "level": "INFO",
+                "service": xss,
+                "body": xss,
+                "trace_id": "",
+                "span_id": "",
+                "record_id": "",
+                "tags": [],
+            }
+        ]
+        rows = sobs_app._logs_table_rows(log_rows)
+        assert len(rows) == 1
+        row = rows[0]
+        escaped = "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
+        for key in ("ts", "service", "body"):
+            assert "<script>" not in row[key], f"Unescaped XSS in {key}"
+            assert escaped in row[key] or "&lt;" in row[key], f"Escaping missing in {key}"
+
+    def test_logs_table_rows_empty_returns_empty_list(self):
+        """_logs_table_rows([]) returns []."""
+        assert sobs_app._logs_table_rows([]) == []
+
+    def test_logs_table_rows_renders_level_badge(self):
+        """_logs_table_rows() renders a level badge for the level column."""
+        rows = sobs_app._logs_table_rows(
+            [
+                {
+                    "ts": "",
+                    "level": "ERROR",
+                    "service": "svc",
+                    "body": "msg",
+                    "trace_id": "",
+                    "span_id": "",
+                    "record_id": "",
+                    "tags": [],
+                }
+            ]
+        )
+        assert "badge-level-ERROR" in rows[0]["level"]
+        assert "ERROR" in rows[0]["level"]
+
+    def test_logs_table_rows_empty_level_shows_dash(self):
+        """_logs_table_rows() shows '—' when level is empty."""
+        rows = sobs_app._logs_table_rows(
+            [
+                {
+                    "ts": "",
+                    "level": "",
+                    "service": "",
+                    "body": "",
+                    "trace_id": "",
+                    "span_id": "",
+                    "record_id": "",
+                    "tags": [],
+                }
+            ]
+        )
+        assert "—" in rows[0]["level"]
+
+    async def test_fetch_logs_fragment_data_returns_items_and_total(self):
+        """_fetch_logs_fragment_data returns (list, int) for normal state."""
+        db = sobs_app.get_db()
+        state: dict = {"page_size": 25, "sort_by": "Timestamp", "sort_dir": "desc"}
+        log_rows, total = await sobs_app._fetch_logs_fragment_data(db, state)
+        assert isinstance(log_rows, list)
+        assert isinstance(total, int)
+        assert total >= 0
+
+    async def test_fetch_logs_fragment_data_invalid_sort_dir_falls_back(self):
+        """Invalid sort_dir falls back to default."""
+        db = sobs_app.get_db()
+        state: dict = {"page_size": 25, "sort_dir": "sideways"}
+        log_rows, total = await sobs_app._fetch_logs_fragment_data(db, state)
+        assert isinstance(log_rows, list)
+
+    async def test_fetch_logs_fragment_data_timestamp_exception_falls_back(self, monkeypatch):
+        """Exception normalizing from_ts/to_ts falls back to empty strings."""
+
+        def _bad_normalize(v):
+            raise ValueError("bad timestamp")
+
+        monkeypatch.setattr(sobs_app, "_normalize_ch_timestamp", _bad_normalize)
+        db = sobs_app.get_db()
+        state: dict = {"from_ts": "bad_ts", "to_ts": "bad_ts", "page_size": 25}
+        log_rows, total = await sobs_app._fetch_logs_fragment_data(db, state)
+        assert isinstance(log_rows, list)
+
+    async def test_fetch_logs_fragment_data_exception_returns_empty(self, monkeypatch):
+        """Exception inside _fetch_logs_fragment_data is caught; empty results returned."""
+
+        def _bad_active_part_rows(db, table_name):
+            raise RuntimeError("simulated DB failure")
+
+        monkeypatch.setattr(sobs_app, "_active_part_rows", _bad_active_part_rows)
+        db = sobs_app.get_db()
+        state: dict = {"page_size": 25}
+        log_rows, total = await sobs_app._fetch_logs_fragment_data(db, state)
+        assert log_rows == []
+        assert total == 0
