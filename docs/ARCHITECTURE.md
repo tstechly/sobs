@@ -1,6 +1,6 @@
 # SOBS Architecture Overview
 
-> **Status:** Phase 1 (Foundation) complete — see
+> **Status:** Phase 1 (Foundation) + Route Blueprint extraction complete — see
 > [`docs/REFACTORING_IMPLEMENTATION_PLAN.md`](REFACTORING_IMPLEMENTATION_PLAN.md)
 > for the full multi-phase roadmap.
 
@@ -8,10 +8,20 @@
 
 ```
 sobs/
-├── app.py                  # Quart app, route registration, request handlers
+├── app.py                  # Quart app object, helpers, background workers, remaining routes
 ├── config.py               # Environment reading, encryption, runtime constants
 ├── masking.py              # PII/secret masking rules (shared filter)
 ├── mcp.py                  # MCP server Blueprint (Model Context Protocol)
+│
+├── routes/                 # Quart Blueprint route modules
+│   ├── __init__.py         # Package (empty — import each blueprint explicitly)
+│   ├── apps.py             # App/CI registry: /v1/apps, /v1/releases
+│   ├── errors.py           # Errors UI + API: /errors, /api/errors/*
+│   ├── ingest.py           # OTLP ingest: /v1/logs, /v1/traces, /v1/metrics, /v1/rum, /v1/ai, /v1/errors
+│   ├── logs.py             # Logs UI + API: /logs, /api/logs/*
+│   ├── rum.py              # RUM UI + API: /rum, /api/rum/*
+│   ├── settings.py         # Settings pages: /settings/ai, /settings/enrichment, etc.
+│   └── traces.py           # Traces UI + API: /traces, /api/traces/*, /incident
 │
 ├── shared/                 # Shared utilities — no SOBS-specific imports
 │   ├── __init__.py         # Re-exports from sub-modules
@@ -31,13 +41,44 @@ sobs/
 ### `app.py`
 The main application file.  Contains:
 - Quart `app` object creation and middleware setup
-- All route handler functions (views, API endpoints, ingest handlers)
+- All helper functions (business logic, DB query builders, parsers, formatters)
 - Application-level background workers (write queue, anomaly detection, etc.)
 - Jinja2 template globals and context processors
+- Routes not yet migrated to Blueprint modules
 
-Import of config constants, shared utilities, and event types is done via
-the extracted modules below.  All extracted symbols are **re-exported** from
-`app.py` for full backwards compatibility.
+Route handlers are progressively being migrated to the `routes/` Blueprint layer
+(see below).  All extracted symbols are **re-exported** from `app.py` for full
+backwards compatibility.
+
+### `routes/` — Blueprint Route Modules
+
+Each module is a Quart Blueprint that owns a specific feature domain's HTTP routes.
+Route handlers use **deferred imports** (`from app import ... # noqa: PLC0415`)
+inside the function body to avoid circular imports, and apply auth decorators via
+the **inner-function pattern** (established by `mcp.py`):
+
+```python
+@ingest_bp.route("/v1/logs", methods=["POST"])
+async def ingest_logs():
+    from app import require_api_key, _parse_otlp_request, ...  # noqa: PLC0415
+
+    @require_api_key
+    async def _inner():
+        # ... handler body
+        return jsonify(...)
+
+    return await _inner()
+```
+
+| Module | Blueprint | Routes |
+|--------|-----------|--------|
+| `routes/ingest.py` | `ingest_bp` | `/v1/logs`, `/v1/traces`, `/v1/metrics`, `/v1/rum`, `/v1/ai`, `/v1/errors`, `/v1/rum/assets` |
+| `routes/apps.py` | `apps_bp` | `/v1/apps`, `/v1/releases` |
+| `routes/logs.py` | `logs_bp` | `/logs`, `/api/logs/*` |
+| `routes/errors.py` | `errors_bp` | `/errors`, `/api/errors/*` |
+| `routes/traces.py` | `traces_bp` | `/traces`, `/api/traces/*`, `/incident` |
+| `routes/rum.py` | `rum_bp` | `/rum`, `/api/rum/*` |
+| `routes/settings.py` | `settings_bp` | `/settings/ai`, `/settings/enrichment`, `/settings/repositories`, `/settings/agents` |
 
 ### `config.py`
 All environment-variable reading and runtime-constant derivation.  Provides:

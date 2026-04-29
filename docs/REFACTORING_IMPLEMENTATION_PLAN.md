@@ -133,6 +133,14 @@ tests/
 - [x] Verify no circular imports
 - [x] Add focused unit tests: `tests/test_config.py`, `tests/test_shared.py` (64 new tests)
 - [x] Create `docs/ARCHITECTURE.md`
+- [x] Create `routes/` Blueprint package (7 domain-specific Blueprint modules)
+  - [x] `routes/ingest.py` — OTLP + direct ingest (`/v1/logs`, `/v1/traces`, `/v1/metrics`, `/v1/rum`, `/v1/ai`, `/v1/errors`)
+  - [x] `routes/apps.py` — App/CI registry (`/v1/apps`, `/v1/releases`)
+  - [x] `routes/logs.py` — Logs UI + API (`/logs`, `/api/logs/*`)
+  - [x] `routes/errors.py` — Errors UI + API (`/errors`, `/api/errors/*`)
+  - [x] `routes/traces.py` — Traces UI + API (`/traces`, `/api/traces/*`, `/incident`)
+  - [x] `routes/rum.py` — RUM UI + API (`/rum`, `/api/rum/*`)
+  - [x] `routes/settings.py` — Settings pages (AI, enrichment, repositories, agents)
 - [ ] Extract `shared/utils.py` (timestamp, parsing, encoding helpers) — deferred to Phase 1b
 - [ ] Extract `shared/auth.py` (API key, Basic Auth decorators) — deferred (auth helpers depend on `get_db()`)
 - [ ] Create `database/`, `ai/`, `features/`, `agents/` directories — deferred to later phases
@@ -141,10 +149,12 @@ tests/
 - All tests pass ✅
 - No circular imports ✅
 - `config.py`, `shared/serialization.py`, `shared/events.py` independently importable ✅
+- ~3,400 lines of route handlers extracted from `app.py` into Blueprint modules ✅
 
 **Notes:**
 - `app.py` still re-exports all moved symbols for full backward compatibility
 - The `threading.Lock | None` annotation bug was fixed (affected Python 3.12; production uses Python 3.14)
+- Blueprint route handlers use the deferred-import + inner-function pattern from `mcp.py`
 
 ---
 
