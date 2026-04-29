@@ -408,17 +408,22 @@
   // they remain valid after a JBS component swap (sort/filter/page change).
   let tableContainer = document.querySelector('#logs-table .table-responsive');
   let tableBody = document.querySelector('#logs-table tbody');
-  const emptyState = null;  // JBS handles the empty state via empty_message param
   const advancedAnalysisBtn = document.getElementById("advancedAnalysisBtn");
   const statsPanel = document.getElementById("statsPanel");
   const statsSnapshotAge = document.getElementById("statsSnapshotAge");
   const statsSnapshotIso = {{ stats_generated_at_iso|tojson }};
 
   // Re-acquire tbody/tableContainer references after JBS swaps #logs-table.
+  // Also re-apply ANSI coloring to any newly rendered rows in the swapped fragment.
   document.addEventListener('jbs:after-swap', function (e) {
     if (e.target && e.target.id === 'logs-table') {
-      tableContainer = e.target.querySelector('.table-responsive');
-      tableBody = e.target.querySelector('tbody');
+      tableContainer = e.target.querySelector('.table-responsive') || null;
+      tableBody = e.target.querySelector('tbody') || null;
+      if (ansiCtx && ansiCtx.isEnabled()) {
+        e.target.querySelectorAll('.log-body-text').forEach(function (el) {
+          ansiCtx.applyToElement(el);
+        });
+      }
     }
   });
 
@@ -679,9 +684,6 @@
       tableBody.removeChild(tableBody.lastChild);
     }
 
-    if (emptyState) {
-      emptyState.classList.add("d-none");
-    }
     if (tableContainer) {
       tableContainer.classList.remove("d-none");
     }
