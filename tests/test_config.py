@@ -133,42 +133,42 @@ class TestReadFileOrEnv:
 class TestEncryptDecrypt:
     _PREFIX = "enc:v1:"
 
-    def _make_config_with_secret(self, monkeypatch, secret: str):
-        """Patch the module-level encryption secret and helpers."""
+    def _patch_encryption_secret(self, monkeypatch, secret: str):
+        """Patch only the module-level encryption secret."""
         monkeypatch.setattr(sobs_config, "_SETTINGS_ENCRYPTION_SECRET", secret)
 
     def test_no_encryption_without_secret(self, monkeypatch):
-        self._make_config_with_secret(monkeypatch, "")
+        self._patch_encryption_secret(monkeypatch, "")
         plaintext = "my_secret_value"
         assert sobs_config._encrypt_secret_value(plaintext) == plaintext
 
     def test_no_decryption_without_secret(self, monkeypatch):
-        self._make_config_with_secret(monkeypatch, "")
+        self._patch_encryption_secret(monkeypatch, "")
         # Must look like an encrypted value to trigger decryption path.
         fake_encrypted = self._PREFIX + "fake_token"
         assert sobs_config._decrypt_secret_value(fake_encrypted) == ""
 
     def test_empty_value_returned_unchanged(self, monkeypatch):
-        self._make_config_with_secret(monkeypatch, "test_key")
+        self._patch_encryption_secret(monkeypatch, "test_key")
         assert sobs_config._encrypt_secret_value("") == ""
         assert sobs_config._decrypt_secret_value("") == ""
 
     def test_roundtrip(self, monkeypatch):
-        self._make_config_with_secret(monkeypatch, "test_encryption_key_32_chars!!")
+        self._patch_encryption_secret(monkeypatch, "test_encryption_key_32_chars!!")
         plaintext = "super_secret_password"
         encrypted = sobs_config._encrypt_secret_value(plaintext)
         assert encrypted.startswith(self._PREFIX)
         assert sobs_config._decrypt_secret_value(encrypted) == plaintext
 
     def test_already_encrypted_not_double_encrypted(self, monkeypatch):
-        self._make_config_with_secret(monkeypatch, "test_encryption_key_32_chars!!")
+        self._patch_encryption_secret(monkeypatch, "test_encryption_key_32_chars!!")
         plaintext = "value"
         encrypted = sobs_config._encrypt_secret_value(plaintext)
         double = sobs_config._encrypt_secret_value(encrypted)
         assert double == encrypted
 
     def test_non_encrypted_value_returned_unchanged_on_decrypt(self, monkeypatch):
-        self._make_config_with_secret(monkeypatch, "test_encryption_key_32_chars!!")
+        self._patch_encryption_secret(monkeypatch, "test_encryption_key_32_chars!!")
         assert sobs_config._decrypt_secret_value("plain_text") == "plain_text"
 
 

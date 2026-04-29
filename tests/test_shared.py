@@ -5,7 +5,9 @@ Covers ``shared.serialization`` and ``shared.events`` (including
 ``_attr_fingerprint``).  No database or Quart application is required.
 """
 
+import base64
 import json
+import zlib
 
 import pytest
 
@@ -46,9 +48,6 @@ class TestSerialization:
         assert decompress("") == ""
 
     def test_decompress_bytes_input(self):
-        import base64
-        import zlib
-
         text = "test data"
         raw_bytes = zlib.compress(text.encode("utf-8"), level=9)
         assert decompress(raw_bytes) == text
@@ -210,9 +209,12 @@ class TestAttrFingerprint:
         assert len(fp) == 16
 
     def test_max_8_pairs(self):
-        # Build 10 pairs; result should be stable regardless of which are dropped
-        attrs_9 = {f"k{i}": str(i) for i in range(9)}
+        # Build 10 pairs; fingerprint should be computed from the first 8 sorted pairs only.
+        # Sorted order: k0, k1, k2, k3, k4, k5, k6, k7, k8, k9
+        # First 8: k0..k7 — adding k8 and k9 should not change the fingerprint.
+        attrs_8 = {f"k{i}": str(i) for i in range(8)}
         attrs_10 = {f"k{i}": str(i) for i in range(10)}
-        # Both should return a valid 16-char fingerprint
-        assert len(_attr_fingerprint(attrs_9)) == 16
+        # Adding k8 and k9 beyond the 8-pair cap should NOT change the fingerprint.
+        assert _attr_fingerprint(attrs_8) == _attr_fingerprint(attrs_10)
+        # Sanity: the result is still a valid 16-char fingerprint.
         assert len(_attr_fingerprint(attrs_10)) == 16
