@@ -1179,6 +1179,7 @@ async def mcp_api_create_key():
         body = await request.get_json(silent=True) or {}
         label = str(body.get("label", "")).strip()[:128] or "API Key"
         expires_at = body.get("expires_at")  # Optional ISO 8601 expiry date
+        created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         raw_key = "smcp_" + secrets.token_urlsafe(32)
         key_id = secrets.token_hex(8)
@@ -1187,12 +1188,21 @@ async def mcp_api_create_key():
                 "id": key_id,
                 "label": label,
                 "key_hash": _hash_key(raw_key),
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": created_at,
                 "expires_at": expires_at,
             }
         )
         _save_mcp_api_keys(db, keys)
-        return jsonify({"ok": True, "id": key_id, "key": raw_key, "label": label, "expires_at": expires_at})
+        return jsonify(
+            {
+                "ok": True,
+                "id": key_id,
+                "key": raw_key,
+                "label": label,
+                "created_at": created_at,
+                "expires_at": expires_at,
+            }
+        )
 
     return await _inner()
 

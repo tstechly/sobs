@@ -194,7 +194,7 @@
     <div class="mt-2 small text-secondary d-flex flex-wrap align-items-center gap-2">
       <span>Expiry alert threshold: {{ github_token_expiry_warning_days }} days</span>
       {% if github_token_validation_status.last_validated_at %}
-      <span>Last validated: <code>{{ github_token_validation_status.last_validated_at }}</code></span>
+      <span>Last validated: <code class="sobs-tz-ts" data-utc-ts="{{ github_token_validation_status.last_validated_at }}">{{ github_token_validation_status.last_validated_at[:19] }}</code></span>
       {% endif %}
       {% if github_token_validation_status.message %}
       <span>{{ github_token_validation_status.message }}</span>
@@ -468,6 +468,13 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+(function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>
 <script>
   (function () {
     var root = document.getElementById('repo-settings-root');

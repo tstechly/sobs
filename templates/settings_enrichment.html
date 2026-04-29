@@ -75,7 +75,7 @@
                 </div>
                 {% if cve_last_scan %}
                     <div class="mt-2 small text-secondary">
-                        <i class="bi bi-clock me-1"></i>Last scan: {{ cve_last_scan[:16] }}
+                        <i class="bi bi-clock me-1"></i>Last scan: <span class="sobs-tz-ts" data-utc-ts="{{ cve_last_scan }}">{{ cve_last_scan[:19] }}</span>
                     </div>
                 {% endif %}
                 <div class="mt-2 small text-secondary">
@@ -141,3 +141,10 @@
         </div>
     </form>
 {% endblock %}
+{% block scripts %}{{ super() }}<script>
+(function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>{% endblock %}

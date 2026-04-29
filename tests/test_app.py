@@ -6625,8 +6625,8 @@ class TestGenAICompliance:
         assert "trace-svc-b" in body
         assert "2 calls" in body
 
-    async def test_ai_view_trace_mode_operation_filter_keeps_trace_context(self, client):
-        """Trace mode operation filter should still show other GenAI calls within matching traces."""
+    async def test_ai_view_trace_mode_operation_filter_filters_trace_detail_rows(self, client):
+        """Trace mode operation filter should only show grouped detail rows that match the active filter."""
         trace_id = "trace-group-filter-xyz"
         r1 = await client.post(
             "/v1/ai",
@@ -6664,7 +6664,7 @@ class TestGenAICompliance:
         assert r3.status_code == 200
         body = await r3.get_data(as_text=True)
         assert "trace-chat-svc" in body
-        assert "trace-embed-svc" in body
+        assert "trace-embed-svc" not in body
 
     async def test_ai_view_trace_mode_has_full_detail_tabs(self, client):
         """Trace group mode should preserve full per-call detail tabs."""
@@ -17694,7 +17694,9 @@ class TestWebTraffic:
             html = (await r.get_data()).decode()
             assert "Security Overview (CVE)" in html
             assert "View All" in html
-            assert "Last scan: 2026-04-04T12:34:56" in html
+            assert "Last scan:" in html
+            assert 'class="sobs-tz-ts" data-utc-ts="2026-04-04T12:34:56Z"' in html
+            assert "timestampSelector: '.sobs-tz-ts[data-utc-ts]'" in html
         finally:
             sobs_app._set_app_setting(db, sobs_app._CVE_ENABLED_SETTING, old_enabled or "true")
             sobs_app._set_app_setting(db, sobs_app._CVE_LAST_SCAN_SETTING, old_last_scan or "")
@@ -20399,6 +20401,9 @@ class TestDataManagementSettings:
         assert "ClickHouse TTL" in text
         assert "S3 Backup" in text
         assert "TTL" in text and "Backup" in text
+        tz_helper_idx = text.index("sobs-timezone.js")
+        tz_init_idx = text.index("window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });")
+        assert tz_helper_idx < tz_init_idx
 
     async def test_data_management_settings_page_shows_restore_visibility_hint_when_disabled(self, client):
         """When backup is disabled, page should explain why restore UI is hidden."""
@@ -22044,6 +22049,9 @@ class TestOnboardingWizard:
         body = sobs_app._build_ci_metadata_issue_body("myorg", "myrepo", has_github_actions=True)
         assert "Register a release" in body
         assert "Upload dependency lockfile" in body
+        assert "actions/upload-artifact" in body
+        assert "include-hidden-files: true" in body
+        assert "Fail CI early if any expected dependency snapshot file is missing or empty" in body
         assert "Upload JS source maps" in body
         assert "Trigger a CVE scan" in body
         assert "myorg/myrepo" in body

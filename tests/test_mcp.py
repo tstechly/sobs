@@ -791,6 +791,8 @@ class TestMcpKeyManagementApi:
         assert "key" in data
         assert data["key"].startswith("smcp_")
         assert data["label"] == "my-copilot-key"
+        assert data["created_at"].endswith("Z")
+        assert "T" in data["created_at"]
         _clear_mcp_keys(db)
 
     async def test_delete_key_removes_it(self, client):
@@ -960,6 +962,8 @@ class TestMcpSettingsPage:
         html = (await r.get_data()).decode()
         assert "MCP" in html
         assert "API Keys" in html
+        assert "function initTimezonePage()" in html
+        assert "window.addEventListener('load', initTimezonePage, { once: true });" in html
 
     async def test_settings_page_shows_mcp_card(self, client):
         r = await client.get("/settings")

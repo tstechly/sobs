@@ -33,6 +33,7 @@ import zipfile
 import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
@@ -67,6 +68,7 @@ from quart import (
 
 import masking as _masking
 import mcp as _mcp
+import telemetry as _telemetry
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -322,6 +324,7 @@ async def _get_async_http_client() -> httpx.AsyncClient:
 async def _startup_async_http_client() -> None:
     await _get_async_http_client()
     _warn_unimplemented_ai_action_annotations()
+    _telemetry.configure_telemetry(app=app)
 
 
 @app.after_serving
@@ -1995,23 +1998,32 @@ class ChDbConnection:
             raise
 
     def execute(self, query: str, params=None):
+        query_name = _classify_chdb_query_name(query)
         _last_exc: Exception | None = None
-        for _attempt in range(2):
-            try:
-                with self._lock:
-                    cur = self._conn.cursor()
-                    if params:
-                        cur.execute(query, params)
-                    else:
-                        cur.execute(query)
-                    columns = [d[0] for d in (cur.description or [])]
-                    rows = cur.fetchall() or []
-                return ChDbResult(columns, rows)
-            except Exception as exc:
-                _last_exc = exc
-                if _attempt == 0:
-                    log.warning("chDB: transient query error (will retry): %s", exc)
-                    time.sleep(0.05)
+        with (
+            _telemetry.span(
+                "sobs.storage.query",
+                **{"storage.engine": "chdb", "query.name": query_name},
+            )
+            if query_name
+            else nullcontext()
+        ):
+            for _attempt in range(2):
+                try:
+                    with self._lock:
+                        cur = self._conn.cursor()
+                        if params:
+                            cur.execute(query, params)
+                        else:
+                            cur.execute(query)
+                        columns = [d[0] for d in (cur.description or [])]
+                        rows = cur.fetchall() or []
+                    return ChDbResult(columns, rows)
+                except Exception as exc:
+                    _last_exc = exc
+                    if _attempt == 0:
+                        log.warning("chDB: transient query error (will retry): %s", exc)
+                        time.sleep(0.05)
         assert _last_exc is not None
         raise _last_exc
 
@@ -2031,6 +2043,16 @@ class ChDbConnection:
                 return
             self._conn.close()
             self._closed = True
+
+
+def _classify_chdb_query_name(query: str) -> str:
+    raw_query = (query or "").lstrip()
+    if not raw_query:
+        return ""
+    query_name = raw_query.split(None, 1)[0].upper()
+    if query_name in {"SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN"}:
+        return query_name
+    return ""
 
 
 _global_db: ChDbConnection | None = None
@@ -8767,7 +8789,10 @@ def _insert_rows_json_each_row(db, table_name: str, rows: list[dict]) -> int:
             item["Events"]["Timestamp"] = [_normalize_ch_timestamp(v) for v in item["Events"]["Timestamp"]]
         normalized_rows.append(item)
     payload = "\n".join(json.dumps(row, ensure_ascii=False) for row in normalized_rows)
-    db.execute(f"INSERT INTO {table_name} FORMAT JSONEachRow\n" + payload)
+    with _telemetry.span(
+        "sobs.storage.write", **{"storage.engine": "chdb", "table": table_name, "row.count": len(normalized_rows)}
+    ):
+        db.execute(f"INSERT INTO {table_name} FORMAT JSONEachRow\n" + payload)
     return len(normalized_rows)
 
 
@@ -9643,31 +9668,35 @@ async def ingest_preflight():
 @app.route("/v1/logs", methods=["POST"])
 @require_api_key
 async def ingest_logs():
-    msg, err = await _parse_otlp_request(ExportLogsServiceRequest)
-    if err:
-        return err
-    events = _proto_logs_to_events(msg)
-    wait = bool(app.config.get("TESTING", False))
-    try:
-        _queue_write(lambda db: _insert_log_events(db, events), wait=wait)
-    except WriteQueueFullError:
-        return _json_error("write queue is full", 503)
-    except Exception:
-        app.logger.exception("log ingest write failed")
-        return _json_error("log ingest write failed", 500)
-    for event in events:
-        await _sse_broadcast(
-            {
-                "source": "logs",
-                "ts": event.ts,
-                "level": event.level,
-                "service": event.service,
-                "body": event.body,
-                "trace_id": event.trace_id,
-            }
-        )
-    count = len(events)
-    return jsonify({"accepted": count}), 200
+    with _telemetry.span("sobs.ingest.request", route="/v1/logs", **{"event.type": "log"}):
+        msg, err = await _parse_otlp_request(ExportLogsServiceRequest)
+        if err:
+            return err
+        with _telemetry.span("sobs.ingest.parse", **{"event.type": "log", "parser": "otlp"}):
+            events = _proto_logs_to_events(msg)
+        wait = bool(app.config.get("TESTING", False))
+        try:
+            _queue_write(lambda db: _insert_log_events(db, events), wait=wait)
+        except WriteQueueFullError:
+            return _json_error("write queue is full", 503)
+        except Exception:
+            app.logger.exception("log ingest write failed")
+            return _json_error("log ingest write failed", 500)
+        for event in events:
+            await _sse_broadcast(
+                {
+                    "source": "logs",
+                    "ts": event.ts,
+                    "level": event.level,
+                    "service": event.service,
+                    "body": event.body,
+                    "trace_id": event.trace_id,
+                }
+            )
+        count = len(events)
+        _telemetry.record_ingest_events(count, "log")
+        _telemetry.record_ingest_batch_size(count, "log")
+        return jsonify({"accepted": count}), 200
 
 
 @app.route("/v1/rum/assets", methods=["POST"])
@@ -9808,56 +9837,60 @@ async def issue_rum_client_token():
 @app.route("/v1/traces", methods=["POST"])
 @require_api_key
 async def ingest_traces():
-    msg, err = await _parse_otlp_request(ExportTraceServiceRequest)
-    if err:
-        return err
-    span_events, error_events = _proto_traces_to_events(msg)
-    wait = bool(app.config.get("TESTING", False))
+    with _telemetry.span("sobs.ingest.request", route="/v1/traces", **{"event.type": "trace"}):
+        msg, err = await _parse_otlp_request(ExportTraceServiceRequest)
+        if err:
+            return err
+        with _telemetry.span("sobs.ingest.parse", **{"event.type": "trace", "parser": "otlp"}):
+            span_events, error_events = _proto_traces_to_events(msg)
+        wait = bool(app.config.get("TESTING", False))
 
-    def _op(db: ChDbConnection) -> None:
-        _insert_span_events(db, span_events)
-        _insert_error_events(db, error_events)
+        def _op(db: ChDbConnection) -> None:
+            _insert_span_events(db, span_events)
+            _insert_error_events(db, error_events)
 
-    try:
-        _queue_write(_op, wait=wait)
-    except WriteQueueFullError:
-        return _json_error("write queue is full", 503)
-    except Exception:
-        app.logger.exception("trace ingest write failed")
-        return _json_error("trace ingest write failed", 500)
-    for event in span_events:
-        await _sse_broadcast(
-            {
-                "source": "traces",
-                "ts": event.ts,
-                "trace_id": event.trace_id,
-                "span_id": event.span_id,
-                "name": event.name,
-                "service": event.service,
-                "duration_ms": event.duration_ms,
-                "status": event.status,
-            }
-        )
-        # Also broadcast as an AI event when the span carries GenAI attributes
-        provider = event.attrs.get("gen_ai.provider.name") or event.attrs.get("gen_ai.system", "")
-        operation_name = str(event.attrs.get("gen_ai.operation.name", ""))
-        if provider or operation_name:
+        try:
+            _queue_write(_op, wait=wait)
+        except WriteQueueFullError:
+            return _json_error("write queue is full", 503)
+        except Exception:
+            app.logger.exception("trace ingest write failed")
+            return _json_error("trace ingest write failed", 500)
+        for event in span_events:
             await _sse_broadcast(
                 {
-                    "source": "ai",
+                    "source": "traces",
                     "ts": event.ts,
                     "trace_id": event.trace_id,
                     "span_id": event.span_id,
+                    "name": event.name,
                     "service": event.service,
-                    "provider": provider,
-                    "model": str(event.attrs.get("gen_ai.request.model", "")),
-                    "operation": str(event.attrs.get("gen_ai.operation.name", "")),
                     "duration_ms": event.duration_ms,
                     "status": event.status,
                 }
             )
-    count = len(span_events)
-    return jsonify({"accepted": count}), 200
+            # Also broadcast as an AI event when the span carries GenAI attributes
+            provider = event.attrs.get("gen_ai.provider.name") or event.attrs.get("gen_ai.system", "")
+            operation_name = str(event.attrs.get("gen_ai.operation.name", ""))
+            if provider or operation_name:
+                await _sse_broadcast(
+                    {
+                        "source": "ai",
+                        "ts": event.ts,
+                        "trace_id": event.trace_id,
+                        "span_id": event.span_id,
+                        "service": event.service,
+                        "provider": provider,
+                        "model": str(event.attrs.get("gen_ai.request.model", "")),
+                        "operation": str(event.attrs.get("gen_ai.operation.name", "")),
+                        "duration_ms": event.duration_ms,
+                        "status": event.status,
+                    }
+                )
+        count = len(span_events)
+        _telemetry.record_ingest_events(count, "trace")
+        _telemetry.record_ingest_batch_size(count, "trace")
+        return jsonify({"accepted": count}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -9866,24 +9899,28 @@ async def ingest_traces():
 @app.route("/v1/metrics", methods=["POST"])
 @require_api_key
 async def ingest_metrics():
-    msg, err = await _parse_otlp_request(ExportMetricsServiceRequest)
-    if err:
-        return err
-    try:
-        events = _proto_metrics_to_events(msg)
-    except Exception:
-        app.logger.exception("failed to convert metrics protobuf to events")
-        return _json_error("failed to convert metrics protobuf to events", 500)
-    wait = bool(app.config.get("TESTING", False))
-    try:
-        _queue_write(lambda db: _insert_metric_events(db, events), wait=wait)
-    except WriteQueueFullError:
-        return _json_error("write queue is full", 503)
-    except Exception:
-        app.logger.exception("metric ingest write failed")
-        return _json_error("metric ingest write failed", 500)
-    count = len(events)
-    return jsonify({"accepted": count}), 200
+    with _telemetry.span("sobs.ingest.request", route="/v1/metrics", **{"event.type": "metric"}):
+        msg, err = await _parse_otlp_request(ExportMetricsServiceRequest)
+        if err:
+            return err
+        try:
+            with _telemetry.span("sobs.ingest.parse", **{"event.type": "metric", "parser": "otlp"}):
+                events = _proto_metrics_to_events(msg)
+        except Exception:
+            app.logger.exception("failed to convert metrics protobuf to events")
+            return _json_error("failed to convert metrics protobuf to events", 500)
+        wait = bool(app.config.get("TESTING", False))
+        try:
+            _queue_write(lambda db: _insert_metric_events(db, events), wait=wait)
+        except WriteQueueFullError:
+            return _json_error("write queue is full", 503)
+        except Exception:
+            app.logger.exception("metric ingest write failed")
+            return _json_error("metric ingest write failed", 500)
+        count = len(events)
+        _telemetry.record_ingest_events(count, "metric")
+        _telemetry.record_ingest_batch_size(count, "metric")
+        return jsonify({"accepted": count}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -10111,7 +10148,10 @@ async def ingest_rum():
     except Exception:
         app.logger.exception("rum ingest write failed")
         return _json_error("rum ingest write failed", 500)
-    return jsonify({"accepted": len(session_rows)}), 200
+    count = len(session_rows)
+    _telemetry.record_ingest_events(count, "rum")
+    _telemetry.record_ingest_batch_size(count, "rum")
+    return jsonify({"accepted": count}), 200
 
 
 # ---------------------------------------------------------------------------
@@ -10256,6 +10296,7 @@ async def ingest_errors():
     except Exception:
         app.logger.exception("error ingest write failed")
         return _json_error("error ingest write failed", 500)
+    _telemetry.record_ingest_events(1, "error")
     return jsonify({"ok": True}), 200
 
 
@@ -11199,6 +11240,7 @@ def _append_regex_expression_clauses(
 
 @app.route("/logs")
 @require_basic_auth
+@_telemetry.traced_view("sobs.dashboard.query", **{"dashboard.name": "logs", "route": "/logs"})
 async def view_logs():
     db = get_db()
     q = request.args.get("q", "").strip()
@@ -12746,47 +12788,51 @@ def _apply_tag_rules(
     """Apply tag rules to ingested rows and write matching tags to sobs_record_tags."""
     if not rules or not rows_data:
         return
-    tag_rows = []
-    version = int(time.time() * 1000)
-    for row in rows_data:
-        service = str(row.get("ServiceName", "") or "")
-        severity = str(row.get("SeverityText", "") or "")
-        body = str(row.get("Body", "") or "")
-        attrs = row.get("LogAttributes") or row.get("SpanAttributes") or {}
-        if not isinstance(attrs, dict):
-            attrs = {}
-        span_name = str(row.get("SpanName", "") or "")
-        event_type = str(row.get("EventName", "") or "")
-        trace_id = str(row.get("TraceId", "") or "")
-        span_id = str(row.get("SpanId", "") or "")
-        ts = str(row.get("Timestamp", "") or "")
+    with _telemetry.span(
+        "sobs.rules.evaluate",
+        **{"rule.count": len(rules), "event.count": len(rows_data)},
+    ):
+        tag_rows = []
+        version = int(time.time() * 1000)
+        for row in rows_data:
+            service = str(row.get("ServiceName", "") or "")
+            severity = str(row.get("SeverityText", "") or "")
+            body = str(row.get("Body", "") or "")
+            attrs = row.get("LogAttributes") or row.get("SpanAttributes") or {}
+            if not isinstance(attrs, dict):
+                attrs = {}
+            span_name = str(row.get("SpanName", "") or "")
+            event_type = str(row.get("EventName", "") or "")
+            trace_id = str(row.get("TraceId", "") or "")
+            span_id = str(row.get("SpanId", "") or "")
+            ts = str(row.get("Timestamp", "") or "")
 
-        if record_type in ("trace", "ai"):
-            record_id = _record_id_for_span(trace_id, span_id)
-        else:
-            record_id = _record_id_for_log(ts, service, trace_id, span_id)
+            if record_type in ("trace", "ai"):
+                record_id = _record_id_for_span(trace_id, span_id)
+            else:
+                record_id = _record_id_for_log(ts, service, trace_id, span_id)
 
-        # Keep one value per tag key per record. If multiple rules match the same
-        # key, last matching rule wins (deterministic by rule order).
-        matched_by_key: dict[str, str] = {}
-        for rule in rules:
-            if _match_tag_rule(rule, record_type, service, severity, body, attrs, span_name, event_type):
-                matched_by_key[str(rule["tag_key"])] = str(rule["tag_value"])
-        for tag_key, tag_value in matched_by_key.items():
-            tag_rows.append(
-                {
-                    "RecordType": record_type,
-                    "RecordId": record_id,
-                    "TagKey": tag_key,
-                    "TagValue": tag_value,
-                    "IsAuto": 1,
-                    "IsDeleted": 0,
-                    "Version": version,
-                }
-            )
-            version += 1
-    if tag_rows:
-        _insert_rows_json_each_row(db, "sobs_record_tags", tag_rows)
+            # Keep one value per tag key per record. If multiple rules match the same
+            # key, last matching rule wins (deterministic by rule order).
+            matched_by_key: dict[str, str] = {}
+            for rule in rules:
+                if _match_tag_rule(rule, record_type, service, severity, body, attrs, span_name, event_type):
+                    matched_by_key[str(rule["tag_key"])] = str(rule["tag_value"])
+            for tag_key, tag_value in matched_by_key.items():
+                tag_rows.append(
+                    {
+                        "RecordType": record_type,
+                        "RecordId": record_id,
+                        "TagKey": tag_key,
+                        "TagValue": tag_value,
+                        "IsAuto": 1,
+                        "IsDeleted": 0,
+                        "Version": version,
+                    }
+                )
+                version += 1
+        if tag_rows:
+            _insert_rows_json_each_row(db, "sobs_record_tags", tag_rows)
 
 
 def _get_record_tags(db: ChDbConnection, record_type: str, record_id: str) -> list[dict]:
@@ -13405,6 +13451,7 @@ async def jbs_static_js():
 # ---------------------------------------------------------------------------
 @app.route("/metrics")
 @require_basic_auth
+@_telemetry.traced_view("sobs.dashboard.query", **{"dashboard.name": "metrics", "route": "/metrics"})
 async def view_metrics():
     db = get_db()
     selected_services = [svc.strip() for svc in request.args.getlist("service") if svc.strip()]
@@ -14184,6 +14231,7 @@ def _load_work_item_links_for_ref_ids(db: ChDbConnection, ref_ids: list[str]) ->
 
 @app.route("/errors")
 @require_basic_auth
+@_telemetry.traced_view("sobs.dashboard.query", **{"dashboard.name": "errors", "route": "/errors"})
 async def view_errors():
     db = get_db()
     error_id_sql = _error_id_sql_expr()
@@ -15285,6 +15333,7 @@ def _fetch_trace_metric_context(
 
 @app.route("/traces")
 @require_basic_auth
+@_telemetry.traced_view("sobs.dashboard.query", **{"dashboard.name": "traces", "route": "/traces"})
 async def view_traces():
     db = get_db()
     error_id_sql = _error_id_sql_expr()
@@ -19040,12 +19089,12 @@ async def view_ai():
                 trace_ids = [str(r["TraceId"]) for r in trace_rows if str(r["TraceId"])]
                 if trace_ids:
                     placeholders = ",".join(["?"] * len(trace_ids))
+                    detail_where = f"{trace_where} AND TraceId IN ({placeholders})"
                     rows = db.execute(
                         f"SELECT Timestamp, ServiceName, TraceId, SpanName, Duration, SpanAttributes "
-                        f"FROM otel_traces WHERE TraceId IN ({placeholders}) "
-                        f"AND {_AI_SPAN_CONDITION} "
+                        f"FROM otel_traces {detail_where} "
                         "ORDER BY Timestamp ASC",
-                        trace_ids,
+                        params + trace_ids,
                     ).fetchall()
             else:
                 total = db.execute(f"SELECT COUNT(*) FROM otel_traces {where}", params).fetchone()[0]
@@ -33515,6 +33564,11 @@ extract resolved dependency snapshots from the built container image for each
 target architecture (for example linux/amd64 and linux/arm64), then register
 each snapshot with provenance fields (size/checksum/storageRef/platform/architecture):
 
+For GitHub Actions, prefer a visible artifact directory/path for dependency
+snapshots (for example `sobs-release/pip-freeze-linux-amd64.txt`). Hidden
+directories such as `.sobs-release/` are excluded by `actions/upload-artifact`
+unless `include-hidden-files: true` is set explicitly.
+
 ```bash
 curl -sS -X POST "${{SOBS_URL}}/v1/releases/${{RELEASE_ID}}/artifacts/meta" \\
         -H "X-API-Key: ${{SOBS_INGEST_API_KEY}}" \\
@@ -33542,6 +33596,10 @@ Dependency capture requirements:
 - Derive snapshots from the built/published container image, not from a host-only
     resolver run.
 - Track per-arch snapshots independently for multi-arch releases.
+- Fail CI early if any expected dependency snapshot file is missing or empty
+    before artifact upload and metadata registration.
+- Verify the dependency snapshot artifact upload succeeds before release/artifact
+    registration continues.
 - Include provenance fields (`storageRef`, `checksumSha256`, `size`, `platform`,
   `architecture`) on every dependency artifact.
 
@@ -33617,6 +33675,7 @@ Recommended correlation keys:
 
 - Confirm first pushed release appears in Sobs
 - Confirm lockfile artifact metadata is visible for each architecture
+- Confirm dependency snapshot artifacts upload successfully from non-hidden CI paths
 - Confirm dependency artifacts include provenance fields (size/checksum/storageRef/platform/architecture)
 - Confirm release version matches OTEL `service.version`
 - Confirm CVE findings reflect the container-derived dependency snapshots

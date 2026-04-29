@@ -247,7 +247,7 @@
         {% for run in runs %}
         {% if not run.is_dismissed %}
         <tr>
-          <td class="small font-monospace text-secondary" style="white-space:nowrap;" data-label="Time">{{ run.created_at[:19] }}</td>
+          <td class="small font-monospace text-secondary" style="white-space:nowrap;" data-label="Time"><span class="sobs-tz-ts" data-utc-ts="{{ run.created_at }}">{{ run.created_at[:19] }}</span></td>
           <td class="small" data-label="Rule">{{ run.rule_name }}</td>
           <td data-label="Status">
             <span class="badge
@@ -318,6 +318,13 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+(function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>
 <script>
 (function () {
   var triggerUrl = '{{ url_for("trigger_agent_run") }}';

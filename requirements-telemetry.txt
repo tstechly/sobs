@@ -1,0 +1,14 @@
+# Optional OpenTelemetry dependencies for Sobs self-telemetry.
+#
+# Install with:
+#   pip install -r requirements-telemetry.txt
+#
+# These packages are NOT required for normal Sobs operation.
+# Telemetry is disabled by default (SOBS_TELEMETRY_ENABLED=false).
+#
+# See docs/telemetry.md for configuration and usage instructions.
+
+opentelemetry-api>=1.41.1
+opentelemetry-sdk>=1.41.1
+opentelemetry-exporter-otlp>=1.41.1
+opentelemetry-instrumentation-asgi>=0.62b1

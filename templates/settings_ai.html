@@ -200,7 +200,7 @@
             Used only by agent flows for issue creation. CVE/enrichment repo sources are managed in
             <a href="{{ url_for('view_settings_repositories') }}">GitHub Repositories</a>.
             {% if github_token_validation_status.status %}
-              Last validation: {{ github_token_validation_status.status }}{% if github_token_validation_status.last_validated_at %} ({{ github_token_validation_status.last_validated_at }}){% endif %}.
+              Last validation: {{ github_token_validation_status.status }}{% if github_token_validation_status.last_validated_at %} (<span class="sobs-tz-ts" data-utc-ts="{{ github_token_validation_status.last_validated_at }}">{{ github_token_validation_status.last_validated_at[:19] }}</span>){% endif %}.
             {% endif %}
           </div>
         </div>
@@ -335,6 +335,13 @@
 </div>
 {% endblock %}
 {% block scripts %}{{ super() }}<script>
+(function () {
+  if (window.sobsTimezone && typeof window.sobsTimezone.initPage === 'function') {
+    window.sobsTimezone.initPage({ timestampSelector: '.sobs-tz-ts[data-utc-ts]' });
+  }
+})();
+</script>
+<script>
 (function () {
   var savedPricing = {{ saved_ai_pricing | tojson }};
   var pricingSources = {{ ai_pricing_sources | tojson }};
