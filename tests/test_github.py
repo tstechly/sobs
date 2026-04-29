@@ -79,6 +79,49 @@ def _make_fake_http_client(response_map: dict[str, Any]) -> Any:
     return _FakeClient()
 
 
+def _make_work_item_row(**overrides: Any) -> dict[str, Any]:
+    """Return a minimal valid work-item row dict for serialization tests.
+
+    All fields are set to safe defaults; pass keyword arguments to override any.
+    """
+    defaults: dict[str, Any] = {
+        "Id": "",
+        "CreatedAt": "2025-01-15 12:00:00.000000",
+        "CompletedAt": "",
+        "AgentRuleId": "",
+        "AgentRuleName": "",
+        "AgentAction": "",
+        "ServiceName": "",
+        "AnomalyRuleId": "",
+        "AnomalyState": "",
+        "SignalSource": "",
+        "SignalName": "",
+        "SignalValue": 0.0,
+        "GithubRepo": "",
+        "DedupKey": "",
+        "DedupDecision": "",
+        "DedupConfidence": 0.0,
+        "IssueNumber": 0,
+        "IssueUrl": "",
+        "CanonicalIssueNumber": 0,
+        "CanonicalIssueUrl": "",
+        "RelatedIssueUrls": "[]",
+        "OccurrenceCount": 1,
+        "IssueState": "",
+        "IssueTitle": "",
+        "AnalysisSummary": "",
+        "SuggestionSummary": "",
+        "CopilotAssignmentRequestedAt": 0,
+        "CopilotAssignmentStatus": "not_requested",
+        "CopilotAssignmentReason": "",
+        "PrLinked": 0,
+        "PrNumber": 0,
+        "PrUrl": "",
+    }
+    defaults.update(overrides)
+    return defaults
+
+
 # ---------------------------------------------------------------------------
 # Pure helper tests
 # ---------------------------------------------------------------------------
@@ -287,40 +330,31 @@ class TestBuildAgentIssueTitle:
 
 class TestSerializeGithubWorkItemRow:
     def test_serializes_flat_row(self) -> None:
-        row = {
-            "Id": "abc123",
-            "CreatedAt": "2025-01-15 12:00:00.000000",
-            "CompletedAt": "2025-01-15 12:01:00.000000",
-            "AgentRuleId": "rule1",
-            "AgentRuleName": "My Rule",
-            "AgentAction": "github_issue",
-            "ServiceName": "checkout",
-            "AnomalyRuleId": "ar1",
-            "AnomalyState": "critical",
-            "SignalSource": "metrics",
-            "SignalName": "latency",
-            "SignalValue": 1.5,
-            "GithubRepo": "acme/checkout",
-            "DedupKey": "key1",
-            "DedupDecision": "new_issue",
-            "DedupConfidence": 0.9,
-            "IssueNumber": 42,
-            "IssueUrl": "https://github.com/acme/checkout/issues/42",
-            "CanonicalIssueNumber": 42,
-            "CanonicalIssueUrl": "https://github.com/acme/checkout/issues/42",
-            "RelatedIssueUrls": "[]",
-            "OccurrenceCount": 1,
-            "IssueState": "open",
-            "IssueTitle": "Test issue",
-            "AnalysisSummary": "Something broke",
-            "SuggestionSummary": "Fix it",
-            "CopilotAssignmentRequestedAt": 0,
-            "CopilotAssignmentStatus": "not_requested",
-            "CopilotAssignmentReason": "",
-            "PrLinked": 0,
-            "PrNumber": 0,
-            "PrUrl": "",
-        }
+        row = _make_work_item_row(
+            Id="abc123",
+            CompletedAt="2025-01-15 12:01:00.000000",
+            AgentRuleId="rule1",
+            AgentRuleName="My Rule",
+            AgentAction="github_issue",
+            ServiceName="checkout",
+            AnomalyRuleId="ar1",
+            AnomalyState="critical",
+            SignalSource="metrics",
+            SignalName="latency",
+            SignalValue=1.5,
+            GithubRepo="acme/checkout",
+            DedupKey="key1",
+            DedupDecision="new_issue",
+            DedupConfidence=0.9,
+            IssueNumber=42,
+            IssueUrl="https://github.com/acme/checkout/issues/42",
+            CanonicalIssueNumber=42,
+            CanonicalIssueUrl="https://github.com/acme/checkout/issues/42",
+            IssueState="open",
+            IssueTitle="Test issue",
+            AnalysisSummary="Something broke",
+            SuggestionSummary="Fix it",
+        )
         result = gh._serialize_github_work_item_row(row)
         assert result["id"] == "abc123"
         assert result["service"] == "checkout"
@@ -330,23 +364,7 @@ class TestSerializeGithubWorkItemRow:
         assert isinstance(result["related_issue_urls"], list)
 
     def test_related_issue_urls_deserialized(self) -> None:
-        row = {k: "" for k in ["Id", "AgentRuleId", "AgentRuleName", "AgentAction", "ServiceName",
-                                "AnomalyRuleId", "AnomalyState", "SignalSource", "SignalName",
-                                "GithubRepo", "DedupKey", "DedupDecision", "IssueUrl",
-                                "CanonicalIssueUrl", "IssueState", "IssueTitle", "AnalysisSummary",
-                                "SuggestionSummary", "CopilotAssignmentStatus", "CopilotAssignmentReason",
-                                "PrUrl", "CreatedAt", "CompletedAt"]}
-        row.update({
-            "RelatedIssueUrls": '["https://github.com/a/b/issues/1"]',
-            "SignalValue": 0.0,
-            "DedupConfidence": 0.0,
-            "IssueNumber": 0,
-            "CanonicalIssueNumber": 0,
-            "OccurrenceCount": 1,
-            "CopilotAssignmentRequestedAt": 0,
-            "PrLinked": 0,
-            "PrNumber": 0,
-        })
+        row = _make_work_item_row(RelatedIssueUrls='["https://github.com/a/b/issues/1"]')
         result = gh._serialize_github_work_item_row(row)
         assert result["related_issue_urls"] == ["https://github.com/a/b/issues/1"]
 
@@ -1229,61 +1247,24 @@ class TestExtractAgentTriggerFieldsEdgeCases:
 class TestSerializeGithubWorkItemRowEdgeCases:
     def test_datetime_object_in_created_at(self) -> None:
         from datetime import datetime, timezone
-        row = {
-            "Id": "x",
-            "CreatedAt": datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-            "CompletedAt": "",
-            "AgentRuleId": "", "AgentRuleName": "", "AgentAction": "",
-            "ServiceName": "", "AnomalyRuleId": "", "AnomalyState": "",
-            "SignalSource": "", "SignalName": "", "SignalValue": 0.0,
-            "GithubRepo": "", "DedupKey": "", "DedupDecision": "",
-            "DedupConfidence": 0.0, "IssueNumber": 0, "IssueUrl": "",
-            "CanonicalIssueNumber": 0, "CanonicalIssueUrl": "",
-            "RelatedIssueUrls": "[]", "OccurrenceCount": 1,
-            "IssueState": "", "IssueTitle": "", "AnalysisSummary": "",
-            "SuggestionSummary": "", "CopilotAssignmentRequestedAt": 0,
-            "CopilotAssignmentStatus": "not_requested", "CopilotAssignmentReason": "",
-            "PrLinked": 0, "PrNumber": 0, "PrUrl": "",
-        }
+        row = _make_work_item_row(
+            Id="x",
+            CreatedAt=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+        )
         result = gh._serialize_github_work_item_row(row)
         assert "2025-01-15" in result["created_at"]
 
     def test_iso_timestamp_with_z_suffix(self) -> None:
-        row = {
-            "Id": "x", "CreatedAt": "2025-01-15T12:00:00.000Z", "CompletedAt": "",
-            "AgentRuleId": "", "AgentRuleName": "", "AgentAction": "",
-            "ServiceName": "", "AnomalyRuleId": "", "AnomalyState": "",
-            "SignalSource": "", "SignalName": "", "SignalValue": 0.0,
-            "GithubRepo": "", "DedupKey": "", "DedupDecision": "",
-            "DedupConfidence": 0.0, "IssueNumber": 0, "IssueUrl": "",
-            "CanonicalIssueNumber": 0, "CanonicalIssueUrl": "",
-            "RelatedIssueUrls": "[]", "OccurrenceCount": 1,
-            "IssueState": "", "IssueTitle": "", "AnalysisSummary": "",
-            "SuggestionSummary": "", "CopilotAssignmentRequestedAt": 0,
-            "CopilotAssignmentStatus": "not_requested", "CopilotAssignmentReason": "",
-            "PrLinked": 0, "PrNumber": 0, "PrUrl": "",
-        }
+        row = _make_work_item_row(Id="x", CreatedAt="2025-01-15T12:00:00.000Z")
         result = gh._serialize_github_work_item_row(row)
         assert result["created_at"].endswith("Z")
 
     def test_naive_datetime_treated_as_utc(self) -> None:
         from datetime import datetime
-        row = {
-            "Id": "x",
-            "CreatedAt": datetime(2025, 6, 1, 10, 30, 0),  # naive (no tzinfo)
-            "CompletedAt": "",
-            "AgentRuleId": "", "AgentRuleName": "", "AgentAction": "",
-            "ServiceName": "", "AnomalyRuleId": "", "AnomalyState": "",
-            "SignalSource": "", "SignalName": "", "SignalValue": 0.0,
-            "GithubRepo": "", "DedupKey": "", "DedupDecision": "",
-            "DedupConfidence": 0.0, "IssueNumber": 0, "IssueUrl": "",
-            "CanonicalIssueNumber": 0, "CanonicalIssueUrl": "",
-            "RelatedIssueUrls": "[]", "OccurrenceCount": 1,
-            "IssueState": "", "IssueTitle": "", "AnalysisSummary": "",
-            "SuggestionSummary": "", "CopilotAssignmentRequestedAt": 0,
-            "CopilotAssignmentStatus": "not_requested", "CopilotAssignmentReason": "",
-            "PrLinked": 0, "PrNumber": 0, "PrUrl": "",
-        }
+        row = _make_work_item_row(
+            Id="x",
+            CreatedAt=datetime(2025, 6, 1, 10, 30, 0),  # naive (no tzinfo)
+        )
         result = gh._serialize_github_work_item_row(row)
         assert "2025-06-01" in result["created_at"]
 
@@ -1827,20 +1808,7 @@ class TestJsonDumpsEdgeCases:
 class TestSerializeGithubWorkItemRowTimestamps:
     def test_invalid_datetime_string_returns_raw(self) -> None:
         """When fromisoformat raises ValueError, the raw string is returned."""
-        row = {
-            "Id": "", "CreatedAt": "not-a-valid-timestamp", "CompletedAt": "",
-            "AgentRuleId": "", "AgentRuleName": "", "AgentAction": "",
-            "ServiceName": "", "AnomalyRuleId": "", "AnomalyState": "",
-            "SignalSource": "", "SignalName": "", "SignalValue": 0.0,
-            "GithubRepo": "", "DedupKey": "", "DedupDecision": "",
-            "DedupConfidence": 0.0, "IssueNumber": 0, "IssueUrl": "",
-            "CanonicalIssueNumber": 0, "CanonicalIssueUrl": "",
-            "RelatedIssueUrls": "[]", "OccurrenceCount": 1,
-            "IssueState": "", "IssueTitle": "", "AnalysisSummary": "",
-            "SuggestionSummary": "", "CopilotAssignmentRequestedAt": 0,
-            "CopilotAssignmentStatus": "not_requested", "CopilotAssignmentReason": "",
-            "PrLinked": 0, "PrNumber": 0, "PrUrl": "",
-        }
+        row = _make_work_item_row(CreatedAt="not-a-valid-timestamp")
         result = gh._serialize_github_work_item_row(row)
         # Invalid timestamp should be returned as-is
         assert result["created_at"] == "not-a-valid-timestamp"
@@ -1850,20 +1818,7 @@ class TestSerializeGithubWorkItemRowTimestamps:
         from datetime import datetime, timezone, timedelta
         # +05:30 offset
         tz = timezone(timedelta(hours=5, minutes=30))
-        row = {
-            "Id": "", "CreatedAt": datetime(2025, 1, 1, 15, 30, 0, tzinfo=tz), "CompletedAt": "",
-            "AgentRuleId": "", "AgentRuleName": "", "AgentAction": "",
-            "ServiceName": "", "AnomalyRuleId": "", "AnomalyState": "",
-            "SignalSource": "", "SignalName": "", "SignalValue": 0.0,
-            "GithubRepo": "", "DedupKey": "", "DedupDecision": "",
-            "DedupConfidence": 0.0, "IssueNumber": 0, "IssueUrl": "",
-            "CanonicalIssueNumber": 0, "CanonicalIssueUrl": "",
-            "RelatedIssueUrls": "[]", "OccurrenceCount": 1,
-            "IssueState": "", "IssueTitle": "", "AnalysisSummary": "",
-            "SuggestionSummary": "", "CopilotAssignmentRequestedAt": 0,
-            "CopilotAssignmentStatus": "not_requested", "CopilotAssignmentReason": "",
-            "PrLinked": 0, "PrNumber": 0, "PrUrl": "",
-        }
+        row = _make_work_item_row(CreatedAt=datetime(2025, 1, 1, 15, 30, 0, tzinfo=tz))
         result = gh._serialize_github_work_item_row(row)
         # 15:30 +05:30 → 10:00 UTC
         assert "10:00" in result["created_at"]

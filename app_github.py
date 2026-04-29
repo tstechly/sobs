@@ -848,6 +848,30 @@ async def _choose_github_issue_outcome(
     open_issues = await _fetch_open_github_issues(github_token, github_repo)
     open_issues_by_url = {str(item.get("issue_url") or ""): item for item in open_issues}
 
+    def _build_candidate(
+        open_item: dict[str, Any],
+        local_item: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        url = str(open_item.get("issue_url") or "")
+        li = local_item or {}
+        return {
+            "candidate_id": url,
+            "issue_url": url,
+            "issue_number": int(open_item.get("issue_number") or li.get("issue_number") or 0),
+            "issue_title": str(open_item.get("issue_title") or li.get("issue_title") or ""),
+            "issue_body": str(open_item.get("issue_body") or ""),
+            "issue_state": str(open_item.get("issue_state") or li.get("issue_state") or "open"),
+            "service_name": str(li.get("service") or ""),
+            "signal_source": str(li.get("signal_source") or ""),
+            "signal_name": str(li.get("signal_name") or ""),
+            "anomaly_state": str(li.get("anomaly_state") or ""),
+            "dedup_key": str(li.get("dedup_key") or ""),
+            "copilot_assignment_status": str(li.get("copilot_assignment_status") or ""),
+            "pr_linked": bool(li.get("pr_linked")),
+            "pr_url": str(li.get("pr_url") or ""),
+            "assignees": list(open_item.get("assignees") or []),
+        }
+
     candidates: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     for local_item in local_candidates:
@@ -857,48 +881,13 @@ async def _choose_github_issue_outcome(
         open_item = open_issues_by_url.get(issue_url)
         if not open_item:
             continue
-        candidate = {
-            "candidate_id": issue_url,
-            "issue_url": issue_url,
-            "issue_number": int(open_item.get("issue_number") or local_item.get("issue_number") or 0),
-            "issue_title": str(open_item.get("issue_title") or local_item.get("issue_title") or ""),
-            "issue_body": str(open_item.get("issue_body") or ""),
-            "issue_state": str(open_item.get("issue_state") or local_item.get("issue_state") or "open"),
-            "service_name": str(local_item.get("service") or ""),
-            "signal_source": str(local_item.get("signal_source") or ""),
-            "signal_name": str(local_item.get("signal_name") or ""),
-            "anomaly_state": str(local_item.get("anomaly_state") or ""),
-            "dedup_key": str(local_item.get("dedup_key") or ""),
-            "copilot_assignment_status": str(local_item.get("copilot_assignment_status") or ""),
-            "pr_linked": bool(local_item.get("pr_linked")),
-            "pr_url": str(local_item.get("pr_url") or ""),
-            "assignees": list(open_item.get("assignees") or []),
-        }
-        candidates.append(candidate)
+        candidates.append(_build_candidate(open_item, local_item))
         seen_urls.add(issue_url)
     for open_item in open_issues:
         issue_url = str(open_item.get("issue_url") or "")
         if not issue_url or issue_url in seen_urls:
             continue
-        candidates.append(
-            {
-                "candidate_id": issue_url,
-                "issue_url": issue_url,
-                "issue_number": int(open_item.get("issue_number") or 0),
-                "issue_title": str(open_item.get("issue_title") or ""),
-                "issue_body": str(open_item.get("issue_body") or ""),
-                "issue_state": str(open_item.get("issue_state") or "open"),
-                "service_name": "",
-                "signal_source": "",
-                "signal_name": "",
-                "anomaly_state": "",
-                "dedup_key": "",
-                "copilot_assignment_status": "",
-                "pr_linked": False,
-                "pr_url": "",
-                "assignees": list(open_item.get("assignees") or []),
-            }
-        )
+        candidates.append(_build_candidate(open_item))
 
     proposed = {
         "github_repo": github_repo,
