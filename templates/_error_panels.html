@@ -254,27 +254,27 @@
                         <div class="d-flex gap-2 mt-2">
                             {% set _trace_ids_csv = err.trace_ids_csv if err.trace_ids_csv is defined else '' %}
                             {% if _trace_ids_csv %}
-                                <a href="{{ url_for('view_logs', trace_ids=_trace_ids_csv, from_ts=from_ts, to_ts=to_ts) }}"
+                                <a href="{{ url_for('logs.view_logs', trace_ids=_trace_ids_csv, from_ts=from_ts, to_ts=to_ts) }}"
                                    class="btn btn-sm btn-outline-{{ logs_btn_outline }}">
                                     <i class="bi bi-journal-text me-1"></i><span class="error-panel-btn-label">{{ logs_label }}</span>
                                 </a>
                                 {% if err.trace_id %}
-                                    <a href="{{ url_for('view_traces', trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                                    <a href="{{ url_for('traces.view_traces', trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                                        class="btn btn-sm btn-outline-{{ trace_btn_outline }}">
                                         <i class="bi bi-diagram-3 me-1"></i><span class="error-panel-btn-label">{{ trace_label }}</span>
                                     </a>
                                 {% endif %}
                             {% elif err.trace_id %}
-                                <a href="{{ url_for('view_logs', trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                                <a href="{{ url_for('logs.view_logs', trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                                    class="btn btn-sm btn-outline-{{ logs_btn_outline }}">
                                     <i class="bi bi-journal-text me-1"></i><span class="error-panel-btn-label">{{ logs_label }}</span>
                                 </a>
-                                <a href="{{ url_for('view_traces', trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                                <a href="{{ url_for('traces.view_traces', trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                                    class="btn btn-sm btn-outline-{{ trace_btn_outline }}">
                                     <i class="bi bi-diagram-3 me-1"></i><span class="error-panel-btn-label">{{ trace_label }}</span>
                                 </a>
                             {% else %}
-                                <a href="{{ url_for('view_logs', service=err.service, from_ts=from_ts, to_ts=to_ts) }}"
+                                <a href="{{ url_for('logs.view_logs', service=err.service, from_ts=from_ts, to_ts=to_ts) }}"
                                    class="btn btn-sm btn-outline-{{ logs_btn_outline }}">
                                     <i class="bi bi-journal-text me-1"></i><span class="error-panel-btn-label">{{ logs_label }}</span>
                                 </a>
@@ -299,7 +299,7 @@
                             {% endif %}
                             {% if show_resolve and not err.resolved %}
                                 <button class="btn btn-sm btn-outline-success {{ resolve_btn_class }}"
-                                        data-resolve-url="{{ url_for('resolve_error', error_id=err.id) }}"
+                                        data-resolve-url="{{ url_for('errors.resolve_error', error_id=err.id) }}"
                                         data-ai-action-id="errors.resolve.mark"
                                         data-ai-action-type="invoke_click"
                                         data-ai-handler="invokeClick"
@@ -345,7 +345,7 @@
                                 </button>
                             {% endif %}
                             {% if show_incident_view %}
-                                <a href="{{ url_for('view_incident', error_id=err.id, trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                                <a href="{{ url_for('traces.view_incident', error_id=err.id, trace_id=err.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                                    class="btn btn-sm btn-outline-primary"
                                    title="Open unified incident evidence view">
                                     <i class="bi bi-shield-exclamation me-1"></i><span class="error-panel-btn-label">Incident View</span>

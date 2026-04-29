@@ -730,17 +730,17 @@
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_logs') }}" class="nav-link {% if request.endpoint == 'view_logs' %}active{% endif %}" title="Logs">
+        <a href="{{ url_for('logs.view_logs') }}" class="nav-link {% if request.endpoint == 'logs.view_logs' %}active{% endif %}" title="Logs">
           <i class="bi bi-journal-text"></i><span class="sb-label">Logs</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_errors') }}" class="nav-link {% if request.endpoint == 'view_errors' %}active{% endif %}" title="Errors">
+        <a href="{{ url_for('errors.view_errors') }}" class="nav-link {% if request.endpoint == 'errors.view_errors' %}active{% endif %}" title="Errors">
           <i class="bi bi-bug"></i><span class="sb-label">Errors</span>
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_traces') }}" class="nav-link {% if request.endpoint == 'view_traces' %}active{% endif %}" title="Traces">
+        <a href="{{ url_for('traces.view_traces') }}" class="nav-link {% if request.endpoint == 'traces.view_traces' %}active{% endif %}" title="Traces">
           <i class="bi bi-diagram-3"></i><span class="sb-label">Traces</span>
         </a>
       </li>
@@ -750,7 +750,7 @@
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_rum') }}" class="nav-link {% if request.endpoint == 'view_rum' %}active{% endif %}" title="RUM">
+        <a href="{{ url_for('rum.view_rum') }}" class="nav-link {% if request.endpoint == 'rum.view_rum' %}active{% endif %}" title="RUM">
           <i class="bi bi-globe"></i><span class="sb-label">RUM</span>
         </a>
       </li>
@@ -794,7 +794,7 @@
         </a>
       </li>
       <li class="nav-item">
-        <a href="{{ url_for('view_settings') }}" class="nav-link {% if request.endpoint in ('view_settings', 'view_tag_rules', 'view_ai_settings', 'view_agent_rules', 'view_notifications', 'view_enrichment_settings', 'view_k8s_settings') %}active{% endif %}" title="Settings">
+        <a href="{{ url_for('view_settings') }}" class="nav-link {% if request.endpoint in ('view_settings', 'view_tag_rules', 'settings.view_ai_settings', 'settings.view_agent_rules', 'view_notifications', 'settings.view_enrichment_settings', 'view_k8s_settings') %}active{% endif %}" title="Settings">
           <i class="bi bi-gear"></i><span class="sb-label">Settings</span>
         </a>
       </li>

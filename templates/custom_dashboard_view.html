@@ -578,10 +578,10 @@
   var templatesMap = {};
   TEMPLATES.forEach(function (t) { templatesMap[t.id] = t; });
   var sourceUrls = {
-    logs: {{ url_for('view_logs') | tojson }},
+    logs: {{ url_for('logs.view_logs') | tojson }},
     metrics: {{ url_for('view_metrics_anomaly') | tojson }},
-    traces: {{ url_for('view_traces') | tojson }},
-    errors: {{ url_for('view_errors') | tojson }}
+    traces: {{ url_for('traces.view_traces') | tojson }},
+    errors: {{ url_for('errors.view_errors') | tojson }}
   };
 
   function extractWhereLiteral(query, fieldName) {

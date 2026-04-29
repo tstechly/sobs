@@ -872,8 +872,8 @@
       <div class="rum-filter-actions">
         <input type="hidden" name="view" value="{{ view_mode }}">
         <div class="btn-group btn-group-sm rum-view-toggle" role="group" aria-label="RUM view mode">
-          <a href="{{ url_for('view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, limit=limit, offset=0) }}" class="btn {% if view_mode == 'sessions' %}btn-secondary{% else %}btn-outline-secondary{% endif %}">Sessions</a>
-          <a href="{{ url_for('view_rum', view='events', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='Timestamp', sort_dir='desc', limit=limit, offset=0) }}" class="btn {% if view_mode == 'events' %}btn-secondary{% else %}btn-outline-secondary{% endif %}">Events</a>
+          <a href="{{ url_for('rum.view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, limit=limit, offset=0) }}" class="btn {% if view_mode == 'sessions' %}btn-secondary{% else %}btn-outline-secondary{% endif %}">Sessions</a>
+          <a href="{{ url_for('rum.view_rum', view='events', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='Timestamp', sort_dir='desc', limit=limit, offset=0) }}" class="btn {% if view_mode == 'events' %}btn-secondary{% else %}btn-outline-secondary{% endif %}">Events</a>
         </div>
         <button type="submit" class="btn btn-primary btn-sm"
           data-ai-action-id="rum.filter.apply"
@@ -883,7 +883,7 @@
           data-ai-risk="low"
           data-ai-confirm="false"
           data-ai-action-role="filter-submit"><i class="bi bi-search"></i></button>
-        <a href="{{ url_for('view_rum', view=view_mode) }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x"></i></a>
+        <a href="{{ url_for('rum.view_rum', view=view_mode) }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x"></i></a>
         <div class="btn-group btn-group-sm" id="rum-reports-group">
           <button type="button" class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="Saved reports">
             <i class="bi bi-bookmark-star"></i>
@@ -913,20 +913,20 @@
       {% set errors_next_dir = 'asc' if (sort_by == 'errors' and sort_dir == 'desc') else 'desc' %}
       <tr>
         <th style="width:160px;">
-          <a href="{{ url_for('view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='last_seen', sort_dir=last_seen_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('rum.view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='last_seen', sort_dir=last_seen_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Last Seen {% if sort_by == 'last_seen' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:96px;">Session</th>
         <th style="width:360px;">
-          <a href="{{ url_for('view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='severity', sort_dir=severity_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('rum.view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='severity', sort_dir=severity_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Overview {% if sort_by == 'severity' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:130px;">Latest event</th>
         <th>Last URL</th>
         <th style="width:110px;" class="text-end">
-          <a href="{{ url_for('view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='events', sort_dir=events_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('rum.view_rum', view='sessions', type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='events', sort_dir=events_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Events {% if sort_by == 'events' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
@@ -991,13 +991,13 @@
         <td data-label="Actions" class="text-end">
           <span class="rum-row-action-slot">
             {% if session.trace_id %}
-            <a href="{{ url_for('view_logs', trace_id=session.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+            <a href="{{ url_for('logs.view_logs', trace_id=session.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                class="btn btn-outline-secondary btn-sm"
                title="View related logs"
                aria-label="View related logs">
               <i class="bi bi-journal-text"></i>
             </a>
-            <a href="{{ url_for('view_traces', trace_id=session.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+            <a href="{{ url_for('traces.view_traces', trace_id=session.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                class="btn btn-outline-secondary btn-sm rum-row-trace-btn"
                title="Open trace"
                aria-label="Open trace">
@@ -1006,7 +1006,7 @@
             {% else %}
             <button class="btn btn-outline-secondary btn-sm rum-row-trace-btn rum-row-action-placeholder" type="button" tabindex="-1" aria-hidden="true"><i class="bi bi-diagram-3"></i></button>
             {% endif %}
-            <a href="{{ url_for('view_incident', trace_id=session.trace_id, rum_session=session.session_key, rum_ts=session.last_ts, from_ts=from_ts, to_ts=to_ts) }}"
+            <a href="{{ url_for('traces.view_incident', trace_id=session.trace_id, rum_session=session.session_key, rum_ts=session.last_ts, from_ts=from_ts, to_ts=to_ts) }}"
                class="btn btn-outline-primary btn-sm rum-row-trace-btn"
                title="Open incident view"
                aria-label="Open incident view">
@@ -1056,13 +1056,13 @@
                   </div>
                   <span class="rum-row-action-slot">
                     {% if ev.trace_id %}
-                    <a href="{{ url_for('view_logs', trace_id=ev.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                    <a href="{{ url_for('logs.view_logs', trace_id=ev.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                        class="btn btn-outline-secondary btn-sm"
                        title="View related logs"
                        aria-label="View related logs">
                       <i class="bi bi-journal-text"></i>
                     </a>
-                    <a href="{{ url_for('view_traces', trace_id=ev.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                    <a href="{{ url_for('traces.view_traces', trace_id=ev.trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                        class="btn btn-outline-secondary btn-sm rum-row-trace-btn"
                        title="Open trace"
                        aria-label="Open trace">
@@ -1071,7 +1071,7 @@
                     {% else %}
                     <button class="btn btn-outline-secondary btn-sm rum-row-trace-btn rum-row-action-placeholder" type="button" tabindex="-1" aria-hidden="true"><i class="bi bi-diagram-3"></i></button>
                     {% endif %}
-                    <a href="{{ url_for('view_incident', trace_id=ev.trace_id, rum_session=ev.session_key, rum_ts=ev.ts, from_ts=from_ts, to_ts=to_ts) }}"
+                    <a href="{{ url_for('traces.view_incident', trace_id=ev.trace_id, rum_session=ev.session_key, rum_ts=ev.ts, from_ts=from_ts, to_ts=to_ts) }}"
                        class="btn btn-outline-primary btn-sm rum-row-trace-btn"
                        title="Open incident view"
                        aria-label="Open incident view">
@@ -1127,19 +1127,19 @@
 
                     {% if ev.data.get('traceId') %}
                     <div class="mb-3 rum-detail-links">
-                      <a href="{{ url_for('view_logs', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-secondary">
+                      <a href="{{ url_for('logs.view_logs', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-secondary">
                         <i class="bi bi-journal-text me-1"></i>Logs
                       </a>
-                      <a href="{{ url_for('view_traces', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-info">
+                      <a href="{{ url_for('traces.view_traces', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-info">
                         <i class="bi bi-diagram-3 me-1"></i>Trace {{ ev.data.get('traceId')[:12] }}
                       </a>
-                      <a href="{{ url_for('view_incident', trace_id=ev.data.get('traceId'), rum_session=ev.session_key, rum_ts=ev.ts, from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-primary">
+                      <a href="{{ url_for('traces.view_incident', trace_id=ev.data.get('traceId'), rum_session=ev.session_key, rum_ts=ev.ts, from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-primary">
                         <i class="bi bi-shield-exclamation me-1"></i>Incident View
                       </a>
                     </div>
                     {% elif ev.event_type in ('error', 'unhandledrejection') %}
                     <div class="mb-3 rum-detail-links">
-                      <a href="{{ url_for('view_incident', rum_session=ev.session_key, rum_ts=ev.ts, from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-primary">
+                      <a href="{{ url_for('traces.view_incident', rum_session=ev.session_key, rum_ts=ev.ts, from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-primary">
                         <i class="bi bi-shield-exclamation me-1"></i>Incident View
                       </a>
                     </div>
@@ -1265,13 +1265,13 @@
       {% set type_next_dir = 'asc' if (sort_by == 'EventName' and sort_dir == 'desc') else 'desc' %}
       <tr>
         <th style="width:155px;">
-          <a href="{{ url_for('view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('rum.view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='Timestamp', sort_dir=ts_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Timestamp {% if sort_by == 'Timestamp' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
         <th style="width:80px;">Session</th>
         <th style="width:110px;">
-          <a href="{{ url_for('view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='EventName', sort_dir=type_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
+          <a href="{{ url_for('rum.view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by='EventName', sort_dir=type_next_dir, limit=limit, offset=0) }}" class="text-decoration-none text-reset">
             Type {% if sort_by == 'EventName' %}<small>{{ '↑' if sort_dir == 'asc' else '↓' }}</small>{% endif %}
           </a>
         </th>
@@ -1303,13 +1303,13 @@
               </span>
               <span class="rum-row-action-slot">
                 {% if trace_id %}
-                <a href="{{ url_for('view_logs', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                <a href="{{ url_for('logs.view_logs', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                    class="btn btn-outline-secondary btn-sm"
                    title="View related logs"
                    aria-label="View related logs">
                   <i class="bi bi-journal-text"></i>
                 </a>
-                <a href="{{ url_for('view_traces', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                <a href="{{ url_for('traces.view_traces', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                    class="btn btn-outline-secondary btn-sm rum-row-trace-btn"
                    title="Open trace"
                    aria-label="Open trace">
@@ -1326,13 +1326,13 @@
               <span class="rum-mobile-event-primary text-danger text-truncate d-inline-block" style="max-width:180px;" title="{{ ev.data.get('message','')|mask }}">{{ ev.data.get('message','') | mask | truncate(60) }}</span>
               <span class="rum-row-action-slot">
                 {% if trace_id %}
-                <a href="{{ url_for('view_logs', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                <a href="{{ url_for('logs.view_logs', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                    class="btn btn-outline-secondary btn-sm"
                    title="View related logs"
                    aria-label="View related logs">
                   <i class="bi bi-journal-text"></i>
                 </a>
-                <a href="{{ url_for('view_traces', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                <a href="{{ url_for('traces.view_traces', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                    class="btn btn-outline-secondary btn-sm rum-row-trace-btn"
                    title="Open trace"
                    aria-label="Open trace">
@@ -1360,13 +1360,13 @@
               <span class="rum-mobile-event-primary text-truncate d-inline-block" style="max-width:220px;">{{ ev.data.get('title','') | mask | truncate(40) }}</span>
               <span class="rum-row-action-slot">
                 {% if trace_id %}
-                <a href="{{ url_for('view_logs', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                <a href="{{ url_for('logs.view_logs', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                    class="btn btn-outline-secondary btn-sm"
                    title="View related logs"
                    aria-label="View related logs">
                   <i class="bi bi-journal-text"></i>
                 </a>
-                <a href="{{ url_for('view_traces', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
+                <a href="{{ url_for('traces.view_traces', trace_id=trace_id, from_ts=from_ts, to_ts=to_ts) }}"
                    class="btn btn-outline-secondary btn-sm rum-row-trace-btn"
                    title="Open trace"
                    aria-label="Open trace">
@@ -1417,10 +1417,10 @@
 
             {% if ev.data.get('traceId') %}
             <div class="mb-3 rum-detail-links">
-              <a href="{{ url_for('view_logs', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-secondary">
+              <a href="{{ url_for('logs.view_logs', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-secondary">
                 <i class="bi bi-journal-text me-1"></i>Logs
               </a>
-              <a href="{{ url_for('view_traces', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-info">
+              <a href="{{ url_for('traces.view_traces', trace_id=ev.data.get('traceId'), from_ts=from_ts, to_ts=to_ts) }}" class="btn btn-sm btn-outline-info">
                 <i class="bi bi-diagram-3 me-1"></i>Trace {{ ev.data.get('traceId')[:12] }}
               </a>
             </div>
@@ -1552,19 +1552,19 @@
     <small class="text-secondary">Showing {{ offset + 1 }}–{{ [offset + page_count, total] | min }} of {{ total }} {{ 'sessions' if view_mode == 'sessions' else 'events' }}</small>
     <select class="form-select form-select-sm" style="width:auto;" onchange="window.location.href=this.value" aria-label="Rows per page">
       {% for n in [10, 25, 50, 100, 200] %}
-      <option value="{{ url_for('view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
+      <option value="{{ url_for('rum.view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=n, offset=0) }}" {% if limit == n %}selected{% endif %}>{{ n }} / page</option>
       {% endfor %}
     </select>
   </div>
   <ul class="pagination pagination-sm mb-0">
     {% if offset > 0 %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
+      <a class="page-link" href="{{ url_for('rum.view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=prev_offset) }}">← Prev</a>
     </li>
     {% endif %}
     {% if next_offset < total %}
     <li class="page-item">
-      <a class="page-link" href="{{ url_for('view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
+      <a class="page-link" href="{{ url_for('rum.view_rum', view=view_mode, type=event_type, error_source=error_source, q=q, from_ts=from_ts, to_ts=to_ts, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=next_offset) }}">Next →</a>
     </li>
     {% endif %}
   </ul>
@@ -1765,7 +1765,7 @@ _sobsInitRegexFilter({
   const saveBtn = document.getElementById('rum-save-report-btn');
   if (!group || !saveBtn) return;
   const menu = group.querySelector('ul');
-  const pageBaseUrl = {{ url_for('view_rum') | tojson }};
+  const pageBaseUrl = {{ url_for('rum.view_rum') | tojson }};
 
   function escHtml(value) {
     return String(value || '')
