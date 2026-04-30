@@ -74,6 +74,17 @@ from shared.ai_sql import _repair_truncated_in_clause_literals as _shared_repair
 from shared.ai_sql import _vanna_generate_named_queries as _shared_vanna_generate_named_queries
 from shared.ai_sql import _vanna_generate_sql as _shared_vanna_generate_sql
 from shared.ai_sql import _vanna_repair_sql as _shared_vanna_repair_sql
+from shared.ci_push import _ci_push_api_key_status as _shared_ci_push_api_key_status
+from shared.ci_push import _ci_push_expiry_iso_from_days as _shared_ci_push_expiry_iso_from_days
+from shared.ci_push import _ci_push_hash_key as _shared_ci_push_hash_key
+from shared.ci_push import _ci_push_setting_key as _shared_ci_push_setting_key
+from shared.ci_push import _generate_ci_push_api_key as _shared_generate_ci_push_api_key
+from shared.ci_push import _hash_api_key as _shared_hash_api_key
+from shared.ci_push import _is_valid_ci_push_api_key as _shared_is_valid_ci_push_api_key
+from shared.ci_push import _normalize_ttl_days as _shared_normalize_ttl_days
+from shared.ci_push import _revoke_ci_push_api_key as _shared_revoke_ci_push_api_key
+from shared.ci_push import _rotate_ci_push_api_key as _shared_rotate_ci_push_api_key
+from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_realtime_enabled
 from shared.github import (
     _github_repo_token_key,
     _github_token_expiry_status,
@@ -3092,17 +3103,16 @@ def _load_all_ai_settings(db: ChDbConnection) -> dict[str, str]:
 
 
 def _normalize_ttl_days(value: Any, default_days: int = _CI_PUSH_API_KEY_DEFAULT_TTL_DAYS) -> int:
-    try:
-        parsed = int(str(value).strip())
-    except (TypeError, ValueError):
-        parsed = default_days
-    return max(_CI_PUSH_API_KEY_MIN_TTL_DAYS, min(_CI_PUSH_API_KEY_MAX_TTL_DAYS, parsed))
+    return _shared_normalize_ttl_days(
+        value,
+        default_days=default_days,
+        min_ttl_days=_CI_PUSH_API_KEY_MIN_TTL_DAYS,
+        max_ttl_days=_CI_PUSH_API_KEY_MAX_TTL_DAYS,
+    )
 
 
 def _ci_push_expiry_iso_from_days(ttl_days: int) -> str:
-    expires = datetime.now(timezone.utc) + timedelta(days=ttl_days)
-    expires = expires.replace(hour=23, minute=59, second=59, microsecond=0)
-    return expires.isoformat()
+    return _shared_ci_push_expiry_iso_from_days(ttl_days)
 
 
 _CI_PUSH_HASH_PREFIX = "scrypt:v1:"
@@ -3111,126 +3121,75 @@ _CI_PUSH_HASH_PREFIX = "scrypt:v1:"
 def _ci_push_hash_key() -> bytes:
     """Return a per-installation key for CI push API-key fingerprinting."""
     secret = os.environ.get("SOBS_SECRET_KEY", "sobs-dev-secret-key")
-    return hashlib.blake2b(secret.encode("utf-8"), person=b"sobs-ci-hash-v1", digest_size=32).digest()
+    return _shared_ci_push_hash_key(secret)
 
 
 def _hash_api_key(value: str) -> str:
     """Return a keyed, memory-hard fingerprint for CI push API keys."""
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    salt = _ci_push_hash_key()
-    digest = hashlib.scrypt(raw.encode("utf-8"), salt=salt, n=1024, r=8, p=1, dklen=32).hex()
-    return _CI_PUSH_HASH_PREFIX + digest
+    return _shared_hash_api_key(value, ci_push_hash_key=_ci_push_hash_key())
 
 
 def _generate_ci_push_api_key() -> str:
-    return "sobs_ci_" + secrets.token_urlsafe(24)
+    return _shared_generate_ci_push_api_key()
 
 
 def _ci_push_setting_key(app_id: str, leaf: str) -> str:
-    return f"{_CI_PUSH_APP_KEY_PREFIX}{str(app_id or '').strip().lower()}.{leaf}"
+    return _shared_ci_push_setting_key(app_id, leaf, app_key_prefix=_CI_PUSH_APP_KEY_PREFIX)
 
 
 def _ci_push_api_key_status(db: ChDbConnection, app_id: str) -> dict[str, Any]:
-    target_app_id = str(app_id or "").strip()
-    if not target_app_id:
-        return {
-            "app_id": "",
-            "configured": False,
-            "expires_at": "",
-            "rotated_at": "",
-            "hash": "",
-            "realtime_enabled": False,
-            "expiry": {
-                "state": "missing",
-                "expires_at": "",
-                "days_remaining": None,
-                "message": "CI push API key not configured",
-            },
-        }
-
-    key_hash = _load_ai_setting(db, _ci_push_setting_key(target_app_id, "hash"), "").strip()
-    expires_at = _load_ai_setting(db, _ci_push_setting_key(target_app_id, "expires_at"), "").strip()
-    rotated_at = _load_ai_setting(db, _ci_push_setting_key(target_app_id, "rotated_at"), "").strip()
-    realtime_enabled = _load_ai_setting(
+    return _shared_ci_push_api_key_status(
         db,
-        _ci_push_setting_key(target_app_id, "realtime_enabled"),
-        "false",
-    ).strip().lower() in (
-        "1",
-        "true",
-        "yes",
+        app_id,
+        load_ai_setting=_load_ai_setting,
+        ci_push_setting_key=_ci_push_setting_key,
+        github_token_expiry_status=_github_token_expiry_status,
     )
-
-    expiry_status = _github_token_expiry_status(expires_at)
-    if not key_hash:
-        expiry_status = {
-            "state": "missing",
-            "expires_at": "",
-            "days_remaining": None,
-            "message": "CI push API key not configured",
-        }
-
-    return {
-        "app_id": target_app_id,
-        "configured": bool(key_hash),
-        "expires_at": expires_at,
-        "rotated_at": rotated_at,
-        "hash": key_hash,
-        "realtime_enabled": realtime_enabled,
-        "expiry": expiry_status,
-    }
 
 
 def _is_valid_ci_push_api_key(db: ChDbConnection, app_id: str, provided_key: str) -> bool:
-    candidate = str(provided_key or "").strip()
-    if not candidate:
-        return False
-
-    meta = _ci_push_api_key_status(db, app_id)
-    key_hash = str(meta.get("hash") or "")
-    if not key_hash:
-        return False
-
-    expiry_state = str(((meta.get("expiry") or {}).get("state") or "")).lower()
-    if expiry_state == "expired":
-        return False
-
-    if not key_hash.startswith(_CI_PUSH_HASH_PREFIX):
-        return False
-
-    candidate_hash = _hash_api_key(candidate)
-    return hmac.compare_digest(candidate_hash, key_hash)
+    return _shared_is_valid_ci_push_api_key(
+        db,
+        app_id,
+        provided_key,
+        ci_push_api_key_status=_ci_push_api_key_status,
+        hash_api_key=_hash_api_key,
+    )
 
 
 def _set_ci_push_realtime_enabled(db: ChDbConnection, app_id: str, enabled: bool) -> None:
-    target_app_id = str(app_id or "").strip()
-    if not target_app_id:
-        return
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "realtime_enabled"), "true" if enabled else "false")
+    _shared_set_ci_push_realtime_enabled(
+        db,
+        app_id,
+        enabled,
+        save_ai_setting=_save_ai_setting,
+        ci_push_setting_key=_ci_push_setting_key,
+    )
 
 
 def _rotate_ci_push_api_key(db: ChDbConnection, app_id: str, ttl_days: int) -> tuple[str, str]:
-    target_app_id = str(app_id or "").strip()
-    if not target_app_id:
-        return "", ""
-    normalized_ttl = _normalize_ttl_days(ttl_days)
-    plain = _generate_ci_push_api_key()
-    expires_at = _ci_push_expiry_iso_from_days(normalized_ttl)
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "hash"), _hash_api_key(plain))
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "expires_at"), expires_at)
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "rotated_at"), _now_iso())
-    return plain, expires_at
+    return _shared_rotate_ci_push_api_key(
+        db,
+        app_id,
+        ttl_days,
+        normalize_ttl_days=_normalize_ttl_days,
+        generate_ci_push_api_key=_generate_ci_push_api_key,
+        ci_push_expiry_iso_from_days=_ci_push_expiry_iso_from_days,
+        save_ai_setting=_save_ai_setting,
+        ci_push_setting_key=_ci_push_setting_key,
+        hash_api_key=_hash_api_key,
+        now_iso=_now_iso,
+    )
 
 
 def _revoke_ci_push_api_key(db: ChDbConnection, app_id: str) -> None:
-    target_app_id = str(app_id or "").strip()
-    if not target_app_id:
-        return
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "hash"), "")
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "expires_at"), "")
-    _save_ai_setting(db, _ci_push_setting_key(target_app_id, "rotated_at"), _now_iso())
+    _shared_revoke_ci_push_api_key(
+        db,
+        app_id,
+        save_ai_setting=_save_ai_setting,
+        ci_push_setting_key=_ci_push_setting_key,
+        now_iso=_now_iso,
+    )
 
 
 async def _validate_github_token(github_token: str) -> tuple[str, str]:

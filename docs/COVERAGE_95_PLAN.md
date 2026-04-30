@@ -18,6 +18,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
 - `shared/github.py` measures `97.06%` line coverage, which validates Milestone 1 as a successful high-confidence extraction.
 - `shared/github_issues.py` now measures `96.4%` line coverage after the dedicated branch tests added in this phase.
+- `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run after extracting the managed CI push API-key TTL, hashing, status, validation, rotation, revocation, and realtime-flag helpers in Milestone 5.
 - `shared/onboarding.py` now measures `99%` line coverage in its dedicated direct test run after extracting dependency parsers, repository inspection helpers, onboarding issue-body builders, onboarding work-item persistence helpers, the shared onboarding issue-result orchestration helper, GitHub repo import/list lookup helpers, create-repo persistence helpers, inspect-repo flow helpers, and create-issues request/realtime helpers in Milestone 4.
 - The latest sequential full-suite validation passed at `1359 passed, 4 skipped`.
 
@@ -116,6 +117,13 @@ Deliverables:
 - Dedicated onboarding module with fixture-based tests.
 
 ### Milestone 5: Remaining high-branch business logic
+
+Status: In progress, with managed CI push API-key helpers extracted in this phase.
+
+Measured result so far:
+
+- `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run.
+- `app.py` now delegates the managed CI push API-key TTL, expiry, hashing, status, validation, rotation, revocation, and realtime-flag helpers to `shared/ci_push.py`.
 
 Scope:
 
