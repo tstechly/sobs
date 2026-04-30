@@ -240,6 +240,11 @@ from shared.otlp_security import _origin_allowed_for_otlp as _shared_origin_allo
 from shared.otlp_security import _otlp_cors_allow_methods as _shared_otlp_cors_allow_methods
 from shared.otlp_security import _path_needs_otlp_cors as _shared_path_needs_otlp_cors
 from shared.otlp_security import _request_is_secure_context as _shared_request_is_secure_context
+from shared.raw_metrics_window import _ensure_raw_metrics_retention as _shared_ensure_raw_metrics_retention
+from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _shared_list_trace_overlapping_raw_windows
+from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
+from shared.raw_metrics_window import _run_raw_window_copy_worker as _shared_run_raw_window_copy_worker
+from shared.raw_metrics_window import _window_copy_counts as _shared_window_copy_counts
 from shared.rum_assets import _asset_extension as _shared_asset_extension
 from shared.rum_assets import _rum_asset_signature as _shared_rum_asset_signature
 from shared.rum_assets import _rum_asset_signature_payload as _shared_rum_asset_signature_payload
@@ -2415,22 +2420,12 @@ _RAW_WINDOW_COPY_TASK: "asyncio.Task[None] | None" = None
 
 
 def _ensure_raw_metrics_retention(db: ChDbConnection) -> None:
-    """Apply baseline TTL to raw metric tables and pinned TTL to pinned tables."""
-    baseline_hours = _RAW_METRICS_BASELINE_TTL_HOURS
-    pinned_days = _RAW_METRICS_PINNED_TTL_DAYS
-    statements = [
-        f"ALTER TABLE otel_metrics_gauge MODIFY TTL TimeUnixMs + INTERVAL {baseline_hours} HOUR",
-        f"ALTER TABLE otel_metrics_sum MODIFY TTL TimeUnixMs + INTERVAL {baseline_hours} HOUR",
-        f"ALTER TABLE otel_metrics_histogram MODIFY TTL TimeUnixMs + INTERVAL {baseline_hours} HOUR",
-        f"ALTER TABLE otel_metrics_gauge_pinned MODIFY TTL TimeUnixMs + INTERVAL {pinned_days} DAY",
-        f"ALTER TABLE otel_metrics_sum_pinned MODIFY TTL TimeUnixMs + INTERVAL {pinned_days} DAY",
-        f"ALTER TABLE otel_metrics_histogram_pinned MODIFY TTL TimeUnixMs + INTERVAL {pinned_days} DAY",
-    ]
-    for stmt in statements:
-        try:
-            db.execute(stmt)
-        except Exception:
-            app.logger.debug("raw metrics retention alter skipped: %s", stmt, exc_info=True)
+    _shared_ensure_raw_metrics_retention(
+        db,
+        baseline_ttl_hours=_RAW_METRICS_BASELINE_TTL_HOURS,
+        pinned_ttl_days=_RAW_METRICS_PINNED_TTL_DAYS,
+        logger=app.logger,
+    )
 
 
 def _register_raw_window(
@@ -2442,57 +2437,22 @@ def _register_raw_window(
     namespace: str = "",
     node_name: str = "",
 ) -> str:
-    """Register a raw preservation window around a signal. Returns the window Id."""
-    window_start = signal_ts - timedelta(minutes=_RAW_METRICS_WINDOW_MINUTES)
-    window_end = signal_ts + timedelta(minutes=_RAW_METRICS_WINDOW_MINUTES)
-
-    dedup_key = "|".join(
-        [
-            signal_ts.strftime("%Y-%m-%dT%H:%M"),
-            signal_type[:64],
-            signal_ref[:128],
-            service_name[:64],
-            namespace[:64],
-            node_name[:64],
-        ]
-    )
-    window_id = hashlib.sha256(dedup_key.encode()).hexdigest()[:32]
-
-    ts_fmt = "%Y-%m-%d %H:%M:%S.%f"
-    _insert_rows_json_each_row(
+    return _shared_register_raw_window(
         db,
-        "sobs_raw_windows",
-        [
-            {
-                "Id": window_id,
-                "SignalTs": signal_ts.strftime(ts_fmt)[:-3],
-                "WindowStart": window_start.strftime(ts_fmt)[:-3],
-                "WindowEnd": window_end.strftime(ts_fmt)[:-3],
-                "SignalType": signal_type[:64],
-                "SignalRef": signal_ref[:256],
-                "ServiceName": service_name[:128],
-                "Namespace": namespace[:128],
-                "NodeName": node_name[:128],
-                "Version": int(time.time() * 1000),
-            }
-        ],
+        signal_ts=signal_ts,
+        signal_type=signal_type,
+        signal_ref=signal_ref,
+        service_name=service_name,
+        namespace=namespace,
+        node_name=node_name,
+        raw_metrics_window_minutes=_RAW_METRICS_WINDOW_MINUTES,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        now_ms=int(time.time() * 1000),
     )
-    return window_id
 
 
 def _window_copy_counts(db: ChDbConnection, window_ids: list[str]) -> dict[str, int]:
-    """Return copied source-table counts by window id."""
-    if not window_ids:
-        return {}
-    placeholders = ",".join(["?"] * len(window_ids))
-    rows = db.execute(
-        "SELECT WindowId, countDistinct(SourceTable) AS c "
-        "FROM sobs_raw_window_copy_state FINAL "
-        f"WHERE WindowId IN ({placeholders}) "
-        "GROUP BY WindowId",
-        window_ids,
-    ).fetchall()
-    return {str(r["WindowId"]): int(r["c"] or 0) for r in rows}
+    return _shared_window_copy_counts(db, window_ids)
 
 
 def _list_trace_overlapping_raw_windows(
@@ -2502,208 +2462,27 @@ def _list_trace_overlapping_raw_windows(
     end_ts: str,
     limit: int = 25,
 ) -> list[dict[str, object]]:
-    """Return retention windows that overlap a trace time range."""
-    where_parts = [
-        "WindowEnd >= parseDateTime64BestEffort(?, 9)",
-        "WindowStart <= parseDateTime64BestEffort(?, 9)",
-    ]
-    params: list[object] = [start_ts, end_ts]
-    if service_names:
-        placeholders = ",".join(["?"] * len(service_names))
-        where_parts.append(f"(ServiceName = '' OR ServiceName IN ({placeholders}))")
-        params.extend(service_names)
-    where_sql = " AND ".join(where_parts)
-    rows = db.execute(
-        "SELECT Id, SignalType, SignalRef, ServiceName, Namespace, NodeName, WindowStart, WindowEnd "
-        "FROM sobs_raw_windows FINAL "
-        f"WHERE {where_sql} "
-        "ORDER BY WindowStart DESC "
-        "LIMIT ?",
-        params + [max(1, min(limit, 100))],
-    ).fetchall()
-    if not rows:
-        return []
-
-    expected_count = len(_RAW_METRIC_TABLES)
-    window_ids = [str(r["Id"]) for r in rows]
-    copied_counts = _window_copy_counts(db, window_ids)
-
-    out: list[dict[str, object]] = []
-    for r in rows:
-        window_id = str(r["Id"])
-        copied_count = copied_counts.get(window_id, 0)
-        out.append(
-            {
-                "id": window_id,
-                "signal_type": str(r["SignalType"]),
-                "signal_ref": str(r["SignalRef"]),
-                "service_name": str(r["ServiceName"]),
-                "namespace": str(r["Namespace"]),
-                "node_name": str(r["NodeName"]),
-                "window_start": str(r["WindowStart"]),
-                "window_end": str(r["WindowEnd"]),
-                "copied_count": copied_count,
-                "expected_count": expected_count,
-                "copy_complete": copied_count >= expected_count,
-            }
-        )
-    return out
+    return _shared_list_trace_overlapping_raw_windows(
+        db,
+        service_names,
+        start_ts,
+        end_ts,
+        limit,
+        raw_metric_tables=_RAW_METRIC_TABLES,
+        window_copy_counts=_window_copy_counts,
+    )
 
 
 def _run_raw_window_copy_worker(db: ChDbConnection) -> dict[str, int]:
-    """
-    Copy raw metric rows that fall within registered windows into pinned tables.
-
-    Reads at most _RAW_WINDOW_COPY_MAX_PER_RUN uncopied (window, table) pairs,
-    performs INSERT INTO … SELECT …, and records completion in
-    sobs_raw_window_copy_state.  Idempotent: re-running is safe.
-    """
-    stats: dict[str, int] = {"windows_attempted": 0, "copies_ok": 0, "copies_error": 0}
-
-    try:
-        windows = db.execute(
-            "SELECT Id, WindowStart, WindowEnd, ServiceName, Namespace, NodeName "
-            "FROM sobs_raw_windows FINAL "
-            "ORDER BY WindowStart DESC "
-            f"LIMIT {_RAW_WINDOW_COPY_MAX_PER_RUN * 20}"
-        ).fetchall()
-    except Exception:
-        app.logger.debug("raw window copy: failed to fetch windows", exc_info=True)
-        return stats
-
-    if not windows:
-        return stats
-
-    copies_attempted = 0
-    for window_row in windows:
-        if copies_attempted >= _RAW_WINDOW_COPY_MAX_PER_RUN:
-            break
-
-        window_id = str(window_row["Id"])
-        window_start = str(window_row["WindowStart"])
-        window_end = str(window_row["WindowEnd"])
-        service_name = str(window_row.get("ServiceName") or "")
-        namespace = str(window_row.get("Namespace") or "")
-        node_name = str(window_row.get("NodeName") or "")
-
-        for raw_table, pinned_table in zip(_RAW_METRIC_TABLES, _PINNED_METRIC_TABLES):
-            if copies_attempted >= _RAW_WINDOW_COPY_MAX_PER_RUN:
-                break
-
-            try:
-                already_copied = db.execute(
-                    "SELECT 1 FROM sobs_raw_window_copy_state FINAL WHERE WindowId=? AND SourceTable=? LIMIT 1",
-                    [window_id, raw_table],
-                ).fetchone()
-            except Exception:
-                app.logger.debug(
-                    "raw window copy: failed to check copy state for window=%s table=%s",
-                    window_id,
-                    raw_table,
-                    exc_info=True,
-                )
-                continue
-
-            if already_copied is not None:
-                continue
-
-            stats["windows_attempted"] += 1
-
-            where_clauses = [
-                "TimeUnix >= parseDateTime64BestEffort(?, 9)",
-                "TimeUnix <= parseDateTime64BestEffort(?, 9)",
-            ]
-            params: list[object] = [window_start, window_end]
-
-            if service_name:
-                where_clauses.append("ServiceName = ?")
-                params.append(service_name)
-            if namespace:
-                where_clauses.append("Attributes['k8s.namespace.name'] = ?")
-                params.append(namespace)
-            if node_name:
-                where_clauses.append("Attributes['k8s.node.name'] = ?")
-                params.append(node_name)
-
-            where_sql = " AND ".join(where_clauses)
-
-            # Histogram has different columns from gauge/sum.
-            if raw_table == "otel_metrics_histogram":
-                select_cols = (
-                    "TimeUnix, TimeUnixMs, ServiceName, MetricName, MetricDescription, "
-                    "MetricUnit, Attributes, Count, Sum, BucketCounts, ExplicitBounds, "
-                    "Flags, AggregationTemporality, AttrFingerprint"
-                )
-            elif raw_table == "otel_metrics_sum":
-                select_cols = (
-                    "TimeUnix, TimeUnixMs, ServiceName, MetricName, MetricDescription, "
-                    "MetricUnit, Attributes, Value, Flags, IsMonotonic, "
-                    "AggregationTemporality, AttrFingerprint"
-                )
-            else:
-                select_cols = (
-                    "TimeUnix, TimeUnixMs, ServiceName, MetricName, MetricDescription, "
-                    "MetricUnit, Attributes, Value, Flags, AttrFingerprint"
-                )
-
-            try:
-                count_row = db.execute(f"SELECT count() AS cnt FROM {raw_table} WHERE {where_sql}", params).fetchone()
-                matched_rows = int((count_row or {}).get("cnt", 0))
-                if matched_rows <= 0:
-                    continue
-
-                # Only copy rows that are not already present in the pinned table.
-                missing_row = db.execute(
-                    f"SELECT count() AS cnt FROM {raw_table} WHERE {where_sql} "
-                    f"AND (ServiceName, MetricName, AttrFingerprint, TimeUnix) NOT IN ("
-                    f"SELECT ServiceName, MetricName, AttrFingerprint, TimeUnix "
-                    f"FROM {pinned_table} WHERE {where_sql})",
-                    params * 2,
-                ).fetchone()
-                missing_rows = int((missing_row or {}).get("cnt", 0))
-                if missing_rows <= 0:
-                    _insert_rows_json_each_row(
-                        db,
-                        "sobs_raw_window_copy_state",
-                        [
-                            {
-                                "WindowId": window_id,
-                                "SourceTable": raw_table,
-                                "Version": int(time.time() * 1000),
-                            }
-                        ],
-                    )
-                    copies_attempted += 1
-                    stats["copies_ok"] += 1
-                    continue
-
-                db.execute(
-                    f"INSERT INTO {pinned_table} ({select_cols}) "
-                    f"SELECT {select_cols} FROM {raw_table} WHERE {where_sql} "
-                    f"AND (ServiceName, MetricName, AttrFingerprint, TimeUnix) NOT IN ("
-                    f"SELECT ServiceName, MetricName, AttrFingerprint, TimeUnix "
-                    f"FROM {pinned_table} WHERE {where_sql})",
-                    params * 2,
-                )
-                _insert_rows_json_each_row(
-                    db,
-                    "sobs_raw_window_copy_state",
-                    [
-                        {
-                            "WindowId": window_id,
-                            "SourceTable": raw_table,
-                            "Version": int(time.time() * 1000),
-                        }
-                    ],
-                )
-                copies_attempted += 1
-                stats["copies_ok"] += 1
-            except Exception:
-                copies_attempted += 1
-                app.logger.debug("raw window copy error: window=%s table=%s", window_id, raw_table, exc_info=True)
-                stats["copies_error"] += 1
-
-    return stats
+    return _shared_run_raw_window_copy_worker(
+        db,
+        raw_window_copy_max_per_run=_RAW_WINDOW_COPY_MAX_PER_RUN,
+        raw_metric_tables=_RAW_METRIC_TABLES,
+        pinned_metric_tables=_PINNED_METRIC_TABLES,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        now_ms=int(time.time() * 1000),
+        logger=app.logger,
+    )
 
 
 async def _raw_window_copy_loop() -> None:
