@@ -13,7 +13,6 @@ import difflib
 import fnmatch
 import hashlib
 import hmac
-import html
 import inspect
 import io
 import ipaddress as _ipaddress
@@ -69,6 +68,25 @@ from shared.ai_chart import _normalize_chart_spec_text as _shared_normalize_char
 from shared.ai_chart import _parse_chart_spec_json as _shared_parse_chart_spec_json
 from shared.ai_chart import _repair_chart_spec_json_with_llm as _shared_repair_chart_spec_json_with_llm
 from shared.ai_chart import _vanna_generate_chart_spec as _shared_vanna_generate_chart_spec
+from shared.ai_memory import _chat_label_from_first_turn as _shared_chat_label_from_first_turn
+from shared.ai_memory import _coerce_summary_value as _shared_coerce_summary_value
+from shared.ai_memory import _consolidate_memory_candidates as _shared_consolidate_memory_candidates
+from shared.ai_memory import _cosine_similarity as _shared_cosine_similarity
+from shared.ai_memory import _derive_turn_summary as _shared_derive_turn_summary
+from shared.ai_memory import _embedding_from_json as _shared_embedding_from_json
+from shared.ai_memory import _embedding_to_json as _shared_embedding_to_json
+from shared.ai_memory import _extract_assistant_meta as _shared_extract_assistant_meta
+from shared.ai_memory import _extract_memory_candidates as _shared_extract_memory_candidates
+from shared.ai_memory import _load_chat_memories as _shared_load_chat_memories
+from shared.ai_memory import _load_chat_tool_history as _shared_load_chat_tool_history
+from shared.ai_memory import _load_recent_chat_turns as _shared_load_recent_chat_turns
+from shared.ai_memory import _load_recent_turn_summaries as _shared_load_recent_turn_summaries
+from shared.ai_memory import _sanitize_chat_label_candidate as _shared_sanitize_chat_label_candidate
+from shared.ai_memory import _semantic_memory_matches as _shared_semantic_memory_matches
+from shared.ai_memory import _text_embedding as _shared_text_embedding
+from shared.ai_memory import _tokenize_for_embedding as _shared_tokenize_for_embedding
+from shared.ai_memory import _tool_status_label as _shared_tool_status_label
+from shared.ai_memory import _upsert_ai_memory as _shared_upsert_ai_memory
 from shared.ai_sql import _auto_repair_incomplete_cte_sql as _shared_auto_repair_incomplete_cte_sql
 from shared.ai_sql import _repair_truncated_in_clause_literals as _shared_repair_truncated_in_clause_literals
 from shared.ai_sql import _vanna_generate_named_queries as _shared_vanna_generate_named_queries
@@ -3448,135 +3466,48 @@ async def _emit_internal_genai_span(
 
 
 def _tokenize_for_embedding(text: str) -> list[str]:
-    if not text:
-        return []
-    return re.findall(r"[a-z0-9_./:-]+", text.lower())
+    return _shared_tokenize_for_embedding(text)
 
 
 def _text_embedding(text: str, dims: int = _AI_MEMORY_DIMENSIONS) -> list[float]:
-    vector = [0.0] * dims
-    tokens = _tokenize_for_embedding(text)
-    if not tokens:
-        return vector
-    for token in tokens:
-        index = int(hashlib.sha256(token.encode("utf-8")).hexdigest(), 16) % dims
-        vector[index] += 1.0
-    norm = sum(v * v for v in vector) ** 0.5
-    if norm <= 0:
-        return vector
-    return [v / norm for v in vector]
+    return _shared_text_embedding(text, dims=dims, tokenize_for_embedding=_tokenize_for_embedding)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    if not a or not b:
-        return 0.0
-    n = min(len(a), len(b))
-    if n == 0:
-        return 0.0
-    return sum(a[i] * b[i] for i in range(n))
+    return _shared_cosine_similarity(a, b)
 
 
 def _embedding_to_json(vector: list[float]) -> str:
-    return json.dumps(vector, separators=(",", ":"), ensure_ascii=False)
+    return _shared_embedding_to_json(vector)
 
 
 def _embedding_from_json(raw: str) -> list[float]:
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return []
-    if not isinstance(parsed, list):
-        return []
-    values: list[float] = []
-    for item in parsed:
-        try:
-            values.append(float(item))
-        except Exception:
-            values.append(0.0)
-    return values
+    return _shared_embedding_from_json(raw)
 
 
 def _extract_assistant_meta(answer_text: str) -> tuple[str, dict[str, Any]]:
-    text = str(answer_text or "")
-
-    def _strip_meta_blocks(raw_text: str) -> str:
-        cleaned = _AI_ASSISTANT_META_RE.sub("", raw_text)
-        cleaned = _AI_ASSISTANT_META_ESCAPED_RE.sub("", cleaned)
-        open_raw = cleaned.lower().find("<assistant_meta")
-        open_escaped = cleaned.lower().find("&lt;assistant_meta")
-        cut_index = -1
-        if open_raw >= 0:
-            cut_index = open_raw
-        if open_escaped >= 0 and (cut_index < 0 or open_escaped < cut_index):
-            cut_index = open_escaped
-        if cut_index >= 0:
-            cleaned = cleaned[:cut_index]
-        return cleaned
-
-    match = _AI_ASSISTANT_META_RE.search(text)
-    if not match:
-        match = _AI_ASSISTANT_META_ESCAPED_RE.search(text)
-    if not match:
-        return _strip_meta_blocks(text).strip(), {}
-    meta_raw = str(match.group(1) or "")
-    meta: dict[str, Any] = {}
-    try:
-        # Some models emit typographic quotes; normalize before JSON parsing.
-        normalized_meta_raw = (
-            html.unescape(meta_raw)
-            .replace("\u201c", '"')
-            .replace("\u201d", '"')
-            .replace("\u2018", "'")
-            .replace("\u2019", "'")
-        )
-        parsed = json.loads(normalized_meta_raw)
-        if isinstance(parsed, dict):
-            meta = cast(dict[str, Any], parsed)
-    except Exception:
-        meta = {}
-    cleaned = _strip_meta_blocks(text).strip()
-    return cleaned, meta
+    return _shared_extract_assistant_meta(
+        answer_text,
+        assistant_meta_re=_AI_ASSISTANT_META_RE,
+        assistant_meta_escaped_re=_AI_ASSISTANT_META_ESCAPED_RE,
+    )
 
 
 def _coerce_summary_value(value: Any, max_len: int = 240) -> str:
-    text = str(value or "").strip()
-    if len(text) > max_len:
-        return text[:max_len]
-    return text
+    return _shared_coerce_summary_value(value, max_len)
 
 
 def _sanitize_chat_label_candidate(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    text, _meta = _extract_assistant_meta(text)
-    lower = text.lower()
-    # Unwrap synthetic summary phrasing into a concise user-like label.
-    quoted_match = re.match(r'^\s*user\s+(?:wrote|said)\s+"([^"]+)".*$', text, flags=re.IGNORECASE)
-    if quoted_match:
-        text = quoted_match.group(1).strip()
-        lower = text.lower()
-    noisy_markers = (
-        "unclear intent",
-        "without a clear request",
-        "awaiting clarification",
-    )
-    if any(marker in lower for marker in noisy_markers):
-        return ""
-    return text
+    return _shared_sanitize_chat_label_candidate(value, extract_assistant_meta=_extract_assistant_meta)
 
 
 def _chat_label_from_first_turn(first_question: Any, first_request: Any) -> str:
-    question_label = _sanitize_chat_label_candidate(first_question)
-    if question_label:
-        return _coerce_summary_value(question_label, 80)
-    request_label = _sanitize_chat_label_candidate(first_request)
-    if request_label:
-        return _coerce_summary_value(request_label, 80)
-    return "New chat"
+    return _shared_chat_label_from_first_turn(
+        first_question,
+        first_request,
+        sanitize_chat_label_candidate=_sanitize_chat_label_candidate,
+        coerce_summary_value=_coerce_summary_value,
+    )
 
 
 def _derive_turn_summary(
@@ -3586,35 +3517,16 @@ def _derive_turn_summary(
     tool_summary: str,
     meta_summary: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    summary = cast(dict[str, Any], meta_summary or {})
-    request_text = _coerce_summary_value(summary.get("request") or question, 180)
-    action_text = _coerce_summary_value(summary.get("action") or tool_summary or "answer_only", 180)
-    result_text = _coerce_summary_value(summary.get("result") or answer, 280)
-    return {
-        "request": request_text,
-        "action": action_text,
-        "result": result_text,
-    }
+    return _shared_derive_turn_summary(
+        question=question,
+        answer=answer,
+        tool_summary=tool_summary,
+        meta_summary=meta_summary,
+    )
 
 
 def _load_chat_memories(db: ChDbConnection, chat_id: str) -> list[dict[str, Any]]:
-    rows = db.execute(
-        "SELECT Id, MemoryText, EmbeddingJson, SourceTurnId, UpdatedAt "
-        "FROM sobs_ai_memories FINAL WHERE ChatId=? AND IsDeleted=0 ORDER BY UpdatedAt DESC LIMIT 200",
-        [chat_id],
-    ).fetchall()
-    memories: list[dict[str, Any]] = []
-    for row in rows:
-        memories.append(
-            {
-                "id": str(row["Id"] or ""),
-                "text": str(row["MemoryText"] or "").strip(),
-                "embedding": _embedding_from_json(str(row["EmbeddingJson"] or "")),
-                "source_turn_id": str(row["SourceTurnId"] or ""),
-                "updated_at": str(row["UpdatedAt"] or ""),
-            }
-        )
-    return memories
+    return _shared_load_chat_memories(db, chat_id, embedding_from_json=_embedding_from_json)
 
 
 def _semantic_memory_matches(
@@ -3624,25 +3536,14 @@ def _semantic_memory_matches(
     max_results: int = 5,
     min_score: float = _AI_MEMORY_SEMANTIC_MIN_SCORE,
 ) -> list[dict[str, Any]]:
-    query_emb = _text_embedding(query_text)
-    scored: list[dict[str, Any]] = []
-    for item in memories:
-        emb = cast(list[float], item.get("embedding") or [])
-        if not emb:
-            emb = _text_embedding(str(item.get("text") or ""))
-        score = _cosine_similarity(query_emb, emb)
-        if score < min_score:
-            continue
-        scored.append(
-            {
-                "id": str(item.get("id") or ""),
-                "text": str(item.get("text") or ""),
-                "score": round(score, 4),
-                "source_turn_id": str(item.get("source_turn_id") or ""),
-            }
-        )
-    scored.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
-    return scored[:max_results]
+    return _shared_semantic_memory_matches(
+        memories,
+        query_text,
+        text_embedding=_text_embedding,
+        cosine_similarity=_cosine_similarity,
+        max_results=max_results,
+        min_score=min_score,
+    )
 
 
 def _upsert_ai_memory(
@@ -3654,18 +3555,19 @@ def _upsert_ai_memory(
     source_turn_id: str,
     is_deleted: bool,
 ) -> None:
-    version = int(time.time() * 1000)
-    row = {
-        "Id": memory_id,
-        "ChatId": chat_id,
-        "MemoryText": memory_text,
-        "EmbeddingJson": _embedding_to_json(_text_embedding(memory_text)) if memory_text else "",
-        "SourceTurnId": source_turn_id,
-        "IsDeleted": 1 if is_deleted else 0,
-        "Version": version,
-        "UpdatedAt": _now_iso(),
-    }
-    _insert_rows_json_each_row(db, "sobs_ai_memories", [row])
+    _shared_upsert_ai_memory(
+        db,
+        memory_id=memory_id,
+        chat_id=chat_id,
+        memory_text=memory_text,
+        source_turn_id=source_turn_id,
+        is_deleted=is_deleted,
+        embedding_to_json=_embedding_to_json,
+        text_embedding=_text_embedding,
+        now_iso=_now_iso,
+        time_ms=lambda: int(time.time() * 1000),
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+    )
 
 
 async def _consolidate_memory_candidates(
@@ -3674,238 +3576,53 @@ async def _consolidate_memory_candidates(
     new_memory: str,
     related: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    endpoint_url = str(settings.get("ai.endpoint_url") or "").strip()
-    model = str(settings.get("ai.model") or "").strip()
-    api_key = str(settings.get("ai.api_key") or "").strip()
-    if not endpoint_url or not model:
-        return {"action": "keep_new", "memory": new_memory, "drop_ids": []}
-    related_payload = [
-        {
-            "id": str(item.get("id") or ""),
-            "text": str(item.get("text") or ""),
-            "score": float(item.get("score") or 0),
-        }
-        for item in related
-    ]
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You reconcile short AI memories. Return ONLY strict JSON with keys: "
-                "action (merge|keep_new|ignore), memory (string), drop_ids (array of ids). "
-                "Merge overlapping/conflicting memories into one concise, current fact. "
-                "If new memory is noise/duplicate, use ignore."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps({"new_memory": new_memory, "related": related_payload}, ensure_ascii=False),
-        },
-    ]
-    answer, _stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        messages,
-        thinking_level="off",
-        max_tokens=220,
-        timeout=20,
+    return await _shared_consolidate_memory_candidates(
+        settings,
+        new_memory=new_memory,
+        related=related,
+        call_llm_endpoint=_call_llm_endpoint,
+        coerce_summary_value=_coerce_summary_value,
     )
-    if not answer:
-        return {"action": "keep_new", "memory": new_memory, "drop_ids": []}
-    try:
-        parsed = json.loads(answer)
-    except Exception:
-        parsed = {}
-    if not isinstance(parsed, dict):
-        return {"action": "keep_new", "memory": new_memory, "drop_ids": []}
-    action = str(parsed.get("action") or "keep_new").strip().lower()
-    if action not in {"merge", "keep_new", "ignore"}:
-        action = "keep_new"
-    memory_text = _coerce_summary_value(parsed.get("memory") or new_memory, 280)
-    raw_drop = parsed.get("drop_ids")
-    drop_ids: list[str] = []
-    if isinstance(raw_drop, list):
-        for item in raw_drop:
-            memory_id = str(item or "").strip()
-            if memory_id:
-                drop_ids.append(memory_id)
-    return {"action": action, "memory": memory_text, "drop_ids": drop_ids}
 
 
 def _extract_memory_candidates(meta: dict[str, Any]) -> list[str]:
-    candidates: list[str] = []
-    raw = meta.get("memory_candidates")
-    if isinstance(raw, list):
-        for item in raw:
-            text = _coerce_summary_value(item, 280)
-            if text:
-                candidates.append(text)
-    elif isinstance(raw, str):
-        text = _coerce_summary_value(raw, 280)
-        if text:
-            candidates.append(text)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for text in candidates:
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(text)
-        if len(deduped) >= 3:
-            break
-    return deduped
+    return _shared_extract_memory_candidates(meta, coerce_summary_value=_coerce_summary_value)
 
 
 def _load_recent_turn_summaries(db: ChDbConnection, chat_id: str, query: str, limit: int = 4) -> list[dict[str, str]]:
-    # Query only turn.summary events and rank in-process using semantic similarity.
-    where = "ServiceName=? AND EventName='turn.summary' AND LogAttributes['gen_ai.chat_id']=?"
-    rows = db.execute(
-        "SELECT Timestamp, LogAttributes['gen_ai.turn.summary.request'] AS request, "
-        "LogAttributes['gen_ai.turn.summary.action'] AS action, "
-        "LogAttributes['gen_ai.turn.summary.result'] AS result, "
-        "LogAttributes['gen_ai.turn_id'] AS turn_id "
-        f"FROM otel_logs WHERE {where} ORDER BY Timestamp DESC LIMIT 100",
-        [_AI_HELPER_SERVICE_NAME, chat_id],
-    ).fetchall()
-    scored: list[dict[str, Any]] = []
-    query_emb = _text_embedding(query)
-    for row in rows:
-        request = str(row["request"] or "").strip()
-        action = str(row["action"] or "").strip()
-        result = str(row["result"] or "").strip()
-        if not request and not result:
-            continue
-        candidate_text = f"{request} {action} {result}".strip()
-        score = _cosine_similarity(query_emb, _text_embedding(candidate_text))
-        if score < 0.2:
-            continue
-        scored.append(
-            {
-                "turn_id": str(row["turn_id"] or ""),
-                "request": _coerce_summary_value(request, 180),
-                "action": _coerce_summary_value(action, 180),
-                "result": _coerce_summary_value(result, 220),
-                "score": score,
-            }
-        )
-    scored.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
-    output: list[dict[str, str]] = []
-    for item in scored[:limit]:
-        output.append(
-            {
-                "turn_id": str(item.get("turn_id") or ""),
-                "request": str(item.get("request") or ""),
-                "action": str(item.get("action") or ""),
-                "result": str(item.get("result") or ""),
-            }
-        )
-    return output
+    return _shared_load_recent_turn_summaries(
+        db,
+        chat_id,
+        query,
+        helper_service_name=_AI_HELPER_SERVICE_NAME,
+        text_embedding=_text_embedding,
+        cosine_similarity=_cosine_similarity,
+        coerce_summary_value=_coerce_summary_value,
+        limit=limit,
+    )
 
 
 def _load_recent_chat_turns(db: ChDbConnection, chat_id: str, limit: int = 8) -> list[dict[str, str]]:
-    if not str(chat_id or "").strip():
-        return []
-    rows = db.execute(
-        "SELECT Timestamp, LogAttributes['gen_ai.turn.summary.request'] AS request, "
-        "LogAttributes['gen_ai.turn.summary.action'] AS action, "
-        "LogAttributes['gen_ai.turn.summary.result'] AS result, "
-        "LogAttributes['gen_ai.turn_id'] AS turn_id "
-        "FROM otel_logs "
-        "WHERE ServiceName=? AND EventName='turn.summary' AND LogAttributes['gen_ai.chat_id']=? "
-        "ORDER BY Timestamp DESC LIMIT ?",
-        [_AI_HELPER_SERVICE_NAME, chat_id, int(max(1, limit))],
-    ).fetchall()
-    output: list[dict[str, str]] = []
-    for row in rows:
-        request = str(row["request"] or "").strip()
-        action = str(row["action"] or "").strip()
-        result = str(row["result"] or "").strip()
-        if not request and not action and not result:
-            continue
-        output.append(
-            {
-                "turn_id": str(row["turn_id"] or ""),
-                "request": _coerce_summary_value(request, 180),
-                "action": _coerce_summary_value(action, 180),
-                "result": _coerce_summary_value(result, 220),
-            }
-        )
-    return output
+    return _shared_load_recent_chat_turns(
+        db,
+        chat_id,
+        helper_service_name=_AI_HELPER_SERVICE_NAME,
+        coerce_summary_value=_coerce_summary_value,
+        limit=limit,
+    )
 
 
 def _tool_status_label(status: str, requires_confirmation: bool) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized == "executed":
-        return "Executed"
-    if normalized == "unsupported":
-        return "Not available in this page action manifest"
-    if requires_confirmation:
-        return "Awaiting confirmation"
-    return "Queued"
+    return _shared_tool_status_label(status, requires_confirmation)
 
 
 def _load_chat_tool_history(db: ChDbConnection, chat_id: str) -> dict[str, list[dict[str, Any]]]:
-    rows = db.execute(
-        "SELECT Timestamp, EventName, LogAttributes['gen_ai.turn_id'] AS turn_id, "
-        "LogAttributes['sobs.ai.action_id'] AS action_id, "
-        "LogAttributes['sobs.ai.tool.summary'] AS summary, "
-        "LogAttributes['sobs.ai.tool.action'] AS action_json, "
-        "LogAttributes['sobs.ai.action.status'] AS action_status, "
-        "LogAttributes['sobs.ai.action.requires_confirmation'] AS requires_confirmation "
-        "FROM otel_logs "
-        "WHERE ServiceName=? AND EventName IN ('tool.proposed', 'tool.executed') "
-        "AND LogAttributes['gen_ai.chat_id']=? "
-        "ORDER BY Timestamp ASC LIMIT 500",
-        [_AI_HELPER_SERVICE_NAME, chat_id],
-    ).fetchall()
-
-    grouped: dict[str, dict[str, dict[str, Any]]] = {}
-    for row in rows:
-        turn_id = str(row["turn_id"] or "").strip()
-        if not turn_id:
-            continue
-        action_id = str(row["action_id"] or "").strip() or f"anon-{row['Timestamp']}"
-        turn_actions = grouped.setdefault(turn_id, {})
-        action_entry = turn_actions.get(action_id)
-        if not action_entry:
-            action_payload: dict[str, Any] = {}
-            raw_action = str(row["action_json"] or "").strip()
-            if raw_action:
-                try:
-                    parsed_action = json.loads(raw_action)
-                    if isinstance(parsed_action, dict):
-                        action_payload = cast(dict[str, Any], parsed_action)
-                except (TypeError, json.JSONDecodeError):
-                    action_payload = {}
-            action_entry = {
-                "kind": "tool",
-                "turn_id": turn_id,
-                "action_id": action_id,
-                "summary": str(row["summary"] or "").strip(),
-                "action": action_payload,
-                "status": str(row["action_status"] or "proposed").strip().lower() or "proposed",
-                "requires_confirmation": str(row["requires_confirmation"] or "").strip().lower()
-                in {"1", "true", "yes", "on"},
-                "ts": str(row["Timestamp"] or ""),
-            }
-            turn_actions[action_id] = action_entry
-
-        if str(row["EventName"] or "") == "tool.executed":
-            action_entry["status"] = "executed"
-
-    output: dict[str, list[dict[str, Any]]] = {}
-    for turn_id, action_map in grouped.items():
-        turn_items = list(action_map.values())
-        turn_items.sort(key=lambda item: str(item.get("ts") or ""))
-        for item in turn_items:
-            item["status_label"] = _tool_status_label(
-                str(item.get("status") or ""),
-                bool(item.get("requires_confirmation")),
-            )
-        output[turn_id] = turn_items
-    return output
+    return _shared_load_chat_tool_history(
+        db,
+        chat_id,
+        helper_service_name=_AI_HELPER_SERVICE_NAME,
+        tool_status_label=_tool_status_label,
+    )
 
 
 _AI_HELPER_GENERIC_UI_ACTION_TOOL = {

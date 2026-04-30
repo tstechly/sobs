@@ -16,6 +16,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `app.py` now measures `76.29%` line coverage while the extracted business-logic modules continue to climb above the direct-test target.
 - `shared/ai_chart.py` now measures `97.52%` line coverage in the full-suite report, and its dedicated direct test run measured `98%` coverage for the extracted chart-spec parsing/repair/generation helpers.
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
+- `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run after extracting the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers in Milestone 5.
 - `shared/github.py` measures `97.06%` line coverage, which validates Milestone 1 as a successful high-confidence extraction.
 - `shared/github_issues.py` now measures `96.4%` line coverage after the dedicated branch tests added in this phase.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run after extracting the managed CI push API-key TTL, hashing, status, validation, rotation, revocation, and realtime-flag helpers in Milestone 5.
@@ -122,7 +123,9 @@ Status: In progress, with managed CI push API-key helpers extracted in this phas
 
 Measured result so far:
 
+- `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run.
+- `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
 - `app.py` now delegates the managed CI push API-key TTL, expiry, hashing, status, validation, rotation, revocation, and realtime-flag helpers to `shared/ci_push.py`.
 
 Scope:
