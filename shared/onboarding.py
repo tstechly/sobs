@@ -921,3 +921,76 @@ async def _create_onboarding_issue_result(
         "copilot_assignment_reason": copilot_assignment_reason,
         "copilot_assignment_requested_at": copilot_assignment_requested_at,
     }
+
+
+def _create_onboarding_repository_entry(
+    *,
+    db: Any,
+    name: str,
+    slug_raw: str,
+    repo_url: str,
+    owner: str,
+    repo: str,
+    default_environment: str,
+    github_token: str,
+    github_token_expiry: str,
+    set_github_token: bool,
+    set_repo_token: bool,
+    set_agent_repo: bool,
+    app_slug: Callable[[str], str],
+    slug_exists: Callable[[str], bool],
+    now_iso: Callable[[], str],
+    current_millis: Callable[[], int],
+    generate_id: Callable[[], str],
+    insert_rows_json_each_row: Callable[[Any, str, list[dict[str, Any]]], Any],
+    save_ai_setting: Callable[[Any, str, str], None],
+    save_repo_scoped_github_token: Callable[[Any, str, str, str], None],
+) -> tuple[int, dict[str, Any]]:
+    if not name or not repo_url:
+        return 400, {"ok": False, "error": "App name and repository are required"}
+
+    slug = app_slug(slug_raw or name)
+    if slug_exists(slug):
+        return 409, {"ok": False, "error": "App slug already exists"}
+
+    version = current_millis()
+    created_at = now_iso()
+    updated_at = now_iso()
+    row = {
+        "Id": generate_id(),
+        "Name": name,
+        "Slug": slug,
+        "OwnerTeam": "",
+        "RepoUrl": repo_url,
+        "DefaultEnvironment": default_environment,
+        "Enabled": 1,
+        "MetadataJson": "{}",
+        "IsDeleted": 0,
+        "Version": version,
+        "CreatedAt": created_at,
+        "UpdatedAt": updated_at,
+    }
+    insert_rows_json_each_row(db, "sobs_apps", [row])
+
+    if set_github_token and github_token:
+        save_ai_setting(db, "ai.github_token", github_token)
+        save_ai_setting(db, "ai.github_token_expires_at", github_token_expiry)
+        save_ai_setting(db, "ai.github_token_last_validated_at", "")
+        save_ai_setting(db, "ai.github_token_last_validation_status", "")
+        save_ai_setting(db, "ai.github_token_last_validation_message", "")
+
+    if set_repo_token and github_token and owner and repo:
+        save_repo_scoped_github_token(db, owner, repo, github_token)
+
+    if set_agent_repo and owner and repo:
+        save_ai_setting(db, "ai.github_repo", f"{owner}/{repo}")
+
+    return 200, {
+        "ok": True,
+        "app_id": str(row["Id"]),
+        "name": name,
+        "slug": slug,
+        "repo_url": repo_url,
+        "owner": owner,
+        "repo": repo,
+    }

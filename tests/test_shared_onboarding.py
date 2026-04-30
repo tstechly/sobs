@@ -6,6 +6,7 @@ from shared.onboarding import (
     _build_ci_metadata_issue_body,
     _build_otel_audit_issue_body,
     _create_onboarding_issue_result,
+    _create_onboarding_repository_entry,
     _decode_github_contents_payload,
     _github_file_text,
     _github_import_repo_metadata,
@@ -772,6 +773,124 @@ def test_persist_onboarding_work_item_logs_and_swallows_insert_failures():
     )
 
     assert logger.messages == ["Failed to persist onboarding work item: boom"]
+
+
+def test_create_onboarding_repository_entry_validates_required_fields_and_duplicate_slug():
+    status_code, payload = _create_onboarding_repository_entry(
+        db=object(),
+        name="",
+        slug_raw="",
+        repo_url="",
+        owner="octo",
+        repo="service",
+        default_environment="prod",
+        github_token="",
+        github_token_expiry="",
+        set_github_token=False,
+        set_repo_token=False,
+        set_agent_repo=False,
+        app_slug=lambda value: value,
+        slug_exists=lambda slug: False,
+        now_iso=lambda: "2026-04-30T12:00:00+00:00",
+        current_millis=lambda: 123,
+        generate_id=lambda: "generated-id",
+        insert_rows_json_each_row=lambda _db, _table, _rows: None,
+        save_ai_setting=lambda _db, _key, _value: None,
+        save_repo_scoped_github_token=lambda _db, _owner, _repo, _token: None,
+    )
+
+    duplicate_status, duplicate_payload = _create_onboarding_repository_entry(
+        db=object(),
+        name="service",
+        slug_raw="service",
+        repo_url="https://github.com/octo/service",
+        owner="octo",
+        repo="service",
+        default_environment="prod",
+        github_token="",
+        github_token_expiry="",
+        set_github_token=False,
+        set_repo_token=False,
+        set_agent_repo=False,
+        app_slug=lambda value: f"slug-{value}",
+        slug_exists=lambda slug: slug == "slug-service",
+        now_iso=lambda: "2026-04-30T12:00:00+00:00",
+        current_millis=lambda: 123,
+        generate_id=lambda: "generated-id",
+        insert_rows_json_each_row=lambda _db, _table, _rows: None,
+        save_ai_setting=lambda _db, _key, _value: None,
+        save_repo_scoped_github_token=lambda _db, _owner, _repo, _token: None,
+    )
+
+    assert status_code == 400
+    assert payload == {"ok": False, "error": "App name and repository are required"}
+    assert duplicate_status == 409
+    assert duplicate_payload == {"ok": False, "error": "App slug already exists"}
+
+
+def test_create_onboarding_repository_entry_persists_row_and_optional_settings():
+    inserted_rows: list[dict[str, Any]] = []
+    saved_settings: list[tuple[str, str]] = []
+    saved_repo_tokens: list[tuple[str, str, str]] = []
+
+    status_code, payload = _create_onboarding_repository_entry(
+        db=object(),
+        name="checkout-service",
+        slug_raw="",
+        repo_url="https://github.com/octo/checkout-service",
+        owner="octo",
+        repo="checkout-service",
+        default_environment="prod",
+        github_token="ghp_test",
+        github_token_expiry="2026-12-31T23:59:59+00:00",
+        set_github_token=True,
+        set_repo_token=True,
+        set_agent_repo=True,
+        app_slug=lambda value: f"slug-{value}",
+        slug_exists=lambda slug: False,
+        now_iso=lambda: "2026-04-30T12:00:00+00:00",
+        current_millis=lambda: 456,
+        generate_id=lambda: "generated-id",
+        insert_rows_json_each_row=lambda _db, _table, rows: inserted_rows.extend(rows),
+        save_ai_setting=lambda _db, key, value: saved_settings.append((key, value)),
+        save_repo_scoped_github_token=lambda _db, owner, repo, token: saved_repo_tokens.append((owner, repo, token)),
+    )
+
+    assert status_code == 200
+    assert payload == {
+        "ok": True,
+        "app_id": "generated-id",
+        "name": "checkout-service",
+        "slug": "slug-checkout-service",
+        "repo_url": "https://github.com/octo/checkout-service",
+        "owner": "octo",
+        "repo": "checkout-service",
+    }
+    assert inserted_rows == [
+        {
+            "Id": "generated-id",
+            "Name": "checkout-service",
+            "Slug": "slug-checkout-service",
+            "OwnerTeam": "",
+            "RepoUrl": "https://github.com/octo/checkout-service",
+            "DefaultEnvironment": "prod",
+            "Enabled": 1,
+            "MetadataJson": "{}",
+            "IsDeleted": 0,
+            "Version": 456,
+            "CreatedAt": "2026-04-30T12:00:00+00:00",
+            "UpdatedAt": "2026-04-30T12:00:00+00:00",
+        }
+    ]
+    assert saved_repo_tokens == [("octo", "checkout-service", "ghp_test")]
+    assert saved_settings == [
+        ("ai.github_token", "ghp_test"),
+        ("ai.github_token_expires_at", "2026-12-31T23:59:59+00:00"),
+        ("ai.github_token_last_validated_at", ""),
+        ("ai.github_token_last_validation_status", ""),
+        ("ai.github_token_last_validation_message", ""),
+        ("ai.github_repo", "octo/checkout-service"),
+    ]
 
 
 async def test_create_onboarding_issue_result_returns_error_without_assignment_or_persistence():

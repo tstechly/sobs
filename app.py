@@ -99,6 +99,7 @@ from shared.github_issues import _update_github_issue_record as _shared_update_g
 from shared.onboarding import _build_ci_metadata_issue_body as _shared_build_ci_metadata_issue_body
 from shared.onboarding import _build_otel_audit_issue_body as _shared_build_otel_audit_issue_body
 from shared.onboarding import _create_onboarding_issue_result as _shared_create_onboarding_issue_result
+from shared.onboarding import _create_onboarding_repository_entry as _shared_create_onboarding_repository_entry
 from shared.onboarding import _decode_github_contents_payload as _shared_decode_github_contents_payload
 from shared.onboarding import _github_file_text as _shared_github_file_text
 from shared.onboarding import _github_import_repo_metadata as _shared_github_import_repo_metadata
@@ -28561,58 +28562,34 @@ async def api_onboarding_create_repo():
     set_repo_token = bool(body.get("set_repo_token", True))
     set_agent_repo = bool(body.get("set_agent_repo", True))
 
-    if not name or not repo_url:
-        return jsonify({"ok": False, "error": "App name and repository are required"}), 400
-
-    slug = _app_slug(slug_raw or name)
-    existing = db.execute(
-        "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 LIMIT 1",
-        [slug],
-    ).fetchone()
-    if existing:
-        return jsonify({"ok": False, "error": "App slug already exists"}), 409
-
-    version = int(time.time() * 1000)
-    row = {
-        "Id": uuid.uuid4().hex,
-        "Name": name,
-        "Slug": slug,
-        "OwnerTeam": "",
-        "RepoUrl": repo_url,
-        "DefaultEnvironment": default_environment,
-        "Enabled": 1,
-        "MetadataJson": "{}",
-        "IsDeleted": 0,
-        "Version": version,
-        "CreatedAt": _now_iso(),
-        "UpdatedAt": _now_iso(),
-    }
-    _insert_rows_json_each_row(db, "sobs_apps", [row])
-
-    if set_github_token and github_token:
-        _save_ai_setting(db, "ai.github_token", github_token)
-        _save_ai_setting(db, "ai.github_token_expires_at", github_token_expiry)
-        _save_ai_setting(db, "ai.github_token_last_validated_at", "")
-        _save_ai_setting(db, "ai.github_token_last_validation_status", "")
-        _save_ai_setting(db, "ai.github_token_last_validation_message", "")
-
-    if set_repo_token and github_token and owner and repo:
-        _save_repo_scoped_github_token(db, owner, repo, github_token)
-
-    if set_agent_repo and owner and repo:
-        _save_ai_setting(db, "ai.github_repo", f"{owner}/{repo}")
-
-    return jsonify(
-        {
-            "ok": True,
-            "app_id": str(row["Id"]),
-            "name": name,
-            "slug": slug,
-            "repo_url": repo_url,
-            "owner": owner,
-            "repo": repo,
-        }
+    status_code, payload = _shared_create_onboarding_repository_entry(
+        db=db,
+        name=name,
+        slug_raw=slug_raw,
+        repo_url=repo_url,
+        owner=owner,
+        repo=repo,
+        default_environment=default_environment,
+        github_token=github_token,
+        github_token_expiry=github_token_expiry,
+        set_github_token=set_github_token,
+        set_repo_token=set_repo_token,
+        set_agent_repo=set_agent_repo,
+        app_slug=_app_slug,
+        slug_exists=lambda slug: bool(
+            db.execute(
+                "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 LIMIT 1",
+                [slug],
+            ).fetchone()
+        ),
+        now_iso=_now_iso,
+        current_millis=lambda: int(time.time() * 1000),
+        generate_id=lambda: uuid.uuid4().hex,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        save_ai_setting=_save_ai_setting,
+        save_repo_scoped_github_token=_save_repo_scoped_github_token,
     )
+    return jsonify(payload), status_code
 
 
 @app.route("/api/onboarding/import-repo", methods=["POST"])
