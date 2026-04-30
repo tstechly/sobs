@@ -18,6 +18,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ai_runtime.py` now measures `99%` line coverage in its dedicated direct test run after extracting the shared LLM request assembly, streaming parsing, guard prompt/parsing logic, thinking/token/timeout resolution, and DLP endpoint helpers from `app.py`.
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run after extracting the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers in Milestone 5.
+- `shared/agent_state.py` now measures `100%` line coverage in its dedicated direct test run after extracting agent rule loading, single-rule loading, agent run loading, agent run/counter helpers, trigger service-name extraction, and agent GitHub target resolution from `app.py`.
 - `shared/agent_work_items.py` now measures `100%` line coverage in its dedicated direct test run after extracting bounded integer parsing, recent-candidate loading, agent-trigger field extraction, issue-match normalization, GitHub work-item dedup key/title helpers, work-item row serialization, work-item persistence, issue URL parsing, context-summary assembly, and Copilot assignment status helpers from `app.py`.
 - `shared/ai_pricing.py` now measures `100%` line coverage in its dedicated direct test run after extracting AI model-name normalization, pricing-entry coercion, saved/confirmed pricing loaders, observed-model pricing inference/merge helpers, sensitive-setting detection, and repo-scoped GitHub token helpers from `app.py`.
 - `shared/ai_settings.py` now measures `100%` line coverage in its dedicated direct test run after extracting AI setting load/save/all-settings helpers from `app.py` while preserving the app-level compatibility wrappers.
@@ -142,12 +143,14 @@ Status: In progress.
 Measured result so far:
 
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run.
+- `shared/agent_state.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/agent_work_items.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/ai_settings.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/ai_pricing.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
+- `app.py` now delegates agent rule loading, single-rule loading, agent run loading, agent-run counter helpers, trigger service-name extraction, and agent GitHub target resolution to `shared/agent_state.py`.
 - `app.py` now delegates bounded integer parsing, recent work-item candidate loading, agent-trigger field extraction, GitHub work-item dedup/title helpers, work-item row serialization, work-item persistence, issue URL parsing, context-summary assembly, and Copilot assignment status helpers to `shared/agent_work_items.py`.
 - `app.py` now delegates AI setting load/save/all-settings helpers to `shared/ai_settings.py`.
 - `app.py` now delegates AI model-name normalization, pricing-entry coercion, saved/confirmed pricing loading, observed-model pricing inference/merge logic, sensitive-setting detection, and repo-scoped GitHub token load/save helpers to `shared/ai_pricing.py`.

@@ -62,6 +62,15 @@ import config as _config
 import masking as _masking
 import mcp as _mcp
 import telemetry as _telemetry
+from shared.agent_state import _agent_rule_last_run_ts as _shared_agent_rule_last_run_ts
+from shared.agent_state import _count_active_copilot_assignments as _shared_count_active_copilot_assignments
+from shared.agent_state import _count_copilot_assignments_last_hour as _shared_count_copilot_assignments_last_hour
+from shared.agent_state import _count_github_issues_last_hour as _shared_count_github_issues_last_hour
+from shared.agent_state import _extract_trigger_service_name as _shared_extract_trigger_service_name
+from shared.agent_state import _load_agent_rule as _shared_load_agent_rule
+from shared.agent_state import _load_agent_rules as _shared_load_agent_rules
+from shared.agent_state import _load_agent_runs as _shared_load_agent_runs
+from shared.agent_state import _resolve_agent_github_target as _shared_resolve_agent_github_target
 from shared.agent_work_items import _build_agent_context_summary as _shared_build_agent_context_summary
 from shared.agent_work_items import _build_agent_issue_title as _shared_build_agent_issue_title
 from shared.agent_work_items import _build_github_work_item_dedup_key as _shared_build_github_work_item_dedup_key
@@ -4631,47 +4640,11 @@ _AGENT_ACTIONS = ("analyze", "github_issue", "github_issue_copilot", "dlp_check"
 
 
 def _load_agent_rules(db: ChDbConnection) -> list[dict]:
-    rows = db.execute(
-        "SELECT Id, Name, Description, TriggerType, TriggerRefId, TriggerState, "
-        "Actions, RateLimitMinutes, IsEnabled "
-        "FROM sobs_agent_rules FINAL WHERE IsDeleted=0 ORDER BY Name"
-    ).fetchall()
-    return [
-        {
-            "id": str(row["Id"]),
-            "name": str(row["Name"]),
-            "description": str(row["Description"]),
-            "trigger_type": str(row["TriggerType"]),
-            "trigger_ref_id": str(row["TriggerRefId"]),
-            "trigger_state": str(row["TriggerState"]),
-            "actions": [a.strip() for a in str(row["Actions"]).split(",") if a.strip()],
-            "rate_limit_minutes": int(row["RateLimitMinutes"]),
-            "is_enabled": bool(int(row["IsEnabled"])),
-        }
-        for row in rows
-    ]
+    return _shared_load_agent_rules(db)
 
 
 def _load_agent_rule(db: ChDbConnection, rule_id: str) -> dict | None:
-    row = db.execute(
-        "SELECT Id, Name, Description, TriggerType, TriggerRefId, TriggerState, "
-        "Actions, RateLimitMinutes, IsEnabled "
-        "FROM sobs_agent_rules FINAL WHERE IsDeleted=0 AND Id=? LIMIT 1",
-        [rule_id],
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "id": str(row["Id"]),
-        "name": str(row["Name"]),
-        "description": str(row["Description"]),
-        "trigger_type": str(row["TriggerType"]),
-        "trigger_ref_id": str(row["TriggerRefId"]),
-        "trigger_state": str(row["TriggerState"]),
-        "actions": [a.strip() for a in str(row["Actions"]).split(",") if a.strip()],
-        "rate_limit_minutes": int(row["RateLimitMinutes"]),
-        "is_enabled": bool(int(row["IsEnabled"])),
-    }
+    return _shared_load_agent_rule(db, rule_id)
 
 
 # ---------------------------------------------------------------------------
@@ -4680,69 +4653,25 @@ def _load_agent_rule(db: ChDbConnection, rule_id: str) -> dict | None:
 
 
 def _load_agent_runs(db: ChDbConnection, limit: int = 50) -> list[dict]:
-    rows = db.execute(
-        "SELECT Id, RuleId, RuleName, TriggerContext, Status, GuardDecision, DlpResult, "
-        "Analysis, Suggestion, GithubIssueUrl, ErrorMessage, CreatedAt, CompletedAt, IsDismissed "
-        "FROM sobs_agent_runs FINAL WHERE IsDeleted=0 ORDER BY CreatedAt DESC "
-        f"LIMIT {int(limit)}"
-    ).fetchall()
-    return [
-        {
-            "id": str(row["Id"]),
-            "rule_id": str(row["RuleId"]),
-            "rule_name": str(row["RuleName"]),
-            "trigger_context": str(row["TriggerContext"]),
-            "status": str(row["Status"]),
-            "guard_decision": str(row["GuardDecision"]),
-            "dlp_result": str(row["DlpResult"]),
-            "analysis": str(row["Analysis"]),
-            "suggestion": str(row["Suggestion"]),
-            "github_issue_url": str(row["GithubIssueUrl"]),
-            "error_message": str(row["ErrorMessage"]),
-            "created_at": str(row["CreatedAt"]),
-            "completed_at": str(row["CompletedAt"]),
-            "is_dismissed": bool(int(row["IsDismissed"])),
-        }
-        for row in rows
-    ]
+    return _shared_load_agent_runs(db, limit)
 
 
 def _agent_rule_last_run_ts(db: ChDbConnection, rule_id: str) -> float:
     """Return the Unix timestamp of the most recent agent run for rule_id, or 0."""
-    row = db.execute(
-        "SELECT max(toUnixTimestamp64Milli(CreatedAt)) AS t "
-        "FROM sobs_agent_runs FINAL WHERE IsDeleted=0 AND RuleId=?",
-        [rule_id],
-    ).fetchone()
-    return float(row["t"]) / 1000.0 if row and row["t"] else 0.0
+    return _shared_agent_rule_last_run_ts(db, rule_id)
 
 
 def _count_github_issues_last_hour(db: ChDbConnection) -> int:
     """Count completed agent runs with a GitHub issue created in the last 60 minutes."""
-    row = db.execute(
-        "SELECT count() AS c FROM sobs_agent_runs FINAL "
-        "WHERE IsDeleted=0 AND GithubIssueUrl != '' "
-        "AND CreatedAt >= now() - INTERVAL 1 HOUR"
-    ).fetchone()
-    return int(row["c"]) if row else 0
+    return _shared_count_github_issues_last_hour(db)
 
 
 def _count_copilot_assignments_last_hour(db: ChDbConnection) -> int:
-    cutoff_ms = max(0, int(time.time() * 1000) - 3600 * 1000)
-    row = db.execute(
-        "SELECT count() AS c FROM sobs_github_work_items FINAL "
-        "WHERE IsDeleted=0 AND CopilotAssignmentRequestedAt >= ? AND CopilotAssignmentRequestedAt > 0",
-        [cutoff_ms],
-    ).fetchone()
-    return int(row["c"]) if row else 0
+    return _shared_count_copilot_assignments_last_hour(db)
 
 
 def _count_active_copilot_assignments(db: ChDbConnection) -> int:
-    row = db.execute(
-        "SELECT count() AS c FROM sobs_github_work_items FINAL "
-        "WHERE IsDeleted=0 AND CopilotAssignmentStatus IN ('requested', 'active')"
-    ).fetchone()
-    return int(row["c"]) if row else 0
+    return _shared_count_active_copilot_assignments(db)
 
 
 def _parse_bounded_int_setting(
@@ -5190,23 +5119,7 @@ def _build_agent_context_summary(db: ChDbConnection, trigger_context: dict) -> s
 
 
 def _extract_trigger_service_name(trigger_context: dict[str, Any]) -> str:
-    service = str(trigger_context.get("service") or "").strip()
-    if service:
-        return service
-
-    extra_raw = trigger_context.get("extra")
-    extra: Any
-    if isinstance(extra_raw, dict):
-        extra = extra_raw
-    else:
-        extra = _safe_json_loads(str(extra_raw or ""), {})
-
-    if isinstance(extra, dict):
-        for key in ("service", "service_name", "ServiceName"):
-            value = str(extra.get(key) or "").strip()
-            if value:
-                return value
-    return ""
+    return _shared_extract_trigger_service_name(trigger_context, safe_json_loads=_safe_json_loads)
 
 
 def _resolve_agent_github_target(
@@ -5223,36 +5136,14 @@ def _resolve_agent_github_target(
     3) Global ai.github_token fallback.
     """
 
-    default_repo = str(settings.get("ai.github_repo", "")).strip()
-    default_token = str(settings.get("ai.github_token", "")).strip()
-
-    service_name = _extract_trigger_service_name(trigger_context)
-    if service_name:
-        row = db.execute(
-            "SELECT RepoUrl FROM sobs_apps FINAL "
-            "WHERE IsDeleted=0 AND Enabled=1 AND RepoUrl != '' "
-            "AND (lower(Name)=lower(?) OR lower(Slug)=lower(?)) "
-            "ORDER BY UpdatedAt DESC LIMIT 1",
-            [service_name, service_name],
-        ).fetchone()
-        if row:
-            owner, repo = _parse_github_repo_owner_name(str(row["RepoUrl"] or ""))
-            if owner and repo:
-                scoped_token = _load_repo_scoped_github_token(db, owner, repo)
-                return f"{owner}/{repo}", (scoped_token or default_token)
-
-    if default_repo:
-        owner, repo = _parse_github_repo_owner_name(default_repo)
-        if not owner or not repo:
-            parts = [p for p in default_repo.strip("/").split("/") if p]
-            if len(parts) >= 2:
-                owner, repo = parts[-2], parts[-1]
-        if owner and repo:
-            scoped_token = _load_repo_scoped_github_token(db, owner, repo)
-            return f"{owner}/{repo}", (scoped_token or default_token)
-        return default_repo, default_token
-
-    return "", default_token
+    return _shared_resolve_agent_github_target(
+        db,
+        settings,
+        trigger_context,
+        extract_trigger_service_name=_extract_trigger_service_name,
+        parse_github_repo_owner_name=_parse_github_repo_owner_name,
+        load_repo_scoped_github_token=_load_repo_scoped_github_token,
+    )
 
 
 async def _run_agent_flow(
