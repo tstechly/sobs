@@ -235,6 +235,12 @@ from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_
 from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 from shared.onboarding import _persist_onboarding_work_item as _shared_persist_onboarding_work_item
 from shared.onboarding import _resolve_onboarding_issue_request as _shared_resolve_onboarding_issue_request
+from shared.rum_assets import _asset_extension as _shared_asset_extension
+from shared.rum_assets import _rum_asset_signature as _shared_rum_asset_signature
+from shared.rum_assets import _rum_asset_signature_payload as _shared_rum_asset_signature_payload
+from shared.rum_assets import _sanitize_rum_asset_name as _shared_sanitize_rum_asset_name
+from shared.rum_assets import _sanitize_rum_asset_type as _shared_sanitize_rum_asset_type
+from shared.rum_assets import _verify_rum_asset_signature as _shared_verify_rum_asset_signature
 from shared.sql_where import _append_regex_expression_clauses as _shared_append_regex_expression_clauses
 from shared.sql_where import _append_time_window_filter as _shared_append_time_window_filter
 from shared.sql_where import _normalize_ai_sql_where as _shared_normalize_ai_sql_where
@@ -5802,35 +5808,15 @@ def require_api_key(f):
 
 
 def _sanitize_rum_asset_name(value: str) -> str:
-    raw = os.path.basename(str(value or "").strip())
-    if not raw:
-        return "asset"
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-._")
-    return cleaned or "asset"
+    return _shared_sanitize_rum_asset_name(value)
 
 
 def _sanitize_rum_asset_type(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return "asset"
-    cleaned = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-._")
-    return cleaned or "asset"
+    return _shared_sanitize_rum_asset_type(value)
 
 
 def _asset_extension(asset_name: str, content_type: str) -> str:
-    _, ext = os.path.splitext(asset_name)
-    if ext and re.fullmatch(r"\.[a-zA-Z0-9]{1,8}", ext):
-        return ext.lstrip(".").lower()
-    mapping = {
-        "application/json": "json",
-        "application/octet-stream": "bin",
-        "text/plain": "txt",
-        "image/png": "png",
-        "image/jpeg": "jpg",
-        "image/webp": "webp",
-        "video/webm": "webm",
-    }
-    return mapping.get(content_type.split(";", 1)[0].strip().lower(), "bin")
+    return _shared_asset_extension(asset_name, content_type)
 
 
 def _rum_asset_signature_payload(
@@ -5842,21 +5828,19 @@ def _rum_asset_signature_payload(
     asset_type: str,
     asset_name: str,
 ) -> str:
-    return "\n".join(
-        [
-            str(method or "").upper(),
-            str(path or ""),
-            str(timestamp or ""),
-            str(body_sha256 or ""),
-            str(content_type or "").strip().lower(),
-            str(asset_type or "").strip().lower(),
-            str(asset_name or ""),
-        ]
+    return _shared_rum_asset_signature_payload(
+        method=method,
+        path=path,
+        timestamp=timestamp,
+        body_sha256=body_sha256,
+        content_type=content_type,
+        asset_type=asset_type,
+        asset_name=asset_name,
     )
 
 
 def _rum_asset_signature(secret: str, payload: str) -> str:
-    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return _shared_rum_asset_signature(secret, payload)
 
 
 def _verify_rum_asset_signature(
@@ -5868,37 +5852,21 @@ def _verify_rum_asset_signature(
     asset_type: str,
     asset_name: str,
 ) -> tuple[bool, str]:
-    if not RUM_ASSET_SIGNING_KEY:
-        return False, "Asset upload signing key is not configured"
-
-    timestamp = (request.headers.get("X-SOBS-Asset-Timestamp") or "").strip()
-    signature = (request.headers.get("X-SOBS-Asset-Signature") or "").strip().lower()
-    if not timestamp or not signature:
-        return False, "Missing asset signature headers"
-
-    try:
-        ts = int(timestamp)
-    except ValueError:
-        return False, "Invalid asset signature timestamp"
-
-    now = int(time.time())
-    if abs(now - ts) > max(1, RUM_ASSET_SIGN_WINDOW_SEC):
-        return False, "Asset signature timestamp outside allowed window"
-
-    body_sha = hashlib.sha256(body).hexdigest()
-    payload = _rum_asset_signature_payload(
+    return _shared_verify_rum_asset_signature(
+        body=body,
         method=method,
         path=path,
-        timestamp=timestamp,
-        body_sha256=body_sha,
         content_type=content_type,
         asset_type=asset_type,
         asset_name=asset_name,
+        rum_asset_signing_key=RUM_ASSET_SIGNING_KEY,
+        request_headers=request.headers,
+        now=int(time.time()),
+        rum_asset_sign_window_sec=RUM_ASSET_SIGN_WINDOW_SEC,
+        compare_digest=secrets.compare_digest,
+        rum_asset_signature_payload=_rum_asset_signature_payload,
+        rum_asset_signature=_rum_asset_signature,
     )
-    expected = _rum_asset_signature(RUM_ASSET_SIGNING_KEY, payload)
-    if not secrets.compare_digest(signature, expected):
-        return False, "Invalid asset signature"
-    return True, ""
 
 
 def _rum_b64url_encode(value: bytes) -> str:
