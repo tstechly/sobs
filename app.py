@@ -33,7 +33,6 @@ import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from typing import Any, Callable, cast, overload
@@ -135,6 +134,9 @@ from shared.ai_runtime import _resolve_guard_max_tokens as _shared_resolve_guard
 from shared.ai_runtime import _resolve_guard_thinking_level as _shared_resolve_guard_thinking_level
 from shared.ai_runtime import _resolve_guard_timeout_seconds as _shared_resolve_guard_timeout_seconds
 from shared.ai_runtime import _stream_llm_endpoint as _shared_stream_llm_endpoint
+from shared.ai_settings import _load_ai_setting as _shared_load_ai_setting
+from shared.ai_settings import _load_all_ai_settings as _shared_load_all_ai_settings
+from shared.ai_settings import _save_ai_setting as _shared_save_ai_setting
 from shared.ai_sql import _auto_repair_incomplete_cte_sql as _shared_auto_repair_incomplete_cte_sql
 from shared.ai_sql import _repair_truncated_in_clause_literals as _shared_repair_truncated_in_clause_literals
 from shared.ai_sql import _vanna_generate_named_queries as _shared_vanna_generate_named_queries
@@ -193,6 +195,14 @@ from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_
 from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 from shared.onboarding import _persist_onboarding_work_item as _shared_persist_onboarding_work_item
 from shared.onboarding import _resolve_onboarding_issue_request as _shared_resolve_onboarding_issue_request
+from shared.write_queue import _WRITE_STOP as _SHARED_WRITE_STOP
+from shared.write_queue import _ensure_write_worker as _shared_ensure_write_worker
+from shared.write_queue import _queue_write as _shared_queue_write
+from shared.write_queue import _run_write_batch as _shared_run_write_batch
+from shared.write_queue import _shutdown_write_worker as _shared_shutdown_write_worker
+from shared.write_queue import _write_queue_depth as _shared_write_queue_depth
+from shared.write_queue import _write_worker_main as _shared_write_worker_main
+from shared.write_queue import _WriteTask as _SharedWriteTask
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -2106,7 +2116,7 @@ def _classify_chdb_query_name(query: str) -> str:
 _global_db: ChDbConnection | None = None
 _db_init_lock = threading.Lock()
 _schema_ready = False
-_write_queue: queue.Queue["_WriteTask"] | None = None
+_write_queue: queue.Queue[_SharedWriteTask | object] | None = None
 _write_thread: threading.Thread | None = None
 _write_worker_lock = threading.Lock()
 _log_attr_keys_lock = threading.Lock()
@@ -2136,14 +2146,8 @@ AI_FILTER_METADATA_CACHE_TTL_SEC = int(os.environ.get("SOBS_AI_FILTER_METADATA_C
 AI_FILTER_METADATA_SAMPLE_ROWS = int(os.environ.get("SOBS_AI_FILTER_METADATA_SAMPLE_ROWS", "10000"))
 
 
-@dataclass
-class _WriteTask:
-    op: Callable[[ChDbConnection], None]
-    done: threading.Event | None = None
-    error: Exception | None = None
-
-
-_WRITE_STOP = cast(_WriteTask, object())
+_WriteTask = _SharedWriteTask
+_WRITE_STOP = _SHARED_WRITE_STOP
 
 
 def _invalidate_work_items_cache() -> None:
@@ -3072,53 +3076,37 @@ _AI_CHART_REQUEST_KEYWORDS = frozenset(
 
 
 def _load_ai_setting(db: ChDbConnection, key: str, default: str = "") -> str:
-    row = db.execute(
-        "SELECT Value FROM sobs_ai_settings FINAL WHERE Key=? AND IsDeleted=0 LIMIT 1",
-        [key],
-    ).fetchone()
-    if row:
-        raw_value = str(row["Value"])
-        value = _decrypt_secret_value(raw_value) if _is_sensitive_ai_setting_key(key) else raw_value
-        if value:
-            return value
-
-    env_name, env_file_name = _AI_ENV_OVERRIDES.get(key, ("", ""))
-    if env_name:
-        env_fallback = _read_file_or_env(env_name, env_file_name)
-        if env_fallback:
-            return env_fallback
-
-    return default
+    return _shared_load_ai_setting(
+        db,
+        key,
+        default,
+        decrypt_secret_value=_decrypt_secret_value,
+        is_sensitive_ai_setting_key=_is_sensitive_ai_setting_key,
+        ai_env_overrides=_AI_ENV_OVERRIDES,
+        read_file_or_env=_read_file_or_env,
+    )
 
 
 def _save_ai_setting(db: ChDbConnection, key: str, value: str) -> None:
-    version = int(time.time() * 1000)
-    stored_value = _encrypt_secret_value(value) if _is_sensitive_ai_setting_key(key) else value
-    _insert_rows_json_each_row(
+    _shared_save_ai_setting(
         db,
-        "sobs_ai_settings",
-        [{"Key": key, "Value": stored_value, "IsDeleted": 0, "Version": version}],
+        key,
+        value,
+        encrypt_secret_value=_encrypt_secret_value,
+        is_sensitive_ai_setting_key=_is_sensitive_ai_setting_key,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
     )
 
 
 def _load_all_ai_settings(db: ChDbConnection) -> dict[str, str]:
-    rows = db.execute("SELECT Key, Value FROM sobs_ai_settings FINAL WHERE IsDeleted=0").fetchall()
-    result = {k: "" for k in _AI_SETTING_KEYS}
-    for row in rows:
-        k = str(row["Key"])
-        if k in result:
-            raw_value = str(row["Value"])
-            result[k] = _decrypt_secret_value(raw_value) if _is_sensitive_ai_setting_key(k) else raw_value
-
-    # Precedence: DB value first, then file-backed env, then direct env.
-    for key, (env_name, env_file_name) in _AI_ENV_OVERRIDES.items():
-        if result.get(key):
-            continue
-        env_fallback = _read_file_or_env(env_name, env_file_name)
-        if env_fallback:
-            result[key] = env_fallback
-
-    return result
+    return _shared_load_all_ai_settings(
+        db,
+        decrypt_secret_value=_decrypt_secret_value,
+        is_sensitive_ai_setting_key=_is_sensitive_ai_setting_key,
+        ai_setting_keys=_AI_SETTING_KEYS,
+        ai_env_overrides=_AI_ENV_OVERRIDES,
+        read_file_or_env=_read_file_or_env,
+    )
 
 
 def _normalize_ttl_days(value: Any, default_days: int = _CI_PUSH_API_KEY_DEFAULT_TTL_DAYS) -> int:
@@ -6043,93 +6031,55 @@ def _seed_cwv_anomaly_rules(db: ChDbConnection) -> None:
 
 
 def _run_write_batch(tasks: list[_WriteTask]) -> None:
-    db = get_db()
-    for task in tasks:
-        try:
-            task.op(db)
-        except Exception as exc:
-            task.error = exc
-    db.commit()
-    for task in tasks:
-        if task.done is not None:
-            task.done.set()
+    _shared_run_write_batch(tasks, get_db=get_db)
 
 
 def _write_worker_main() -> None:
     assert _write_queue is not None
-    while True:
-        first = _write_queue.get()
-        if first is _WRITE_STOP:
-            return
-        batch = [first]
-        deadline = time.monotonic() + (max(1, WRITE_BATCH_WAIT_MS) / 1000.0)
-        while len(batch) < max(1, WRITE_BATCH_MAX):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                queued = _write_queue.get(timeout=remaining)
-                if queued is _WRITE_STOP:
-                    _run_write_batch(batch)
-                    return
-                batch.append(queued)
-            except queue.Empty:
-                break
-        _run_write_batch(batch)
+    _shared_write_worker_main(
+        write_queue=_write_queue,
+        write_stop=_WRITE_STOP,
+        batch_wait_ms=WRITE_BATCH_WAIT_MS,
+        batch_max=WRITE_BATCH_MAX,
+        run_write_batch=_run_write_batch,
+    )
 
 
 def _ensure_write_worker() -> None:
     global _write_queue, _write_thread
-    if _write_thread is not None and _write_thread.is_alive():
-        return
-    with _write_worker_lock:
-        if _write_queue is None:
-            _write_queue = queue.Queue(maxsize=max(1, WRITE_QUEUE_MAX))
-        if _write_thread is None or not _write_thread.is_alive():
-            _write_thread = threading.Thread(target=_write_worker_main, name="sobs-db-writer", daemon=True)
-            _write_thread.start()
+    _write_queue, _write_thread = _shared_ensure_write_worker(
+        write_queue=_write_queue,
+        write_thread=_write_thread,
+        write_worker_lock=_write_worker_lock,
+        write_queue_max=WRITE_QUEUE_MAX,
+        worker_target=_write_worker_main,
+    )
 
 
 def _queue_write(op: Callable[[ChDbConnection], None], wait: bool = False) -> None:
-    _ensure_write_worker()
-    done = threading.Event() if wait else None
-    task = _WriteTask(op=op, done=done)
-    assert _write_queue is not None
-    try:
-        _write_queue.put(task, timeout=1)
-    except queue.Full as exc:
-        raise WriteQueueFullError("write queue is full") from exc
-    if done is not None:
-        # Intentionally best-effort wait: embedded chDB runs in single-process mode
-        # and sustained bursts can delay writer completion. We avoid surfacing a hard
-        # timeout to clients here to prevent avoidable 5xx responses under backpressure.
-        done.wait(timeout=15)
-        if task.error is not None:
-            raise task.error
+    _shared_queue_write(
+        op,
+        ensure_write_worker=_ensure_write_worker,
+        get_write_queue=lambda: _write_queue,
+        wait=wait,
+        write_task_cls=_WriteTask,
+        write_queue_full_error_cls=WriteQueueFullError,
+    )
 
 
 def _write_queue_depth() -> int:
-    return _write_queue.qsize() if _write_queue is not None else 0
+    return _shared_write_queue_depth(_write_queue)
 
 
 def _shutdown_db_resources() -> None:
     global _global_db, _schema_ready, _write_queue, _write_thread
 
-    thread_to_join: threading.Thread | None = None
-    with _write_worker_lock:
-        if _write_queue is not None and _write_thread is not None and _write_thread.is_alive():
-            try:
-                _write_queue.put(_WRITE_STOP, timeout=1)
-            except queue.Full:
-                pass
-            thread_to_join = _write_thread
-
-    if thread_to_join is not None:
-        thread_to_join.join(timeout=5)
-
-    with _write_worker_lock:
-        _write_thread = None
-        _write_queue = None
+    _write_queue, _write_thread = _shared_shutdown_write_worker(
+        write_queue=_write_queue,
+        write_thread=_write_thread,
+        write_worker_lock=_write_worker_lock,
+        write_stop=_WRITE_STOP,
+    )
 
     with _db_init_lock:
         if _global_db is not None:
