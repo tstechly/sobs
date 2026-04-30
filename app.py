@@ -97,6 +97,9 @@ from shared.github_issues import _github_issue_is_new_state as _shared_github_is
 from shared.github_issues import _search_open_pr_for_issue as _shared_search_open_pr_for_issue
 from shared.github_issues import _update_github_issue_record as _shared_update_github_issue_record
 from shared.onboarding import _build_ci_metadata_issue_body as _shared_build_ci_metadata_issue_body
+from shared.onboarding import (
+    _build_onboarding_realtime_support_result as _shared_build_onboarding_realtime_support_result,
+)
 from shared.onboarding import _build_otel_audit_issue_body as _shared_build_otel_audit_issue_body
 from shared.onboarding import _create_onboarding_issue_result as _shared_create_onboarding_issue_result
 from shared.onboarding import _create_onboarding_repository_entry as _shared_create_onboarding_repository_entry
@@ -112,6 +115,7 @@ from shared.onboarding import _parse_go_sum_dependencies as _shared_parse_go_sum
 from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_package_lock_dependencies
 from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 from shared.onboarding import _persist_onboarding_work_item as _shared_persist_onboarding_work_item
+from shared.onboarding import _resolve_onboarding_issue_request as _shared_resolve_onboarding_issue_request
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -28703,74 +28707,54 @@ async def api_onboarding_create_issues():
     has_github_actions = bool(body.get("has_github_actions", True))
     enable_realtime_support = bool(body.get("enable_realtime_support", False))
 
-    if not create_ci and not create_otel and not enable_realtime_support:
-        return jsonify({"ok": False, "error": "Select at least one issue type or enable realtime support"}), 400
+    status_code, context = _shared_resolve_onboarding_issue_request(
+        db=db,
+        app_id=app_id,
+        repo_param=repo_param,
+        create_ci=create_ci,
+        create_otel=create_otel,
+        enable_realtime_support=enable_realtime_support,
+        load_app_repo_url=lambda current_db, current_app_id: str(
+            (
+                current_db.execute(
+                    "SELECT RepoUrl FROM sobs_apps FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
+                    [current_app_id],
+                ).fetchone()
+                or [""]
+            )[0]
+            or ""
+        ),
+        parse_github_repo_owner_name=_parse_github_repo_owner_name,
+        load_repo_scoped_github_token=_load_repo_scoped_github_token,
+        load_ai_setting=_load_ai_setting,
+    )
+    if status_code != 200:
+        return jsonify(context), status_code
 
-    repo_url = ""
-    if app_id:
-        row = db.execute(
-            "SELECT RepoUrl FROM sobs_apps FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
-            [app_id],
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "App not found"}), 404
-        repo_url = str(row[0] or "")
-    elif repo_param:
-        repo_url = repo_param
-    else:
-        return jsonify({"ok": False, "error": "app_id or repo parameter required"}), 400
-
-    owner, repo = _parse_github_repo_owner_name(repo_url)
-    if not owner or not repo:
-        return jsonify({"ok": False, "error": f"Could not parse owner/repo from '{repo_url}'"}), 400
-
-    github_token = _load_repo_scoped_github_token(db, owner, repo)
-    if not github_token:
-        github_token = _load_ai_setting(db, "ai.github_token", "").strip()
-    if not github_token:
-        return jsonify({"ok": False, "error": "No GitHub token configured for this repository"}), 400
-
-    github_repo = f"{owner}/{repo}"
+    repo_url = str(context["repo_url"])
+    owner = str(context["owner"])
+    repo = str(context["repo"])
+    github_token = str(context["github_token"])
+    github_repo = str(context["github_repo"])
     results: dict[str, Any] = {"ok": True, "ci_issue": None, "otel_issue": None, "realtime": None}
 
     def _persist_issue_result(**work_item_kwargs: Any) -> None:
         _persist_onboarding_work_item(db, **work_item_kwargs)
 
     if enable_realtime_support:
-        realtime_app_id = str(app_id or "").strip()
-        if not realtime_app_id and repo_url:
-            realtime_app_id = _find_app_id_by_repo_url(db, repo_url)
-
-        if not realtime_app_id:
-            return jsonify({"ok": False, "error": "Realtime support requires a saved repository app."}), 400
-
-        key_plain = ""
-        key_status = _ci_push_api_key_status(db, realtime_app_id)
-        if (not key_status.get("configured")) or str((key_status.get("expiry") or {}).get("state") or "") == "expired":
-            key_plain, _ = _rotate_ci_push_api_key(db, realtime_app_id, _CI_PUSH_API_KEY_DEFAULT_TTL_DAYS)
-            key_status = _ci_push_api_key_status(db, realtime_app_id)
-        _set_ci_push_realtime_enabled(db, realtime_app_id, True)
-        app_id_for_example = realtime_app_id or "<APP_ID>"
-        results["realtime"] = {
-            "app_id": realtime_app_id,
-            "enabled": True,
-            "configured": bool(key_status.get("configured")),
-            "expires_at": str(key_status.get("expires_at") or ""),
-            "expiry_state": str((key_status.get("expiry") or {}).get("state") or "unknown"),
-            "expiry_message": str((key_status.get("expiry") or {}).get("message") or ""),
-            "api_key": key_plain,
-            "api_key_show_once": bool(key_plain),
-            "instructions": {
-                "required_secrets": ["SOBS_URL", "SOBS_INGEST_API_KEY", "SOBS_APP_ID"],
-                "curl_example": (
-                    f"curl -sS -X POST '$SOBS_URL/v1/apps/{app_id_for_example}/releases' "
-                    "-H 'X-API-Key: $SOBS_INGEST_API_KEY' "
-                    "-H 'Content-Type: application/json' "
-                    '-d \'{"version":"$VERSION","commitSha":"$COMMIT_SHA","buildId":"$BUILD_ID"}\''
-                ),
-                "webhook_note": "Optional: add a GitHub webhook for push/workflow events to reduce polling latency.",
-            },
-        }
+        realtime_status_code, realtime_payload = _shared_build_onboarding_realtime_support_result(
+            db=db,
+            app_id=app_id,
+            repo_url=repo_url,
+            ci_push_api_key_default_ttl_days=_CI_PUSH_API_KEY_DEFAULT_TTL_DAYS,
+            find_app_id_by_repo_url=_find_app_id_by_repo_url,
+            ci_push_api_key_status=_ci_push_api_key_status,
+            rotate_ci_push_api_key=_rotate_ci_push_api_key,
+            set_ci_push_realtime_enabled=_set_ci_push_realtime_enabled,
+        )
+        if realtime_status_code != 200:
+            return jsonify(realtime_payload), realtime_status_code
+        results["realtime"] = realtime_payload
 
     if create_ci:
         ci_body = _build_ci_metadata_issue_body(owner, repo, has_github_actions)

@@ -1039,3 +1039,98 @@ async def _inspect_onboarding_repository(
 
     result = await inspect_repo_for_onboarding(github_token, owner, repo)
     return 200, {"ok": True, "owner": owner, "repo": repo, **result}
+
+
+def _resolve_onboarding_issue_request(
+    *,
+    db: Any,
+    app_id: str,
+    repo_param: str,
+    create_ci: bool,
+    create_otel: bool,
+    enable_realtime_support: bool,
+    load_app_repo_url: Callable[[Any, str], str],
+    parse_github_repo_owner_name: Callable[[str], tuple[str, str]],
+    load_repo_scoped_github_token: Callable[[Any, str, str], str],
+    load_ai_setting: Callable[[Any, str, str], str],
+) -> tuple[int, dict[str, Any]]:
+    if not create_ci and not create_otel and not enable_realtime_support:
+        return 400, {"ok": False, "error": "Select at least one issue type or enable realtime support"}
+
+    repo_url = ""
+    if app_id:
+        repo_url = load_app_repo_url(db, app_id)
+        if not repo_url:
+            return 404, {"ok": False, "error": "App not found"}
+    elif repo_param:
+        repo_url = repo_param
+    else:
+        return 400, {"ok": False, "error": "app_id or repo parameter required"}
+
+    owner, repo = parse_github_repo_owner_name(repo_url)
+    if not owner or not repo:
+        return 400, {"ok": False, "error": f"Could not parse owner/repo from '{repo_url}'"}
+
+    github_token = load_repo_scoped_github_token(db, owner, repo)
+    if not github_token:
+        github_token = load_ai_setting(db, "ai.github_token", "").strip()
+    if not github_token:
+        return 400, {"ok": False, "error": "No GitHub token configured for this repository"}
+
+    return 200, {
+        "ok": True,
+        "app_id": app_id,
+        "repo_url": repo_url,
+        "owner": owner,
+        "repo": repo,
+        "github_token": github_token,
+        "github_repo": f"{owner}/{repo}",
+    }
+
+
+def _build_onboarding_realtime_support_result(
+    *,
+    db: Any,
+    app_id: str,
+    repo_url: str,
+    ci_push_api_key_default_ttl_days: int,
+    find_app_id_by_repo_url: Callable[[Any, str], str],
+    ci_push_api_key_status: Callable[[Any, str], dict[str, Any]],
+    rotate_ci_push_api_key: Callable[[Any, str, int], tuple[str, str]],
+    set_ci_push_realtime_enabled: Callable[[Any, str, bool], None],
+) -> tuple[int, dict[str, Any]]:
+    realtime_app_id = str(app_id or "").strip()
+    if not realtime_app_id and repo_url:
+        realtime_app_id = find_app_id_by_repo_url(db, repo_url)
+
+    if not realtime_app_id:
+        return 400, {"ok": False, "error": "Realtime support requires a saved repository app."}
+
+    key_plain = ""
+    key_status = ci_push_api_key_status(db, realtime_app_id)
+    if (not key_status.get("configured")) or str((key_status.get("expiry") or {}).get("state") or "") == "expired":
+        key_plain, _masked_key = rotate_ci_push_api_key(db, realtime_app_id, ci_push_api_key_default_ttl_days)
+        key_status = ci_push_api_key_status(db, realtime_app_id)
+    set_ci_push_realtime_enabled(db, realtime_app_id, True)
+    app_id_for_example = realtime_app_id or "<APP_ID>"
+
+    return 200, {
+        "app_id": realtime_app_id,
+        "enabled": True,
+        "configured": bool(key_status.get("configured")),
+        "expires_at": str(key_status.get("expires_at") or ""),
+        "expiry_state": str((key_status.get("expiry") or {}).get("state") or "unknown"),
+        "expiry_message": str((key_status.get("expiry") or {}).get("message") or ""),
+        "api_key": key_plain,
+        "api_key_show_once": bool(key_plain),
+        "instructions": {
+            "required_secrets": ["SOBS_URL", "SOBS_INGEST_API_KEY", "SOBS_APP_ID"],
+            "curl_example": (
+                f"curl -sS -X POST '$SOBS_URL/v1/apps/{app_id_for_example}/releases' "
+                "-H 'X-API-Key: $SOBS_INGEST_API_KEY' "
+                "-H 'Content-Type: application/json' "
+                '-d \'{"version":"$VERSION","commitSha":"$COMMIT_SHA","buildId":"$BUILD_ID"}\''
+            ),
+            "webhook_note": "Optional: add a GitHub webhook for push/workflow events to reduce polling latency.",
+        },
+    }

@@ -4,6 +4,7 @@ from typing import Any
 
 from shared.onboarding import (
     _build_ci_metadata_issue_body,
+    _build_onboarding_realtime_support_result,
     _build_otel_audit_issue_body,
     _create_onboarding_issue_result,
     _create_onboarding_repository_entry,
@@ -19,6 +20,7 @@ from shared.onboarding import (
     _parse_package_lock_dependencies,
     _parse_requirements_dependencies,
     _persist_onboarding_work_item,
+    _resolve_onboarding_issue_request,
 )
 
 
@@ -998,6 +1000,145 @@ async def test_inspect_onboarding_repository_prefers_repo_token_and_returns_insp
         "copilot_available": True,
         "workflow_files": [".github/workflows/ci.yml"],
     }
+
+
+def test_resolve_onboarding_issue_request_handles_validation_and_success():
+    missing_status, missing_payload = _resolve_onboarding_issue_request(
+        db=object(),
+        app_id="",
+        repo_param="",
+        create_ci=False,
+        create_otel=False,
+        enable_realtime_support=False,
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("", ""),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+    )
+    success_status, success_payload = _resolve_onboarding_issue_request(
+        db=object(),
+        app_id="saved-app",
+        repo_param="",
+        create_ci=True,
+        create_otel=False,
+        enable_realtime_support=False,
+        load_app_repo_url=lambda _db, _app_id: "https://github.com/octo/checkout-service",
+        parse_github_repo_owner_name=lambda repo_url: ("octo", "checkout-service"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "repo-token",
+        load_ai_setting=lambda _db, _key, _default: "global-token",
+    )
+
+    assert missing_status == 400
+    assert missing_payload == {"ok": False, "error": "Select at least one issue type or enable realtime support"}
+    assert success_status == 200
+    assert success_payload == {
+        "ok": True,
+        "app_id": "saved-app",
+        "repo_url": "https://github.com/octo/checkout-service",
+        "owner": "octo",
+        "repo": "checkout-service",
+        "github_token": "repo-token",
+        "github_repo": "octo/checkout-service",
+    }
+
+
+def test_resolve_onboarding_issue_request_handles_missing_app_invalid_repo_and_missing_token():
+    missing_app_status, missing_app_payload = _resolve_onboarding_issue_request(
+        db=object(),
+        app_id="missing-app",
+        repo_param="",
+        create_ci=True,
+        create_otel=False,
+        enable_realtime_support=False,
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("octo", "checkout-service"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+    )
+    invalid_repo_status, invalid_repo_payload = _resolve_onboarding_issue_request(
+        db=object(),
+        app_id="",
+        repo_param="not-a-valid-url",
+        create_ci=True,
+        create_otel=False,
+        enable_realtime_support=False,
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("", ""),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+    )
+    no_token_status, no_token_payload = _resolve_onboarding_issue_request(
+        db=object(),
+        app_id="",
+        repo_param="octo/checkout-service",
+        create_ci=True,
+        create_otel=False,
+        enable_realtime_support=False,
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("octo", "checkout-service"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+    )
+
+    assert missing_app_status == 404
+    assert missing_app_payload == {"ok": False, "error": "App not found"}
+    assert invalid_repo_status == 400
+    assert invalid_repo_payload == {"ok": False, "error": "Could not parse owner/repo from 'not-a-valid-url'"}
+    assert no_token_status == 400
+    assert no_token_payload == {"ok": False, "error": "No GitHub token configured for this repository"}
+
+
+def test_build_onboarding_realtime_support_result_handles_missing_app_and_rotation():
+    rotate_calls: list[tuple[str, int]] = []
+    enabled_calls: list[tuple[str, bool]] = []
+
+    missing_status, missing_payload = _build_onboarding_realtime_support_result(
+        db=object(),
+        app_id="",
+        repo_url="https://github.com/octo/checkout-service",
+        ci_push_api_key_default_ttl_days=30,
+        find_app_id_by_repo_url=lambda _db, _repo_url: "",
+        ci_push_api_key_status=lambda _db, _app_id: {"configured": False, "expiry": {"state": "unknown"}},
+        rotate_ci_push_api_key=lambda _db, _app_id, _ttl: ("plain", "masked"),
+        set_ci_push_realtime_enabled=lambda _db, _app_id, _enabled: None,
+    )
+
+    states = iter(
+        [
+            {"configured": False, "expiry": {"state": "expired"}},
+            {
+                "configured": True,
+                "expires_at": "2026-12-31T23:59:59+00:00",
+                "expiry": {"state": "healthy", "message": "healthy"},
+            },
+        ]
+    )
+
+    success_status, success_payload = _build_onboarding_realtime_support_result(
+        db=object(),
+        app_id="",
+        repo_url="https://github.com/octo/checkout-service",
+        ci_push_api_key_default_ttl_days=30,
+        find_app_id_by_repo_url=lambda _db, _repo_url: "saved-app",
+        ci_push_api_key_status=lambda _db, _app_id: next(states),
+        rotate_ci_push_api_key=lambda _db, app_id, ttl: (
+            rotate_calls.append((app_id, ttl)) or "plain-key",
+            "masked-key",
+        ),
+        set_ci_push_realtime_enabled=lambda _db, app_id, enabled: enabled_calls.append((app_id, enabled)),
+    )
+
+    assert missing_status == 400
+    assert missing_payload == {"ok": False, "error": "Realtime support requires a saved repository app."}
+    assert success_status == 200
+    assert rotate_calls == [("saved-app", 30)]
+    assert enabled_calls == [("saved-app", True)]
+    assert success_payload["app_id"] == "saved-app"
+    assert success_payload["enabled"] is True
+    assert success_payload["configured"] is True
+    assert success_payload["api_key"] == "plain-key"
+    assert success_payload["api_key_show_once"] is True
+    assert success_payload["instructions"]["required_secrets"] == ["SOBS_URL", "SOBS_INGEST_API_KEY", "SOBS_APP_ID"]
 
 
 async def test_create_onboarding_issue_result_returns_error_without_assignment_or_persistence():
