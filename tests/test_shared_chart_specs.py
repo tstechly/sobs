@@ -9,9 +9,13 @@ from shared.chart_specs import (
     _coerce_positive_int,
     _compile_builder_sql,
     _compile_chart_spec,
+    _deep_substitute,
     _default_chart_spec,
+    _extract_bindings,
+    _infer_column_types,
     _normalize_chart_spec,
     _parse_bool,
+    _public_dashboard_query_error,
     _resolve_template_role_indices,
     _sql_literal,
     _validate_chart_query,
@@ -337,3 +341,103 @@ def test_apply_chart_spec_visual_overrides_preserves_existing_zoom_when_disabled
     )
     assert updated["dataZoom"] == [{"type": "inside", "start": 5, "end": 25}]
     assert "smooth" not in updated["series"][0]
+
+
+def test_infer_column_types_and_public_dashboard_query_error_cover_null_strip_hint_and_truncation_paths():
+    assert _infer_column_types(["time", "value", "label"], [[None, 2], [None, None, "ok"]]) == ["null", "int", "str"]
+
+    hinted = _public_dashboard_query_error(Exception("Code: 53. DB::Exception: TYPE_MISMATCH: incompatible types"))
+    assert "Check casts and column types." in hinted
+
+    long_error = "Code: 53. DB::Exception: TYPE_MISMATCH: " + ("x" * 320) + ". Stack trace: ignored"
+    rendered = _public_dashboard_query_error(Exception(long_error))
+    assert rendered.endswith("...")
+    assert len(rendered) == 280
+
+    assert _public_dashboard_query_error(Exception("   ")) == "Query execution failed"
+
+
+def test_deep_substitute_replaces_nested_placeholders_and_leaves_none_bindings_literal():
+    substituted = _deep_substitute(
+        {
+            "series": "{{points}}",
+            "nested": [{"count": "{{count}}"}, "{{missing}}", "literal"],
+        },
+        {"points": [[1, 2]], "count": 3, "missing": None},
+    )
+    assert substituted == {
+        "series": [[1, 2]],
+        "nested": [{"count": 3}, "{{missing}}", "literal"],
+    }
+
+
+def test_extract_bindings_builds_heatmap_boxplot_and_gauge_helpers():
+    heatmap_bindings = _extract_bindings(
+        {"column_roles": {"x_category": 0, "y_category": 1, "value": 2, "effective_state": 3}},
+        ["service", "bucket", "value", "state"],
+        [
+            ["svc-b", "2024-01-02", 5, "warning"],
+            ["svc-a", "2024-01-01", 2, "outlier"],
+            ["svc-a", "2024-01-02", 4, "normal"],
+        ],
+    )
+    assert heatmap_bindings["x_unique_values"] == ["svc-a", "svc-b"]
+    assert heatmap_bindings["y_unique_values"] == ["2024-01-01", "2024-01-02"]
+    assert heatmap_bindings["heatmap_data"] == [[0, 0, 2], [0, 1, 4], [1, 1, 5]]
+    assert heatmap_bindings["value_min"] == 2
+    assert heatmap_bindings["value_max"] == 5
+    assert heatmap_bindings["value_first"] == 5
+    assert heatmap_bindings["anomaly_point_color"] == ["#ffc107", "#dc3545", "#0d6efd"]
+    assert heatmap_bindings["anomaly_symbol_size"] == [7, 10, 4]
+
+    boxplot_bindings = _extract_bindings(
+        {"column_roles": {"dimension": 0, "min": 1, "q1": 2, "median": 3, "q3": 4, "max": 5}},
+        ["dimension", "min", "q1", "median", "q3", "max"],
+        [["latency", 1, 2, 3, 4, 5]],
+    )
+    assert boxplot_bindings["boxplot_data"] == [[1, 2, 3, 4, 5]]
+    assert boxplot_bindings["dimension_values"] == ["latency"]
+
+
+def test_extract_bindings_handles_derived_signal_overlay_delta_and_ratio_modes():
+    overlay_template = {
+        "id": "derived_signal_overlay",
+        "column_roles": {
+            "time": 0,
+            "signal": 1,
+            "value": 2,
+            "baseline_mean": 3,
+            "baseline_lower": 4,
+            "baseline_upper": 5,
+            "anomaly_state": 6,
+        },
+    }
+
+    delta_bindings = _extract_bindings(
+        overlay_template,
+        ["time", "signal", "value", "baseline_mean", "baseline_lower", "baseline_upper", "anomaly_state"],
+        [
+            ["2024-01-01T00:00:00Z", "trace_volume", 120.0, 100.0, 90.0, 110.0, "warning"],
+            ["2024-01-01T00:01:00Z", "trace_volume", 130.0, 100.0, 95.0, 115.0, "outlier"],
+        ],
+    )
+    assert delta_bindings["y_axis_name"] == "Delta %"
+    assert delta_bindings["value_axis_min"] < 0
+    assert delta_bindings["value_axis_max"] > 0
+    assert delta_bindings["value_points"] == [
+        ["2024-01-01T00:00:00Z", 20.0, 1],
+        ["2024-01-01T00:01:00Z", 30.0, 2],
+    ]
+    assert len(delta_bindings["anomaly_mark_areas"]) == 2
+    assert delta_bindings["warning_points"] == [["2024-01-01T00:00:00Z", 20.0]]
+    assert delta_bindings["outlier_points"] == [["2024-01-01T00:01:00Z", 30.0]]
+    assert "warn 1 | outlier 1" in delta_bindings["signal_summary"]
+
+    ratio_bindings = _extract_bindings(
+        overlay_template,
+        ["time", "signal", "value", "baseline_mean", "baseline_lower", "baseline_upper", "anomaly_state"],
+        [["2024-01-01T00:00:00Z", "trace_error_ratio", 0.33, 0.2, 0.1, 0.4, "normal"]],
+    )
+    assert ratio_bindings["y_axis_name"] == "Value"
+    assert ratio_bindings["value_axis_min"] == 0
+    assert ratio_bindings["value_axis_max"] == 1

@@ -177,9 +177,13 @@ from shared.chart_specs import _build_raw_chart_spec as _shared_build_raw_chart_
 from shared.chart_specs import _coerce_positive_int as _shared_coerce_positive_int
 from shared.chart_specs import _compile_builder_sql as _shared_compile_builder_sql
 from shared.chart_specs import _compile_chart_spec as _shared_compile_chart_spec
+from shared.chart_specs import _deep_substitute as _shared_deep_substitute
 from shared.chart_specs import _default_chart_spec as _shared_default_chart_spec
+from shared.chart_specs import _extract_bindings as _shared_extract_bindings
+from shared.chart_specs import _infer_column_types as _shared_infer_column_types
 from shared.chart_specs import _normalize_chart_spec as _shared_normalize_chart_spec
 from shared.chart_specs import _parse_bool as _shared_parse_bool
+from shared.chart_specs import _public_dashboard_query_error as _shared_public_dashboard_query_error
 from shared.chart_specs import _resolve_template_role_indices as _shared_resolve_template_role_indices
 from shared.chart_specs import _sql_literal as _shared_sql_literal
 from shared.chart_specs import _validate_chart_query as _shared_validate_chart_query
@@ -14488,55 +14492,15 @@ def _apply_chart_spec_visual_overrides(template_id: str, option: dict, spec: dic
 
 
 def _infer_column_types(columns: list[str], rows: list[list[object]]) -> list[str]:
-    inferred: list[str] = []
-    for idx, _col in enumerate(columns):
-        detected = "null"
-        for row in rows:
-            if idx >= len(row):
-                continue
-            value = row[idx]
-            if value is None:
-                continue
-            detected = type(value).__name__
-            break
-        inferred.append(detected)
-    return inferred
+    return _shared_infer_column_types(columns, rows)
 
 
 def _public_dashboard_query_error(exc: Exception) -> str:
-    """Extract a concise, user-safe error message from a database exception."""
-    raw = str(exc).strip()
-    message = raw.splitlines()[0].strip()
-    message = re.sub(r"^Code:\s*\d+\.\s*DB::Exception:\s*", "", message)
-    message = re.sub(r"^DB::Exception:\s*", "", message)
-    message = message.split(": while executing function", 1)[0].strip()
-    message = message.split(". Stack trace", 1)[0].strip()
-    if not message:
-        return "Query execution failed"
-    if (
-        any(code in raw for code in ("NO_COMMON_TYPE", "TYPE_MISMATCH"))
-        and "Check casts and column types." not in message
-    ):
-        message = f"{message}. Check casts and column types."
-    if len(message) > 280:
-        message = message[:277].rstrip() + "..."
-    return message
+    return _shared_public_dashboard_query_error(exc)
 
 
 def _deep_substitute(obj: object, bindings: dict) -> object:
-    """Recursively substitute {{key}} placeholders in a JSON object."""
-    if isinstance(obj, dict):
-        return {k: _deep_substitute(v, bindings) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_deep_substitute(item, bindings) for item in obj]
-    if isinstance(obj, str):
-        # Replace {{key}} with binding value
-        for key, value in bindings.items():
-            placeholder = f"{{{{{key}}}}}"
-            if placeholder in obj:
-                return value if value is not None else obj
-        return obj
-    return obj
+    return _shared_deep_substitute(obj, bindings)
 
 
 def _extract_bindings(
@@ -14545,224 +14509,7 @@ def _extract_bindings(
     rows: list,
     role_indices: dict[str, int] | None = None,
 ) -> dict:  # type: ignore
-    """Extract data bindings from query results based on column roles."""
-    column_roles = role_indices if isinstance(role_indices, dict) else template.get("column_roles", {})
-    bindings: dict[str, object] = {}
-
-    # Basic extraction: for each role, get the column data
-    for role, col_idx_raw in column_roles.items():
-        col_idx = int(col_idx_raw) if isinstance(col_idx_raw, (int, float)) else 0
-        if col_idx < len(columns):
-            values = [row[col_idx] if isinstance(row, (list, tuple)) else row.get(columns[col_idx]) for row in rows]
-            bindings[role] = values
-
-    # Special bindings for common patterns
-    if "time" in bindings:
-        bindings["time"] = bindings["time"]
-
-    # For heatmap: extract unique X and Y, build matrix
-    if "x_category" in bindings and "y_category" in bindings and "value" in bindings:
-        x_vals = bindings["x_category"]
-        y_vals = bindings["y_category"]
-        v_vals = bindings["value"]
-        if isinstance(x_vals, list) and isinstance(y_vals, list) and isinstance(v_vals, list):
-            x_unique = sorted(set(x_vals))
-            y_unique = sorted(set(y_vals))
-            bindings["x_unique_values"] = x_unique
-            bindings["y_unique_values"] = y_unique
-
-            # Build heatmap matrix: row[x_idx][y_idx] = value
-            heatmap_data = []
-            for i, x_val in enumerate(x_unique):
-                for j, y_val in enumerate(y_unique):
-                    # Find row where x_category == x_val and y_category == y_val
-                    for x, y, val in zip(x_vals, y_vals, v_vals):
-                        if x == x_val and y == y_val:
-                            heatmap_data.append([i, j, val])
-                            break
-            bindings["heatmap_data"] = heatmap_data
-            v_nums = [v for v in v_vals if isinstance(v, (int, float))]
-            bindings["value_min"] = min(v_nums) if v_nums else 0
-            bindings["value_max"] = max(v_nums) if v_nums else 1
-
-    # For box plot: build [min, q1, median, q3, max] array
-    if "min" in bindings and "max" in bindings:
-        min_vals = bindings["min"]
-        q1_vals = bindings["q1"]
-        med_vals = bindings["median"]
-        q3_vals = bindings["q3"]
-        max_vals = bindings["max"]
-        if all(isinstance(v, list) for v in [min_vals, q1_vals, med_vals, q3_vals, max_vals]):
-            boxplot_data = [
-                [_v[0], _v[1], _v[2], _v[3], _v[4]]  # type: ignore
-                for _v in zip(min_vals, q1_vals, med_vals, q3_vals, max_vals)  # type: ignore
-            ]
-            bindings["boxplot_data"] = boxplot_data
-            bindings["dimension_values"] = bindings.get("dimension", [])
-
-    # For gauge: get first value
-    if "value" in bindings and isinstance(bindings["value"], list) and bindings["value"]:
-        v_list = bindings["value"]
-        if isinstance(v_list, list) and v_list:
-            bindings["value_first"] = v_list[0]
-
-    # For anomaly overlays: build per-point symbol sizes and colors from the effective or statistical state.
-    state_binding = bindings.get("effective_state", bindings.get("anomaly_state"))
-    if isinstance(state_binding, list):
-        states = state_binding
-        _state_colors = {"outlier": "#dc3545", "warning": "#ffc107", "normal": "#0d6efd"}
-        _state_sizes = {"outlier": 10, "warning": 7, "normal": 4}
-        bindings["anomaly_point_color"] = [_state_colors.get(str(s), "#0d6efd") for s in states]
-        bindings["anomaly_symbol_size"] = [_state_sizes.get(str(s), 4) for s in states]
-
-    # Derived signal overlays: choose chart style by signal semantics.
-    if str(template.get("id", "")) == "derived_signal_overlay":
-        bindings["value_axis_min"] = "dataMin"
-        bindings["value_axis_max"] = "dataMax"
-        bindings["zoom_start_pct"] = 0
-        bindings["signal_summary"] = ""
-        bindings["y_axis_name"] = "Value"
-
-        signal_binding = bindings.get("signal")
-        signal_name = ""
-        if isinstance(signal_binding, list) and signal_binding:
-            signal_name = str(signal_binding[0]).lower()
-
-        if "ratio" in signal_name:
-            bindings["value_axis_min"] = 0
-            bindings["value_axis_max"] = 1
-        elif any(token in signal_name for token in ("volume", "count", "latency", "duration", "p95", "p99")):
-            bindings["value_axis_min"] = 0
-
-        time_values = bindings.get("time")
-        value_values = bindings.get("value")
-        baseline_mean_values = bindings.get("baseline_mean")
-        baseline_lower_values = bindings.get("baseline_lower")
-        baseline_upper_values = bindings.get("baseline_upper")
-        effective_states = bindings.get("effective_state", bindings.get("anomaly_state"))
-
-        if (
-            isinstance(time_values, list)
-            and isinstance(value_values, list)
-            and isinstance(baseline_mean_values, list)
-            and isinstance(baseline_lower_values, list)
-            and isinstance(baseline_upper_values, list)
-        ):
-            state_to_rank = {"normal": 0, "warning": 1, "outlier": 2}
-            rank_series: list[int] = []
-            if isinstance(effective_states, list):
-                rank_series = [state_to_rank.get(str(s), 0) for s in effective_states]
-            if not rank_series:
-                rank_series = [0 for _ in value_values]
-
-            use_delta_mode = "ratio" not in signal_name
-            plot_values: list[float] = []
-            plot_baseline: list[float] = []
-            plot_lower: list[float] = []
-            plot_upper: list[float] = []
-            if use_delta_mode:
-                bindings["y_axis_name"] = "Delta %"
-                for idx in range(
-                    min(
-                        len(value_values),
-                        len(baseline_mean_values),
-                        len(baseline_lower_values),
-                        len(baseline_upper_values),
-                    )
-                ):
-                    base = float(baseline_mean_values[idx])
-                    val = float(value_values[idx])
-                    low = float(baseline_lower_values[idx])
-                    up = float(baseline_upper_values[idx])
-                    if abs(base) < 1e-9:
-                        plot_values.append(0.0)
-                        plot_baseline.append(0.0)
-                        plot_lower.append(0.0)
-                        plot_upper.append(0.0)
-                    else:
-                        denom = abs(base)
-                        plot_values.append(((val - base) / denom) * 100.0)
-                        plot_baseline.append(0.0)
-                        plot_lower.append(((low - base) / denom) * 100.0)
-                        plot_upper.append(((up - base) / denom) * 100.0)
-                if plot_values:
-                    min_bound = min(plot_lower + plot_values)
-                    max_bound = max(plot_upper + plot_values)
-                    span = max(5.0, (max_bound - min_bound) * 0.15)
-                    bindings["value_axis_min"] = round(min_bound - span, 2)
-                    bindings["value_axis_max"] = round(max_bound + span, 2)
-            else:
-                plot_values = [float(v) for v in value_values]
-                plot_baseline = [float(v) for v in baseline_mean_values]
-                plot_lower = [max(0.0, float(v)) for v in baseline_lower_values]
-                plot_upper = [float(v) for v in baseline_upper_values]
-
-            value_points = [
-                [time_values[idx], plot_values[idx], rank_series[idx] if idx < len(rank_series) else 0]
-                for idx in range(min(len(time_values), len(plot_values)))
-            ]
-            baseline_mean_points = [
-                [time_values[idx], plot_baseline[idx]] for idx in range(min(len(time_values), len(plot_baseline)))
-            ]
-            baseline_lower_points = [
-                [time_values[idx], plot_lower[idx]] for idx in range(min(len(time_values), len(plot_lower)))
-            ]
-            baseline_upper_points = [
-                [
-                    time_values[idx],
-                    max(0.0, float(plot_upper[idx]) - float(plot_lower[idx])),
-                ]
-                for idx in range(min(len(time_values), len(plot_upper), len(plot_lower)))
-            ]
-
-            mark_areas: list[list[dict[str, object]]] = []
-            warning_points = [pt[:2] for pt in value_points if len(pt) >= 3 and int(pt[2]) == 1]
-            outlier_points = [pt[:2] for pt in value_points if len(pt) >= 3 and int(pt[2]) == 2]
-            if isinstance(effective_states, list) and time_values:
-                i = 0
-                while i < min(len(effective_states), len(time_values)):
-                    state = str(effective_states[i])
-                    if state == "normal":
-                        i += 1
-                        continue
-                    start_idx = i
-                    while i + 1 < len(effective_states) and str(effective_states[i + 1]) == state:
-                        i += 1
-                    end_idx = i
-                    shade = "rgba(255, 193, 7, 0.15)" if state == "warning" else "rgba(220, 53, 69, 0.15)"
-                    mark_areas.append(
-                        [
-                            {
-                                "name": state.title(),
-                                "itemStyle": {"color": shade},
-                                "xAxis": time_values[start_idx],
-                            },
-                            {"xAxis": time_values[end_idx]},
-                        ]
-                    )
-                    i += 1
-
-            latest_value = float(value_values[-1]) if value_values else 0.0
-            latest_baseline = float(baseline_mean_values[-1]) if baseline_mean_values else 0.0
-            delta_pct = 0.0
-            if abs(latest_baseline) > 1e-9:
-                delta_pct = ((latest_value - latest_baseline) / abs(latest_baseline)) * 100.0
-            warning_count = len(warning_points)
-            outlier_count = len(outlier_points)
-            bindings["signal_summary"] = (
-                f"now {latest_value:.1f} | baseline {latest_baseline:.1f} | "
-                f"Δ {delta_pct:+.0f}% | warn {warning_count} | outlier {outlier_count}"
-            )
-
-            bindings["value_points"] = value_points
-            bindings["baseline_mean_points"] = baseline_mean_points
-            bindings["baseline_lower_points"] = baseline_lower_points
-            bindings["baseline_upper_points"] = baseline_upper_points
-            bindings["anomaly_mark_areas"] = mark_areas
-            bindings["warning_points"] = warning_points
-            bindings["outlier_points"] = outlier_points
-
-    return bindings  # type: ignore
+    return _shared_extract_bindings(template, columns, rows, role_indices)
 
 
 def _format_drilldown_time(value: object) -> str:
