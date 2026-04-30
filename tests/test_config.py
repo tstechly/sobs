@@ -7,15 +7,9 @@ environment-variable reading, path normalisation, and settings encryption.
 No database or Quart application is required; all tests are synchronous.
 """
 
-import base64
-import hashlib
-import os
-import tempfile
-
 import pytest
 
 import config as sobs_config
-
 
 # ---------------------------------------------------------------------------
 # _env_flag

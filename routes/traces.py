@@ -13,6 +13,13 @@ import telemetry as _telemetry
 traces_bp = Blueprint("traces", __name__)
 
 
+_RAW_SPAN_MAX_BYTES = 32 * 1024
+_INCIDENT_MAX_RELATED_ERRORS = 50
+_INCIDENT_MAX_RELATED_RUM_EVENTS = 20
+_INCIDENT_WINDOW_DEFAULT_MINUTES = 30
+_INCIDENT_WINDOW_MAX_MINUTES = 180
+
+
 @traces_bp.route("/traces")
 async def view_traces():
     from quart import current_app  # noqa: PLC0415
@@ -428,7 +435,6 @@ async def api_raw_span(span_id: str):
     from quart import jsonify  # noqa: PLC0415
 
     from app import (  # noqa: PLC0415
-        _RAW_SPAN_MAX_BYTES,
         _map_to_dict,
         _mask_value_for_output,
         get_db,
@@ -511,10 +517,6 @@ async def view_incident():
     from quart import current_app  # noqa: PLC0415
 
     from app import (  # noqa: PLC0415
-        _INCIDENT_MAX_RELATED_ERRORS,
-        _INCIDENT_MAX_RELATED_RUM_EVENTS,
-        _INCIDENT_WINDOW_DEFAULT_MINUTES,
-        _INCIDENT_WINDOW_MAX_MINUTES,
         _RUM_SESSION_KEY_SQL,
         ERROR_SOURCES_SQL,
         _build_error_item,

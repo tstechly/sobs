@@ -5,23 +5,18 @@ Covers ``shared.serialization`` and ``shared.events`` (including
 ``_attr_fingerprint``).  No database or Quart application is required.
 """
 
-import base64
-import json
 import zlib
 
-import pytest
-
 from shared.events import (
+    _FINGERPRINT_SKIP_PREFIXES,
     ErrorEvent,
     LogEvent,
     MetricEvent,
     SpanEvent,
     TypedMetricEvent,
-    _FINGERPRINT_SKIP_PREFIXES,
     _attr_fingerprint,
 )
 from shared.serialization import compress, compress_json, decompress, decompress_json
-
 
 # ---------------------------------------------------------------------------
 # shared.serialization
@@ -87,7 +82,17 @@ class TestLogEvent:
         assert e.service == "test-svc"
 
     def test_fields_accessible(self):
-        e = LogEvent(ts="t", level="WARN", service="s", body="b", attrs={}, resource_attrs={}, scope_attrs={}, trace_id="", span_id="")
+        e = LogEvent(
+            ts="t",
+            level="WARN",
+            service="s",
+            body="b",
+            attrs={},
+            resource_attrs={},
+            scope_attrs={},
+            trace_id="",
+            span_id="",
+        )
         assert e.body == "b"
 
 

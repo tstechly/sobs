@@ -16,12 +16,12 @@ Sub-modules
 from __future__ import annotations
 
 from shared.events import (
+    _FINGERPRINT_SKIP_PREFIXES,
     ErrorEvent,
     LogEvent,
     MetricEvent,
     SpanEvent,
     TypedMetricEvent,
-    _FINGERPRINT_SKIP_PREFIXES,
     _attr_fingerprint,
 )
 from shared.serialization import (

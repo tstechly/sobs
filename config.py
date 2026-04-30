@@ -224,7 +224,7 @@ def _decrypt_secret_value(value: str) -> str:
     if not _SETTINGS_ENCRYPTION_SECRET:
         _log.warning("Encrypted setting found but no decryption key is configured")
         return ""
-    token = value[len(_SETTINGS_ENCRYPTION_PREFIX):]
+    token = value[len(_SETTINGS_ENCRYPTION_PREFIX) :]
     try:
         from cryptography.fernet import Fernet, InvalidToken
 

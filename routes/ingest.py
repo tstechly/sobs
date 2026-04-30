@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import threading
 import uuid
+from typing import Any
 
 from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
@@ -15,12 +18,75 @@ import telemetry as _telemetry
 from config import (
     RUM_ASSET_DIR,
     RUM_ASSET_MAX_BYTES,
-    RUM_CLIENT_AUTH_MODE,
-    RUM_CLIENT_SIGNING_KEY,
-    RUM_CLIENT_TOKEN_TTL_SEC,
 )
 
 ingest_bp = Blueprint("ingest", __name__)
+
+
+_TRACEPARENT_RE = re.compile(r"^[0-9a-fA-F]{2}-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-([0-9a-fA-F]{2})$")
+_RUM_BROWSER_CONTEXT_CACHE: dict[str, dict[str, Any]] = {}
+_RUM_BROWSER_CONTEXT_CACHE_LOCK = threading.Lock()
+_RUM_BROWSER_CONTEXT_CACHE_MAX = 10000
+
+
+def _extract_trace_fields(event: dict[str, Any]) -> tuple[str, str, int]:
+    trace_id = str(event.get("traceId", "") or "").strip().lower()
+    span_id = str(event.get("spanId", "") or "").strip().lower()
+    trace_flags = 0
+
+    raw_flags = event.get("traceFlags")
+    if raw_flags is not None and str(raw_flags).strip() != "":
+        try:
+            trace_flags = int(str(raw_flags), 16) if isinstance(raw_flags, str) else int(raw_flags)
+        except (TypeError, ValueError):
+            trace_flags = 0
+
+    if trace_id and span_id:
+        return trace_id, span_id, trace_flags
+
+    traceparent = str(event.get("traceparent", "") or "").strip()
+    match = _TRACEPARENT_RE.match(traceparent)
+    if not match:
+        return trace_id, span_id, trace_flags
+
+    parsed_trace_id = match.group(1).lower()
+    parsed_span_id = match.group(2).lower()
+    parsed_flags = int(match.group(3), 16)
+    return parsed_trace_id or trace_id, parsed_span_id or span_id, parsed_flags
+
+
+def _handle_browser_context_delta(event: dict[str, Any]) -> dict[str, str]:
+    session_id = str(event.get("sessionId", ""))
+    browser_context = event.get("browserContext", {})
+    context_hash = str(event.get("contextHash", ""))
+    context_unchanged = bool(event.get("contextUnchanged", False))
+
+    if not session_id or not context_hash:
+        return {}
+
+    with _RUM_BROWSER_CONTEXT_CACHE_LOCK:
+        if browser_context and isinstance(browser_context, dict):
+            _RUM_BROWSER_CONTEXT_CACHE[session_id] = {
+                "contextHash": context_hash,
+                "fullContext": browser_context,
+            }
+            if len(_RUM_BROWSER_CONTEXT_CACHE) > _RUM_BROWSER_CONTEXT_CACHE_MAX:
+                to_remove = len(_RUM_BROWSER_CONTEXT_CACHE) - _RUM_BROWSER_CONTEXT_CACHE_MAX
+                for _ in range(to_remove):
+                    _RUM_BROWSER_CONTEXT_CACHE.pop(next(iter(_RUM_BROWSER_CONTEXT_CACHE)), None)
+
+        if context_unchanged or (not browser_context and context_hash):
+            cached = _RUM_BROWSER_CONTEXT_CACHE.get(session_id, {})
+            if cached.get("contextHash") == context_hash:
+                browser_context = cached.get("fullContext", {})
+
+    attrs: dict[str, str] = {}
+    if isinstance(browser_context, dict):
+        for key, value in browser_context.items():
+            if value is not None and value != "":
+                attrs[f"browser.context.{key}"] = str(value)
+
+    return attrs
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +287,15 @@ async def rum_asset_download(asset_id: str):
 async def issue_rum_client_token():
     import time  # noqa: PLC0415
 
-    from app import _normalize_origin, _request_origin, _rum_client_token_encode, require_api_key  # noqa: PLC0415
+    from app import (  # noqa: PLC0415
+        RUM_CLIENT_AUTH_MODE,
+        RUM_CLIENT_SIGNING_KEY,
+        RUM_CLIENT_TOKEN_TTL_SEC,
+        _normalize_origin,
+        _request_origin,
+        _rum_client_token_encode,
+        require_api_key,
+    )
 
     @require_api_key
     async def _inner():
@@ -399,8 +473,6 @@ async def ingest_rum():
         WriteQueueFullError,
         _apply_tag_rules,
         _extract_log_attr_maps,
-        _extract_trace_fields,
-        _handle_browser_context_delta,
         _insert_rows_json_each_row,
         _json_error,
         _load_tag_rules,

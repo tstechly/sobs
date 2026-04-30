@@ -34,7 +34,7 @@ import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
 from typing import Any, Callable, cast, overload
@@ -57,10 +57,10 @@ from quart import (
     render_template,
     request,
     send_from_directory,
-    session,
     url_for,
 )
 
+import config as _config
 import masking as _masking
 import mcp as _mcp
 import telemetry as _telemetry
@@ -490,21 +490,9 @@ async def _apply_security_headers(response: Response):
 # ---------------------------------------------------------------------------
 from config import (  # noqa: E402
     _BEHIND_TLS,
-    _SETTINGS_ENCRYPTION_KEY_ENV,
-    _SETTINGS_ENCRYPTION_KEY_FILE_ENV,
-    _SETTINGS_ENCRYPTION_PREFIX,
-    _SETTINGS_ENCRYPTION_SECRET,
-    _decrypt_secret_value,
-    _encrypt_secret_value,
-    _env_flag,
-    _load_settings_encryption_secret,
-    _merge_script_name,
-    _normalize_base_path,
-    _read_env_or_file,
-    _read_file_or_env,
+    API_KEY,
     APP_REGISTRY_SEED_JSON_ENV,
     APP_REGISTRY_SEED_JSON_FILE_ENV,
-    API_KEY,
     BASE_PATH,
     BASIC_AUTH_PASSWORD,
     BASIC_AUTH_USERNAME,
@@ -524,15 +512,40 @@ from config import (  # noqa: E402
     EXTERNAL_AUTH_URL,
     MOBILE_BREAKPOINT_MAX,
     RUM_ASSET_DIR,
-    RUM_ASSET_MAX_BYTES,
     RUM_ASSET_SIGN_WINDOW_SEC,
     RUM_ASSET_SIGNING_KEY,
     RUM_CLIENT_AUTH_MODE,
     RUM_CLIENT_SIGNING_KEY,
-    RUM_CLIENT_TOKEN_TTL_SEC,
     SOURCE_MAP_DIR,
     SOURCE_MAP_ENABLE,
 )
+from config import _decrypt_secret_value as _config_decrypt_secret_value  # noqa: E402
+from config import _encrypt_secret_value as _config_encrypt_secret_value  # noqa: E402
+from config import (  # noqa: E402
+    _env_flag,
+    _normalize_base_path,
+    _read_file_or_env,
+)
+
+# Compatibility exports for tests and legacy callers that patch config-backed
+# values on the app module surface.
+_SETTINGS_ENCRYPTION_KEY_ENV = _config._SETTINGS_ENCRYPTION_KEY_ENV
+_SETTINGS_ENCRYPTION_KEY_FILE_ENV = _config._SETTINGS_ENCRYPTION_KEY_FILE_ENV
+_SETTINGS_ENCRYPTION_PREFIX = _config._SETTINGS_ENCRYPTION_PREFIX
+_SETTINGS_ENCRYPTION_SECRET = _config._SETTINGS_ENCRYPTION_SECRET
+RUM_ASSET_MAX_BYTES = _config.RUM_ASSET_MAX_BYTES
+RUM_CLIENT_TOKEN_TTL_SEC = _config.RUM_CLIENT_TOKEN_TTL_SEC
+
+
+def _encrypt_secret_value(value: str) -> str:
+    _config._SETTINGS_ENCRYPTION_SECRET = _SETTINGS_ENCRYPTION_SECRET
+    return _config_encrypt_secret_value(value)
+
+
+def _decrypt_secret_value(value: str) -> str:
+    _config._SETTINGS_ENCRYPTION_SECRET = _SETTINGS_ENCRYPTION_SECRET
+    return _config_decrypt_secret_value(value)
+
 
 app.config["APPLICATION_ROOT"] = BASE_PATH or "/"
 app.config["SECRET_KEY"] = os.environ.get("SOBS_SECRET_KEY", "sobs-dev-secret-key")
@@ -599,13 +612,13 @@ class BasePathMiddleware:
 
 app.asgi_app = BasePathMiddleware(app.asgi_app, BASE_PATH)  # type: ignore[method-assign]
 app.register_blueprint(_mcp.mcp_bp)
-from routes import ingest as _ingest_routes  # noqa: E402
 from routes import apps as _apps_routes  # noqa: E402
-from routes import logs as _logs_routes  # noqa: E402
 from routes import errors as _errors_routes  # noqa: E402
-from routes import traces as _traces_routes  # noqa: E402
+from routes import ingest as _ingest_routes  # noqa: E402
+from routes import logs as _logs_routes  # noqa: E402
 from routes import rum as _rum_routes  # noqa: E402
 from routes import settings as _settings_routes  # noqa: E402
+from routes import traces as _traces_routes  # noqa: E402
 
 app.register_blueprint(_ingest_routes.ingest_bp)
 app.register_blueprint(_apps_routes.apps_bp)
@@ -9001,12 +9014,12 @@ def _proto_kvlist_to_dict(attributes) -> dict:
 # Event dataclasses & attribute fingerprinting — imported from shared.events
 # ---------------------------------------------------------------------------
 from shared.events import (  # noqa: E402,F401
+    _FINGERPRINT_SKIP_PREFIXES,
     ErrorEvent,
     LogEvent,
     MetricEvent,
     SpanEvent,
     TypedMetricEvent,
-    _FINGERPRINT_SKIP_PREFIXES,
     _attr_fingerprint,
 )
 
@@ -9470,8 +9483,6 @@ async def _parse_otlp_request(proto_class):
         app.logger.warning("OTLP json parse error [%s]: %s", request.path, exc)
         return None, (jsonify({"error": "failed to parse json body"}), 400)
     return msg, None
-
-
 
 
 ERROR_SOURCES_SQL = """
@@ -10188,8 +10199,6 @@ def _append_regex_expression_clauses(
     for pattern in exclude_patterns:
         conditions.append(f"NOT match({column}, ?)")
         params.append(pattern)
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -12884,8 +12893,6 @@ def _load_work_item_links_for_ref_ids(db: ChDbConnection, ref_ids: list[str]) ->
     return result
 
 
-
-
 # ---------------------------------------------------------------------------
 # Web UI – Traces
 # ---------------------------------------------------------------------------
@@ -13592,8 +13599,6 @@ def _fetch_trace_metric_context(
         "match_label": "no match",
         "match_dimensions": [],
     }
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -14751,8 +14756,6 @@ async def _startup_enrichment() -> None:
     _CVE_SCAN_TASK = asyncio.create_task(_cve_scanner_loop())
     _RAW_WINDOW_COPY_TASK = asyncio.create_task(_raw_window_copy_loop())
     _GITHUB_REPO_HEALTH_TASK = asyncio.create_task(_github_repo_health_loop())
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -23734,8 +23737,6 @@ async def health_db():
             "version": "1.0.0",
         }
     )
-
-
 
 
 def _sse_json_event(event_name: str, payload: dict[str, Any]) -> str:
