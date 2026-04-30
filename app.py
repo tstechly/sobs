@@ -97,6 +97,14 @@ from shared.github_issues import _github_get_issue_detail as _shared_github_get_
 from shared.github_issues import _github_issue_is_new_state as _shared_github_issue_is_new_state
 from shared.github_issues import _search_open_pr_for_issue as _shared_search_open_pr_for_issue
 from shared.github_issues import _update_github_issue_record as _shared_update_github_issue_record
+from shared.onboarding import _decode_github_contents_payload as _shared_decode_github_contents_payload
+from shared.onboarding import _github_file_text as _shared_github_file_text
+from shared.onboarding import _github_list_directory as _shared_github_list_directory
+from shared.onboarding import _inspect_repo_for_onboarding as _shared_inspect_repo_for_onboarding
+from shared.onboarding import _parse_gemfile_lock_dependencies as _shared_parse_gemfile_lock_dependencies
+from shared.onboarding import _parse_go_sum_dependencies as _shared_parse_go_sum_dependencies
+from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_package_lock_dependencies
+from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -13455,137 +13463,23 @@ def _inventory_scope_ecosystem(scope_name: str) -> str:
 
 
 def _parse_requirements_dependencies(content: str) -> list[dict[str, str]]:
-    deps: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for raw in (content or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if " #" in line:
-            line = line.split(" #", 1)[0].strip()
-        line = line.split(";", 1)[0].strip()
-        if "==" not in line:
-            continue
-        name, version = line.split("==", 1)
-        pkg = name.strip()
-        ver = version.strip()
-        if not pkg or not ver:
-            continue
-        key = (pkg.lower(), ver)
-        if key in seen:
-            continue
-        seen.add(key)
-        deps.append({"package": pkg, "version": ver, "ecosystem": "PyPI"})
-    return deps
+    return _shared_parse_requirements_dependencies(content)
 
 
 def _parse_package_lock_dependencies(content: str) -> list[dict[str, str]]:
-    deps: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    body = _safe_json_loads(content, {})
-    if not isinstance(body, dict):
-        return deps
-
-    packages = body.get("packages")
-    if isinstance(packages, dict):
-        for pkg_path, info in packages.items():
-            if not isinstance(info, dict) or pkg_path in ("", "."):
-                continue
-            if not pkg_path.startswith("node_modules/"):
-                continue
-            name = pkg_path.split("node_modules/")[-1]
-            version = str(info.get("version") or "").strip()
-            if not name or not version:
-                continue
-            key = (name.lower(), version)
-            if key in seen:
-                continue
-            seen.add(key)
-            deps.append({"package": name, "version": version, "ecosystem": "npm"})
-
-    if deps:
-        return deps
-
-    legacy = body.get("dependencies")
-    if not isinstance(legacy, dict):
-        return deps
-    for name, info in legacy.items():
-        if not isinstance(info, dict):
-            continue
-        version = str(info.get("version") or "").strip()
-        if not name or not version:
-            continue
-        key = (str(name).lower(), version)
-        if key in seen:
-            continue
-        seen.add(key)
-        deps.append({"package": str(name), "version": version, "ecosystem": "npm"})
-    return deps
+    return _shared_parse_package_lock_dependencies(content)
 
 
 def _parse_go_sum_dependencies(content: str) -> list[dict[str, str]]:
-    deps: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for raw in (content or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        module_name = parts[0].strip()
-        module_version = parts[1].strip()
-        if module_version.endswith("/go.mod"):
-            module_version = module_version[: -len("/go.mod")]
-        if not module_name or not module_version:
-            continue
-        key = (module_name.lower(), module_version)
-        if key in seen:
-            continue
-        seen.add(key)
-        deps.append({"package": module_name, "version": module_version, "ecosystem": "Go"})
-    return deps
+    return _shared_parse_go_sum_dependencies(content)
 
 
 def _parse_gemfile_lock_dependencies(content: str) -> list[dict[str, str]]:
-    deps: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    in_specs = False
-    for raw in (content or "").splitlines():
-        if raw.strip() == "specs:":
-            in_specs = True
-            continue
-        if not in_specs:
-            continue
-        if raw and not raw.startswith(" "):
-            break
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = re.match(r"^([A-Za-z0-9_\-\.]+)\s+\(([^)]+)\)", line)
-        if not match:
-            continue
-        name = match.group(1).strip()
-        version = match.group(2).split(",", 1)[0].strip()
-        if not name or not version:
-            continue
-        key = (name.lower(), version)
-        if key in seen:
-            continue
-        seen.add(key)
-        deps.append({"package": name, "version": version, "ecosystem": "RubyGems"})
-    return deps
+    return _shared_parse_gemfile_lock_dependencies(content)
 
 
 def _decode_github_contents_payload(payload: dict[str, Any]) -> bytes:
-    content = payload.get("content")
-    encoding = str(payload.get("encoding") or "").lower()
-    if not isinstance(content, str) or encoding != "base64":
-        return b""
-    try:
-        return base64.b64decode(content, validate=False)
-    except Exception:
-        return b""
+    return _shared_decode_github_contents_payload(payload)
 
 
 def _github_actions_snapshot_name(filename: str) -> tuple[str, str, str] | None:
@@ -13613,7 +13507,6 @@ async def _github_actions_dependency_rows(
     rows: list[dict[str, Any]] = []
     commit = str(commit_sha or "").strip()
     if not commit:
-        # Without commit identity, we cannot safely bind a workflow run to this release.
         return rows
     params: dict[str, str] = {
         "status": "completed",
@@ -13762,9 +13655,7 @@ def _github_ref_candidates(release_version: str) -> list[str]:
     candidates = [f"refs/tags/{version}"]
     if not version.startswith("v"):
         candidates.append(f"refs/tags/v{version}")
-    # Some teams publish snapshot builds from branches instead of tags.
     candidates.append(f"refs/heads/{version}")
-    # GitHub Contents API also accepts a raw branch/commit-ish ref string.
     candidates.append(version)
 
     deduped: list[str] = []
@@ -13801,7 +13692,6 @@ def _text_mentions_version_tokens(text: str, tokens: set[str]) -> bool:
         return False
     lower = text.lower()
     for token in tokens:
-        # Use non-alnum boundaries to reduce unrelated partial matches.
         if re.search(rf"(^|[^0-9a-z]){re.escape(token)}([^0-9a-z]|$)", lower):
             return True
     return False
@@ -13811,7 +13701,7 @@ def _github_item_is_security_related(item: dict[str, Any]) -> bool:
     security_keywords = ("security", "vulnerability", "cve", "ghsa", "dependabot")
     title = str(item.get("title") or "").lower()
     body = str(item.get("body") or "").lower()
-    if any(k in title or k in body for k in security_keywords):
+    if any(keyword in title or keyword in body for keyword in security_keywords):
         return True
     labels = item.get("labels", [])
     if isinstance(labels, list):
@@ -13819,7 +13709,7 @@ def _github_item_is_security_related(item: dict[str, Any]) -> bool:
             if not isinstance(label, dict):
                 continue
             name = str(label.get("name") or "").lower()
-            if any(k in name for k in security_keywords):
+            if any(keyword in name for keyword in security_keywords):
                 return True
     return False
 
@@ -13848,17 +13738,17 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
             "WHERE IsDeleted=0 "
             f"ORDER BY ReleasedAt DESC LIMIT {max_releases}"
         ).fetchall()
-        app_rows = db.execute("SELECT Id, RepoUrl, Enabled " "FROM sobs_apps FINAL " "WHERE IsDeleted=0").fetchall()
+        app_rows = db.execute("SELECT Id, RepoUrl, Enabled FROM sobs_apps FINAL WHERE IsDeleted=0").fetchall()
     except Exception:
         app.logger.debug("github deps fetch: failed loading releases", exc_info=True)
         return {"attempted": 0, "inserted": 0, "max_releases": max_releases}
 
     apps_by_id = {
-        str(r[0]): {
-            "repo_url": str(r[1] or "").strip(),
-            "enabled": int(r[2] or 0),
+        str(row[0]): {
+            "repo_url": str(row[1] or "").strip(),
+            "enabled": int(row[2] or 0),
         }
-        for r in app_rows
+        for row in app_rows
     }
 
     candidates: list[tuple[str, str, str]] = [
@@ -22362,7 +22252,7 @@ def _load_masking_custom_keys(db: "ChDbConnection") -> list[str]:
         _masking.normalize_sensitive_key(value)
         for value in _load_json_string_list_setting(db, _MASKING_CUSTOM_KEYS_SETTING)
     ]
-    return sorted({key for key in keys if key})
+    return sorted({key_name for key_name in keys if key_name})
 
 
 def _save_masking_custom_keys(db: "ChDbConnection", keys: list[str]) -> None:
@@ -28579,121 +28469,33 @@ _SOBS_CI_OTEL_INDICATORS: list[str] = [
 async def _github_list_directory(
     github_token: str, owner: str, repo: str, path: str
 ) -> tuple[list[dict[str, Any]], str]:
-    """Return directory listing from GitHub Contents API and an optional error message."""
-    client = await _get_async_http_client()
-    encoded = urllib.parse.quote(path, safe="/")
-    try:
-        resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/contents/{encoded}",
-            headers=_github_api_headers(github_token),
-            timeout=12,
-        )
-        if resp.status_code != 200:
-            return [], f"GitHub API returned {resp.status_code} for {path}"
-        data = resp.json() if resp.content else []
-        return (data if isinstance(data, list) else []), ""
-    except Exception as exc:
-        return [], f"GitHub API request failed for {path}: {exc}"
+    return await _shared_github_list_directory(
+        github_token,
+        owner,
+        repo,
+        path,
+        get_async_http_client=_get_async_http_client,
+    )
 
 
 async def _github_file_text(github_token: str, owner: str, repo: str, path: str) -> tuple[str, str]:
-    """Fetch a file's text content from GitHub Contents API and an optional error message."""
-    client = await _get_async_http_client()
-    encoded = urllib.parse.quote(path, safe="/")
-    try:
-        resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/contents/{encoded}",
-            headers=_github_api_headers(github_token),
-            timeout=12,
-        )
-        if resp.status_code != 200:
-            return "", f"GitHub API returned {resp.status_code} for {path}"
-        data = resp.json() if resp.content else {}
-        if not isinstance(data, dict):
-            return "", f"Unexpected GitHub API response for {path}"
-        raw = _decode_github_contents_payload(data)
-        return (raw.decode("utf-8", errors="replace") if raw else ""), ""
-    except Exception as exc:
-        return "", f"GitHub API request failed for {path}: {exc}"
+    return await _shared_github_file_text(
+        github_token,
+        owner,
+        repo,
+        path,
+        get_async_http_client=_get_async_http_client,
+    )
 
 
 async def _inspect_repo_for_onboarding(github_token: str, owner: str, repo: str) -> dict[str, Any]:
-    """Inspect a GitHub repo and return onboarding readiness signals.
-
-    Returns a dict with keys:
-    - has_github_actions: bool — .github/workflows/ directory exists with .yml files
-    - sobs_ci_found: bool — at least one workflow references Sobs CI metadata
-    - sobs_otel_found: bool — at least one workflow or manifest references OTEL
-    - copilot_available: bool — Copilot cloud agent can be assigned
-    - workflow_files: list[str] — names of found workflow YAML files
-    - error: str — non-empty on inspection failure
-    """
-    if not github_token or not owner or not repo:
-        return {
-            "has_github_actions": False,
-            "sobs_ci_found": False,
-            "sobs_otel_found": False,
-            "copilot_available": False,
-            "workflow_files": [],
-            "error": "GitHub token or repository not configured",
-        }
-
-    # 1. List .github/workflows/
-    workflow_entries, workflow_error = await _github_list_directory(github_token, owner, repo, ".github/workflows")
-    if workflow_error and " 404 " not in f" {workflow_error} ":
-        return {
-            "has_github_actions": False,
-            "sobs_ci_found": False,
-            "sobs_otel_found": False,
-            "copilot_available": False,
-            "workflow_files": [],
-            "error": workflow_error,
-        }
-    workflow_files = [
-        e["name"]
-        for e in workflow_entries
-        if isinstance(e, dict) and str(e.get("name", "")).endswith((".yml", ".yaml"))
-    ]
-    has_github_actions = bool(workflow_files)
-
-    # 2. Read workflow file contents and check for Sobs / OTEL indicators
-    sobs_ci_found = False
-    sobs_otel_found = False
-    inspect_error = ""
-    for filename in workflow_files[:10]:  # cap at 10 to avoid excessive API calls
-        content, content_error = await _github_file_text(github_token, owner, repo, f".github/workflows/{filename}")
-        if content_error and not inspect_error:
-            inspect_error = content_error
-            continue
-        lower = content.lower()
-        if not sobs_ci_found and any(ind in lower for ind in _SOBS_CI_METADATA_INDICATORS):
-            sobs_ci_found = True
-        if not sobs_otel_found and any(ind in lower for ind in _SOBS_CI_OTEL_INDICATORS):
-            sobs_otel_found = True
-        if sobs_ci_found and sobs_otel_found:
-            break
-
-    # Also check common manifest/config files for OTEL if not found in workflows
-    if not sobs_otel_found:
-        for check_path in ("requirements.txt", "package.json", "go.mod", "pom.xml", "build.gradle"):
-            content, content_error = await _github_file_text(github_token, owner, repo, check_path)
-            if content_error and " 404 " not in f" {content_error} " and not inspect_error:
-                inspect_error = content_error
-            if content and any(ind in content.lower() for ind in _SOBS_CI_OTEL_INDICATORS):
-                sobs_otel_found = True
-                break
-
-    # 3. Check Copilot availability
-    copilot_available = await _github_repo_supports_copilot_assignment(github_token, f"{owner}/{repo}")
-
-    return {
-        "has_github_actions": has_github_actions,
-        "sobs_ci_found": sobs_ci_found,
-        "sobs_otel_found": sobs_otel_found,
-        "copilot_available": copilot_available,
-        "workflow_files": workflow_files,
-        "error": inspect_error,
-    }
+    return await _shared_inspect_repo_for_onboarding(
+        github_token,
+        owner,
+        repo,
+        get_async_http_client=_get_async_http_client,
+        github_repo_supports_copilot_assignment=_github_repo_supports_copilot_assignment,
+    )
 
 
 async def _github_get_issue_detail(github_token: str, github_repo: str, issue_number: int) -> dict[str, Any]:
