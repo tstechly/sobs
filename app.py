@@ -10,7 +10,6 @@ import atexit
 import base64
 import copy
 import difflib
-import fnmatch
 import hashlib
 import hmac
 import inspect
@@ -235,6 +234,12 @@ from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_
 from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 from shared.onboarding import _persist_onboarding_work_item as _shared_persist_onboarding_work_item
 from shared.onboarding import _resolve_onboarding_issue_request as _shared_resolve_onboarding_issue_request
+from shared.otlp_security import _append_vary_header as _shared_append_vary_header
+from shared.otlp_security import _apply_security_headers as _shared_apply_security_headers
+from shared.otlp_security import _origin_allowed_for_otlp as _shared_origin_allowed_for_otlp
+from shared.otlp_security import _otlp_cors_allow_methods as _shared_otlp_cors_allow_methods
+from shared.otlp_security import _path_needs_otlp_cors as _shared_path_needs_otlp_cors
+from shared.otlp_security import _request_is_secure_context as _shared_request_is_secure_context
 from shared.rum_assets import _asset_extension as _shared_asset_extension
 from shared.rum_assets import _rum_asset_signature as _shared_rum_asset_signature
 from shared.rum_assets import _rum_asset_signature_payload as _shared_rum_asset_signature_payload
@@ -550,12 +555,11 @@ async def _maybe_await(value: Any) -> Any:
 
 
 def _request_is_secure_context() -> bool:
-    if _BEHIND_TLS:
-        return True
-    forwarded_proto = str(request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
-    if forwarded_proto == "https":
-        return True
-    return str(request.scheme or "").lower() == "https"
+    return _shared_request_is_secure_context(
+        behind_tls=_BEHIND_TLS,
+        forwarded_proto_header=str(request.headers.get("X-Forwarded-Proto") or ""),
+        request_scheme=str(request.scheme or ""),
+    )
 
 
 _OTLP_CORS_ALLOWED_ORIGINS = tuple(
@@ -583,97 +587,33 @@ _OTLP_CORS_INGEST_PATHS = frozenset(
     }
 )
 
-# Default ports per scheme – used to normalise origins for matching.
-_SCHEME_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
-
 
 def _origin_allowed_for_otlp(origin: str) -> bool:
-    parsed = urllib.parse.urlparse(origin)
-    scheme = (parsed.scheme or "").lower()
-    host = (parsed.hostname or "").lower()
-    netloc = (parsed.netloc or "").lower()
-    if scheme not in {"http", "https"} or not netloc:
-        return False
-
-    with_port = f"{scheme}://{netloc}"
-    # Include the port-stripped form only when the origin carries no explicit
-    # port or uses the scheme default (e.g. https://example.com:443 →
-    # https://example.com).  Non-default ports must be matched explicitly so
-    # that a pattern like "https://example.com" does not accidentally allow
-    # "https://example.com:8443".
-    candidates: list[str] = [with_port]
-    try:
-        parsed_port = parsed.port
-    except ValueError:
-        return False
-    if parsed_port is None or parsed_port == _SCHEME_DEFAULT_PORTS.get(scheme):
-        without_port = f"{scheme}://{host}" if host else with_port
-        if without_port != with_port:
-            candidates.append(without_port)
-    for pattern in _OTLP_CORS_ALLOWED_ORIGINS:
-        p = pattern.lower()
-        if any(fnmatch.fnmatch(c, p) for c in candidates):
-            return True
-    return False
+    return _shared_origin_allowed_for_otlp(origin, allowed_origins=_OTLP_CORS_ALLOWED_ORIGINS)
 
 
 def _path_needs_otlp_cors(path: str) -> bool:
-    """Return True if *path* is an OTLP/RUM ingest endpoint that may receive
-    browser cross-origin requests."""
-    if path in _OTLP_CORS_INGEST_PATHS:
-        return True
-    # Dynamic sub-paths under /v1/rum/assets/ (individual asset downloads).
-    if path.startswith("/v1/rum/assets/"):
-        return True
-    return False
+    return _shared_path_needs_otlp_cors(path, ingest_paths=_OTLP_CORS_INGEST_PATHS)
 
 
 def _otlp_cors_allow_methods(path: str) -> str:
-    """Return allowed methods for CORS preflight on OTLP/RUM endpoints."""
-    if path.startswith("/v1/rum/assets/"):
-        return "GET, HEAD, OPTIONS"
-    return "POST, OPTIONS"
+    return _shared_otlp_cors_allow_methods(path)
 
 
 def _append_vary_header(response: Response, value: str) -> None:
-    existing = str(response.headers.get("Vary") or "")
-    if not existing:
-        response.headers["Vary"] = value
-        return
-    parts = [p.strip() for p in existing.split(",") if p.strip()]
-    # Vary tokens are case-insensitive; compare in lower-case to avoid dupes.
-    if value.lower() not in {p.lower() for p in parts}:
-        response.headers["Vary"] = ", ".join(parts + [value])
+    _shared_append_vary_header(response, value)
 
 
 @app.after_request
 async def _apply_security_headers(response: Response):
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
-    if _request_is_secure_context():
-        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-
-    if _path_needs_otlp_cors(request.path):
-        origin = str(request.headers.get("Origin") or "").strip()
-        if origin and _origin_allowed_for_otlp(origin):
-            response.headers["Access-Control-Allow-Origin"] = origin
-            _append_vary_header(response, "Origin")
-            response.headers.setdefault("Access-Control-Allow-Credentials", "true")
-            response.headers.setdefault("Access-Control-Allow-Methods", _otlp_cors_allow_methods(request.path))
-            response.headers.setdefault(
-                "Access-Control-Allow-Headers",
-                (
-                    "Content-Type, Authorization, X-API-Key, "
-                    "X-SOBS-RUM-Client, X-SOBS-RUM-Signature, X-SOBS-RUM-Timestamp, "
-                    "X-SOBS-Asset-Timestamp, X-SOBS-Asset-Signature"
-                ),
-            )
-            response.headers.setdefault("Access-Control-Max-Age", "600")
-
-    return response
+    return _shared_apply_security_headers(
+        response,
+        request_path=request.path,
+        request_origin=str(request.headers.get("Origin") or ""),
+        secure_context=_request_is_secure_context(),
+        allowed_origins=_OTLP_CORS_ALLOWED_ORIGINS,
+        ingest_paths=_OTLP_CORS_INGEST_PATHS,
+    )
 
 
 # ---------------------------------------------------------------------------
