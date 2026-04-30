@@ -18,6 +18,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ai_runtime.py` now measures `99%` line coverage in its dedicated direct test run after extracting the shared LLM request assembly, streaming parsing, guard prompt/parsing logic, thinking/token/timeout resolution, and DLP endpoint helpers from `app.py`.
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run after extracting the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers in Milestone 5.
+- `shared/ai_pricing.py` now measures `100%` line coverage in its dedicated direct test run after extracting AI model-name normalization, pricing-entry coercion, saved/confirmed pricing loaders, observed-model pricing inference/merge helpers, sensitive-setting detection, and repo-scoped GitHub token helpers from `app.py`.
 - `shared/github.py` measures `97.06%` line coverage, which validates Milestone 1 as a successful high-confidence extraction.
 - `shared/github_issues.py` now measures `96.4%` line coverage after the dedicated branch tests added in this phase.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run after extracting the managed CI push API-key TTL, hashing, status, validation, rotation, revocation, and realtime-flag helpers in Milestone 5.
@@ -138,8 +139,10 @@ Status: Partially implemented out of sequence for shared/helper seams only. No a
 Measured result so far:
 
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run.
+- `shared/ai_pricing.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
+- `app.py` now delegates AI model-name normalization, pricing-entry coercion, saved/confirmed pricing loading, observed-model pricing inference/merge logic, sensitive-setting detection, and repo-scoped GitHub token load/save helpers to `shared/ai_pricing.py`.
 - `app.py` now delegates the managed CI push API-key TTL, expiry, hashing, status, validation, rotation, revocation, and realtime-flag helpers to `shared/ci_push.py`.
 
 Why these slices were taken early:

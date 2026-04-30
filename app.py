@@ -87,6 +87,18 @@ from shared.ai_memory import _text_embedding as _shared_text_embedding
 from shared.ai_memory import _tokenize_for_embedding as _shared_tokenize_for_embedding
 from shared.ai_memory import _tool_status_label as _shared_tool_status_label
 from shared.ai_memory import _upsert_ai_memory as _shared_upsert_ai_memory
+from shared.ai_pricing import _coerce_ai_pricing_entry as _shared_coerce_ai_pricing_entry
+from shared.ai_pricing import _copy_ai_pricing_entry as _shared_copy_ai_pricing_entry
+from shared.ai_pricing import _infer_ai_pricing_for_model as _shared_infer_ai_pricing_for_model
+from shared.ai_pricing import _is_sensitive_ai_setting_key as _shared_is_sensitive_ai_setting_key
+from shared.ai_pricing import _load_ai_pricing as _shared_load_ai_pricing
+from shared.ai_pricing import _load_ai_pricing_with_sources as _shared_load_ai_pricing_with_sources
+from shared.ai_pricing import _load_confirmed_ai_pricing_models as _shared_load_confirmed_ai_pricing_models
+from shared.ai_pricing import _load_observed_ai_models as _shared_load_observed_ai_models
+from shared.ai_pricing import _load_repo_scoped_github_token as _shared_load_repo_scoped_github_token
+from shared.ai_pricing import _load_saved_ai_pricing as _shared_load_saved_ai_pricing
+from shared.ai_pricing import _normalize_ai_model_name as _shared_normalize_ai_model_name
+from shared.ai_pricing import _save_repo_scoped_github_token as _shared_save_repo_scoped_github_token
 from shared.ai_runtime import _build_llama_guard_prompt as _shared_build_llama_guard_prompt
 from shared.ai_runtime import _build_oss_safeguard_prompt as _shared_build_oss_safeguard_prompt
 from shared.ai_runtime import _call_llm_endpoint as _shared_call_llm_endpoint
@@ -2790,122 +2802,67 @@ _AI_PRICING_INFERENCE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
 
 
 def _normalize_ai_model_name(model: Any) -> str:
-    return str(model or "").strip().lower()
+    return _shared_normalize_ai_model_name(model)
 
 
 def _copy_ai_pricing_entry(prices: dict[str, float]) -> dict[str, float]:
-    return {"in": float(prices["in"]), "out": float(prices["out"])}
+    return _shared_copy_ai_pricing_entry(prices)
 
 
 def _coerce_ai_pricing_entry(prices: Any) -> dict[str, float] | None:
-    if not isinstance(prices, dict) or "in" not in prices or "out" not in prices:
-        return None
-    try:
-        return {"in": float(prices["in"]), "out": float(prices["out"])}
-    except (TypeError, ValueError):
-        return None
+    return _shared_coerce_ai_pricing_entry(prices)
 
 
 def _load_saved_ai_pricing(db: "ChDbConnection") -> dict[str, dict[str, float]]:
-    saved: dict[str, dict[str, float]] = {}
-    raw = _load_ai_setting(db, "ai.model_pricing", "").strip()
-    if not raw:
-        return saved
-    try:
-        user_pricing = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return saved
-    if not isinstance(user_pricing, dict):
-        return saved
-    for model_key, prices in user_pricing.items():
-        normalized_key = _normalize_ai_model_name(model_key)
-        entry = _coerce_ai_pricing_entry(prices)
-        if normalized_key and entry:
-            saved[normalized_key] = entry
-    return saved
+    return _shared_load_saved_ai_pricing(db, load_ai_setting=_load_ai_setting)
 
 
 def _load_confirmed_ai_pricing_models(db: "ChDbConnection") -> set[str]:
-    raw = _load_ai_setting(db, "ai.model_pricing_confirmed", "").strip()
-    if not raw:
-        return set()
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return set()
-    if not isinstance(parsed, list):
-        return set()
-    confirmed: set[str] = set()
-    for model in parsed:
-        model_key = _normalize_ai_model_name(model)
-        if model_key:
-            confirmed.add(model_key)
-    return confirmed
+    return _shared_load_confirmed_ai_pricing_models(db, load_ai_setting=_load_ai_setting)
 
 
 def _infer_ai_pricing_for_model(model: str) -> dict[str, float]:
-    normalized = _normalize_ai_model_name(model)
-    if not normalized:
-        return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[_AI_PRICING_GENERIC_DEFAULT_KEY])
-    if normalized in _DEFAULT_AI_PRICING:
-        return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[normalized])
-    for known_key, prices in _DEFAULT_AI_PRICING.items():
-        if normalized in known_key or known_key in normalized:
-            return _copy_ai_pricing_entry(prices)
-    for needles, base_key in _AI_PRICING_INFERENCE_RULES:
-        if any(needle in normalized for needle in needles):
-            return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[base_key])
-    return _copy_ai_pricing_entry(_DEFAULT_AI_PRICING[_AI_PRICING_GENERIC_DEFAULT_KEY])
+    return _shared_infer_ai_pricing_for_model(
+        model,
+        default_ai_pricing=_DEFAULT_AI_PRICING,
+        generic_default_key=_AI_PRICING_GENERIC_DEFAULT_KEY,
+        inference_rules=_AI_PRICING_INFERENCE_RULES,
+    )
 
 
 def _load_observed_ai_models(db: "ChDbConnection", limit: int = 200) -> list[str]:
-    safe_limit = max(1, min(int(limit), 500))
-    try:
-        rows = db.execute(
-            "SELECT DISTINCT SpanAttributes['gen_ai.request.model'] AS model "
-            "FROM otel_traces "
-            f"WHERE {_AI_SPAN_CONDITION} AND SpanAttributes['gen_ai.request.model'] != '' "
-            f"ORDER BY model LIMIT {safe_limit}"
-        ).fetchall()
-    except Exception:
-        return []
-    normalized_models = []
-    seen: set[str] = set()
-    for row in rows:
-        model_key = _normalize_ai_model_name(row[0] if row else "")
-        if model_key and model_key not in seen:
-            seen.add(model_key)
-            normalized_models.append(model_key)
-    return normalized_models
+    return _shared_load_observed_ai_models(db, ai_span_condition=_AI_SPAN_CONDITION, limit=limit)
 
 
 def _load_ai_pricing_with_sources(db: "ChDbConnection") -> tuple[dict[str, dict[str, float]], dict[str, str]]:
-    merged: dict[str, dict[str, float]] = {
-        model_key: _copy_ai_pricing_entry(prices) for model_key, prices in _DEFAULT_AI_PRICING.items()
-    }
-    sources: dict[str, str] = {model_key: "default" for model_key in _DEFAULT_AI_PRICING}
-
-    for model_key in _load_observed_ai_models(db):
-        if model_key not in merged:
-            merged[model_key] = _infer_ai_pricing_for_model(model_key)
-            sources[model_key] = "inferred"
-
-    confirmed_models = _load_confirmed_ai_pricing_models(db)
-    for model_key, prices in _load_saved_ai_pricing(db).items():
-        merged[model_key] = prices
-        if sources.get(model_key) == "inferred":
-            if model_key in confirmed_models:
-                sources[model_key] = "confirmed"
-        elif model_key not in sources:
-            sources[model_key] = "custom"
-
-    return merged, sources
+    return _shared_load_ai_pricing_with_sources(
+        db,
+        default_ai_pricing=_DEFAULT_AI_PRICING,
+        generic_default_key=_AI_PRICING_GENERIC_DEFAULT_KEY,
+        inference_rules=_AI_PRICING_INFERENCE_RULES,
+        load_ai_setting=_load_ai_setting,
+        ai_span_condition=_AI_SPAN_CONDITION,
+        load_observed_ai_models_fn=_load_observed_ai_models,
+        load_confirmed_ai_pricing_models_fn=_load_confirmed_ai_pricing_models,
+        load_saved_ai_pricing_fn=_load_saved_ai_pricing,
+        infer_ai_pricing_for_model_fn=_infer_ai_pricing_for_model,
+    )
 
 
 def _load_ai_pricing(db: "ChDbConnection") -> dict[str, dict[str, float]]:
     """Return merged model pricing including defaults, observed models, and user overrides."""
-    merged, _sources = _load_ai_pricing_with_sources(db)
-    return merged
+    return _shared_load_ai_pricing(
+        db,
+        default_ai_pricing=_DEFAULT_AI_PRICING,
+        generic_default_key=_AI_PRICING_GENERIC_DEFAULT_KEY,
+        inference_rules=_AI_PRICING_INFERENCE_RULES,
+        load_ai_setting=_load_ai_setting,
+        ai_span_condition=_AI_SPAN_CONDITION,
+        load_observed_ai_models_fn=_load_observed_ai_models,
+        load_confirmed_ai_pricing_models_fn=_load_confirmed_ai_pricing_models,
+        load_saved_ai_pricing_fn=_load_saved_ai_pricing,
+        infer_ai_pricing_for_model_fn=_infer_ai_pricing_for_model,
+    )
 
 
 _AI_ENV_OVERRIDES: dict[str, tuple[str, str]] = {
@@ -2923,20 +2880,28 @@ _AI_ENV_OVERRIDES: dict[str, tuple[str, str]] = {
 
 
 def _is_sensitive_ai_setting_key(key: str) -> bool:
-    normalized = str(key or "").strip().lower()
-    return normalized in _AI_SENSITIVE_SETTING_KEYS or normalized.startswith("ai.github_token.repo.")
+    return _shared_is_sensitive_ai_setting_key(key, sensitive_setting_keys=_AI_SENSITIVE_SETTING_KEYS)
 
 
 def _load_repo_scoped_github_token(db: ChDbConnection, owner: str, repo: str) -> str:
-    if not owner or not repo:
-        return ""
-    return _load_ai_setting(db, _github_repo_token_key(owner, repo), "").strip()
+    return _shared_load_repo_scoped_github_token(
+        db,
+        owner,
+        repo,
+        load_ai_setting=_load_ai_setting,
+        github_repo_token_key=_github_repo_token_key,
+    )
 
 
 def _save_repo_scoped_github_token(db: ChDbConnection, owner: str, repo: str, token: str) -> None:
-    if not owner or not repo or not token.strip():
-        return
-    _save_ai_setting(db, _github_repo_token_key(owner, repo), token.strip())
+    _shared_save_repo_scoped_github_token(
+        db,
+        owner,
+        repo,
+        token,
+        save_ai_setting=_save_ai_setting,
+        github_repo_token_key=_github_repo_token_key,
+    )
 
 
 _AI_AGENT_MAX_ISSUES_DEFAULT = 5
