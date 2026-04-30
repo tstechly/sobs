@@ -9,6 +9,13 @@ from typing import Any
 
 from quart import Blueprint, flash, redirect, render_template, request, session, url_for
 
+from shared.github import (
+    _github_token_expiry_date_input_value,
+    _github_token_expiry_status,
+    _normalize_github_token_expiry_input,
+    _resolve_github_repo_fields,
+)
+
 settings_bp = Blueprint("settings", __name__)
 
 
@@ -16,8 +23,6 @@ settings_bp = Blueprint("settings", __name__)
 async def view_ai_settings():
     from app import (  # noqa: PLC0415
         _DEFAULT_AI_PRICING,
-        _github_token_expiry_date_input_value,
-        _github_token_expiry_status,
         _load_ai_pricing_with_sources,
         _load_all_ai_settings,
         _load_anomaly_rules,
@@ -68,7 +73,6 @@ async def save_ai_settings():
         _coerce_ai_pricing_entry,
         _load_ai_setting,
         _normalize_ai_model_name,
-        _normalize_github_token_expiry_input,
         _save_ai_setting,
         get_db,
         require_basic_auth,
@@ -230,11 +234,8 @@ async def view_settings_repositories():
         _CI_PUSH_API_KEY_MAX_TTL_DAYS,
         _GITHUB_TOKEN_EXPIRY_WARNING_DAYS,
         _ci_push_api_key_status,
-        _github_token_expiry_date_input_value,
-        _github_token_expiry_status,
         _load_all_ai_settings,
         _load_repo_scoped_github_token,
-        _resolve_github_repo_fields,
         _serialize_app_row,
         get_db,
         require_basic_auth,
@@ -330,9 +331,7 @@ async def create_settings_repository():
     from app import (  # noqa: PLC0415
         _app_slug,
         _insert_rows_json_each_row,
-        _normalize_github_token_expiry_input,
         _now_iso,
-        _resolve_github_repo_fields,
         _save_ai_setting,
         _save_repo_scoped_github_token,
         get_db,
@@ -537,7 +536,6 @@ async def update_settings_repository(app_id: str):
         _find_app_by_id,
         _insert_rows_json_each_row,
         _now_iso,
-        _resolve_github_repo_fields,
         _save_repo_scoped_github_token,
         get_db,
         require_basic_auth,

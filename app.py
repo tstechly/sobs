@@ -64,6 +64,39 @@ import config as _config
 import masking as _masking
 import mcp as _mcp
 import telemetry as _telemetry
+from shared.ai_chart import _insert_missing_json_commas as _shared_insert_missing_json_commas
+from shared.ai_chart import _normalize_chart_spec_text as _shared_normalize_chart_spec_text
+from shared.ai_chart import _parse_chart_spec_json as _shared_parse_chart_spec_json
+from shared.ai_chart import _repair_chart_spec_json_with_llm as _shared_repair_chart_spec_json_with_llm
+from shared.ai_chart import _vanna_generate_chart_spec as _shared_vanna_generate_chart_spec
+from shared.ai_sql import _auto_repair_incomplete_cte_sql as _shared_auto_repair_incomplete_cte_sql
+from shared.ai_sql import _repair_truncated_in_clause_literals as _shared_repair_truncated_in_clause_literals
+from shared.ai_sql import _vanna_generate_named_queries as _shared_vanna_generate_named_queries
+from shared.ai_sql import _vanna_generate_sql as _shared_vanna_generate_sql
+from shared.ai_sql import _vanna_repair_sql as _shared_vanna_repair_sql
+from shared.github import (
+    _build_github_repo_url,
+    _github_repo_token_key,
+    _github_token_expiry_status,
+    _normalize_github_token_expiry_input,
+    _parse_github_repo_owner_name,
+    _resolve_github_repo_fields,
+)
+from shared.github import _validate_github_token as _shared_validate_github_token
+from shared.github_issues import _classify_issue_dedupe_with_llm as _shared_classify_issue_dedupe_with_llm
+from shared.github_issues import _create_github_issue as _shared_create_github_issue
+from shared.github_issues import _create_github_issue_record as _shared_create_github_issue_record
+from shared.github_issues import _create_or_update_onboarding_issue as _shared_create_or_update_onboarding_issue
+from shared.github_issues import _extract_first_json_object as _shared_extract_first_json_object
+from shared.github_issues import _fallback_issue_dedupe_decision as _shared_fallback_issue_dedupe_decision
+from shared.github_issues import _fetch_open_github_issues as _shared_fetch_open_github_issues
+from shared.github_issues import (
+    _github_api_headers,
+)
+from shared.github_issues import _github_get_issue_detail as _shared_github_get_issue_detail
+from shared.github_issues import _github_issue_is_new_state as _shared_github_issue_is_new_state
+from shared.github_issues import _search_open_pr_for_issue as _shared_search_open_pr_for_issue
+from shared.github_issues import _update_github_issue_record as _shared_update_github_issue_record
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -123,32 +156,24 @@ def _set_masking_settings_cache(
 ) -> None:
     with _MASKING_SETTINGS_CACHE_LOCK:
         if output_enabled is not None:
-            _MASKING_SETTINGS_CACHE["output_enabled"] = output_enabled
+            _MASKING_SETTINGS_CACHE["output_enabled"] = bool(output_enabled)
         if sql_output_enabled is not None:
-            _MASKING_SETTINGS_CACHE["sql_output_enabled"] = sql_output_enabled
+            _MASKING_SETTINGS_CACHE["sql_output_enabled"] = bool(sql_output_enabled)
         _MASKING_SETTINGS_CACHE["loaded"] = loaded
-
-
-def _load_masking_settings_flags(db: "ChDbConnection") -> tuple[bool, bool]:
-    output_enabled = _is_truthy_setting(_get_app_setting(db, _MASKING_OUTPUT_ENABLED_SETTING), default=True)
-    sql_output_enabled = _is_truthy_setting(_get_app_setting(db, _MASKING_SQL_OUTPUT_ENABLED_SETTING), default=True)
-    return output_enabled, sql_output_enabled
 
 
 def _get_masking_settings_flags(db: "ChDbConnection | None" = None) -> tuple[bool, bool]:
     with _MASKING_SETTINGS_CACHE_LOCK:
-        if _MASKING_SETTINGS_CACHE.get("loaded"):
-            return (
-                bool(_MASKING_SETTINGS_CACHE.get("output_enabled", True)),
-                bool(_MASKING_SETTINGS_CACHE.get("sql_output_enabled", True)),
-            )
+        if _MASKING_SETTINGS_CACHE["loaded"]:
+            output_enabled = bool(_MASKING_SETTINGS_CACHE["output_enabled"])
+            sql_output_enabled = bool(_MASKING_SETTINGS_CACHE["sql_output_enabled"])
+            return output_enabled, sql_output_enabled
 
-    try:
-        resolved_db = db if db is not None else get_db()
-        output_enabled, sql_output_enabled = _load_masking_settings_flags(resolved_db)
-    except Exception:
-        output_enabled, sql_output_enabled = True, True
-
+    db_conn = db or get_db()
+    output_enabled = _is_truthy_setting(_get_app_setting(db_conn, _MASKING_OUTPUT_ENABLED_SETTING), default=True)
+    sql_output_enabled = _is_truthy_setting(
+        _get_app_setting(db_conn, _MASKING_SQL_OUTPUT_ENABLED_SETTING), default=True
+    )
     _set_masking_settings_cache(
         output_enabled=output_enabled,
         sql_output_enabled=sql_output_enabled,
@@ -2826,10 +2851,6 @@ def _is_sensitive_ai_setting_key(key: str) -> bool:
     return normalized in _AI_SENSITIVE_SETTING_KEYS or normalized.startswith("ai.github_token.repo.")
 
 
-def _github_repo_token_key(owner: str, repo: str) -> str:
-    return f"ai.github_token.repo.{owner.strip().lower()}/{repo.strip().lower()}"
-
-
 def _load_repo_scoped_github_token(db: ChDbConnection, owner: str, repo: str) -> str:
     if not owner or not repo:
         return ""
@@ -3051,77 +3072,6 @@ def _load_all_ai_settings(db: ChDbConnection) -> dict[str, str]:
     return result
 
 
-def _parse_iso_datetime(value: str) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _normalize_github_token_expiry_input(value: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    # Support either date input (YYYY-MM-DD) or full ISO timestamp.
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
-        return f"{raw}T23:59:59+00:00"
-    parsed = _parse_iso_datetime(raw)
-    if not parsed:
-        return ""
-    return parsed.isoformat()
-
-
-def _github_token_expiry_date_input_value(value: str) -> str:
-    parsed = _parse_iso_datetime(value)
-    return parsed.date().isoformat() if parsed else ""
-
-
-def _github_token_expiry_status(
-    expires_at: str, warning_days: int = _GITHUB_TOKEN_EXPIRY_WARNING_DAYS
-) -> dict[str, Any]:
-    parsed = _parse_iso_datetime(expires_at)
-    if not parsed:
-        return {
-            "state": "unknown",
-            "expires_at": "",
-            "days_remaining": None,
-            "message": "Token expiry date not set",
-        }
-
-    now_utc = datetime.now(timezone.utc)
-    seconds_remaining = int((parsed - now_utc).total_seconds())
-    days_remaining = seconds_remaining // 86400
-
-    if seconds_remaining < 0:
-        return {
-            "state": "expired",
-            "expires_at": parsed.isoformat(),
-            "days_remaining": days_remaining,
-            "message": f"Token expired on {parsed.date().isoformat()}",
-        }
-    if days_remaining <= warning_days:
-        return {
-            "state": "warning",
-            "expires_at": parsed.isoformat(),
-            "days_remaining": days_remaining,
-            "message": f"Token expires in {days_remaining} day(s)",
-        }
-    return {
-        "state": "healthy",
-        "expires_at": parsed.isoformat(),
-        "days_remaining": days_remaining,
-        "message": f"Token healthy ({days_remaining} day(s) remaining)",
-    }
-
-
 def _normalize_ttl_days(value: Any, default_days: int = _CI_PUSH_API_KEY_DEFAULT_TTL_DAYS) -> int:
     try:
         parsed = int(str(value).strip())
@@ -3265,31 +3215,7 @@ def _revoke_ci_push_api_key(db: ChDbConnection, app_id: str) -> None:
 
 
 async def _validate_github_token(github_token: str) -> tuple[str, str]:
-    token = str(github_token or "").strip()
-    if not token:
-        return "missing", "No token configured"
-
-    client = await _get_async_http_client()
-    try:
-        response = await client.get(
-            "https://api.github.com/rate_limit",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            timeout=15.0,
-        )
-    except Exception as exc:
-        return "error", f"Validation request failed: {exc.__class__.__name__}"
-
-    if response.status_code == 200:
-        return "valid", "Token is valid"
-    if response.status_code == 401:
-        return "invalid", "Token rejected (401 Unauthorized)"
-    if response.status_code == 403:
-        return "error", "GitHub returned 403 (forbidden or rate-limited)"
-    return "error", f"GitHub returned HTTP {response.status_code}"
+    return await _shared_validate_github_token(github_token, _get_async_http_client)
 
 
 def _query_page_enabled(settings: dict[str, str] | None = None) -> bool:
@@ -5194,16 +5120,17 @@ async def _create_github_issue(
     *,
     mask_output_enabled: bool = True,
 ) -> str:
-    """Create a GitHub issue and return the HTML URL."""
-    result = await _create_github_issue_record(
+    return await _shared_create_github_issue(
         github_token,
         github_repo,
         title,
         body_md,
         labels,
+        get_async_http_client=_get_async_http_client,
+        mask_string_for_output=_mask_string_for_output,
+        logger=log,
         mask_output_enabled=mask_output_enabled,
     )
-    return str(result.get("issue_url", ""))
 
 
 async def _github_repo_supports_copilot_assignment(github_token: str, github_repo: str) -> bool:
@@ -5699,21 +5626,6 @@ def _count_active_copilot_assignments(db: ChDbConnection) -> int:
     return int(row["c"]) if row else 0
 
 
-def _github_api_headers(
-    github_token: str, *, include_content_type: bool = False, extra: dict[str, str] | None = None
-) -> dict[str, str]:
-    headers = {
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if include_content_type:
-        headers["Content-Type"] = "application/json"
-    if extra:
-        headers.update(extra)
-    return headers
-
-
 def _parse_bounded_int_setting(
     settings: dict[str, str],
     key: str,
@@ -5852,75 +5764,22 @@ async def _fetch_open_github_issues(
     github_repo: str,
     limit: int = _GITHUB_ISSUE_DEDUPE_CANDIDATE_LIMIT,
 ) -> list[dict[str, Any]]:
-    if not github_token or not github_repo:
-        return []
-    owner, repo = _parse_github_repo_owner_name(github_repo)
-    if not owner or not repo:
-        return []
-    client = await _get_async_http_client()
-    try:
-        resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/issues",
-            params={"state": "open", "per_page": str(max(1, min(100, limit)))},
-            headers=_github_api_headers(github_token),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json() if resp.content else []
-    except Exception as exc:
-        log.warning("GitHub open issue fetch failed for %s/%s: %s", owner, repo, exc)
-        return []
-    if not isinstance(payload, list):
-        return []
-
-    issues: list[dict[str, Any]] = []
-    for item in payload:
-        if not isinstance(item, dict) or isinstance(item.get("pull_request"), dict):
-            continue
-        issues.append(
-            {
-                "issue_number": int(item.get("number", 0) or 0),
-                "issue_url": str(item.get("html_url") or ""),
-                "issue_title": str(item.get("title") or ""),
-                "issue_body": str(item.get("body") or ""),
-                "issue_state": str(item.get("state") or "open"),
-                "assignees": [str(a.get("login") or "") for a in (item.get("assignees") or []) if isinstance(a, dict)],
-            }
-        )
-    return issues
+    return await _shared_fetch_open_github_issues(
+        github_token,
+        github_repo,
+        get_async_http_client=_get_async_http_client,
+        logger=log,
+        limit=limit,
+    )
 
 
 async def _search_open_pr_for_issue(github_token: str, github_repo: str, issue_number: int) -> dict[str, Any] | None:
-    if not github_token or not github_repo or issue_number <= 0:
-        return None
-    owner, repo = _parse_github_repo_owner_name(github_repo)
-    if not owner or not repo:
-        return None
-    client = await _get_async_http_client()
-    try:
-        resp = await client.get(
-            "https://api.github.com/search/issues",
-            params={
-                "q": f'repo:{owner}/{repo} is:pr is:open "#{issue_number}" in:body',
-                "per_page": "1",
-            },
-            headers=_github_api_headers(github_token),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json() if resp.content else {}
-    except Exception:
-        return None
-    items = payload.get("items") if isinstance(payload, dict) else []
-    if not isinstance(items, list) or not items:
-        return None
-    item = items[0] if isinstance(items[0], dict) else {}
-    if not item:
-        return None
-    return {
-        "pr_number": int(item.get("number", 0) or 0),
-        "pr_url": str(item.get("html_url") or ""),
-    }
+    return await _shared_search_open_pr_for_issue(
+        github_token,
+        github_repo,
+        issue_number,
+        get_async_http_client=_get_async_http_client,
+    )
 
 
 def _parse_issue_ref_from_url(issue_url: str) -> tuple[str, str, int]:
@@ -6185,53 +6044,11 @@ def _fallback_issue_dedupe_decision(
     proposed: dict[str, Any],
     candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    proposed_key = str(proposed.get("dedup_key") or "")
-    proposed_service = _normalize_issue_match_text(proposed.get("service_name"))
-    proposed_signal = _normalize_issue_match_text(proposed.get("signal_name"))
-    for candidate in candidates:
-        candidate_key = str(candidate.get("dedup_key") or "")
-        if proposed_key and candidate_key and proposed_key == candidate_key:
-            return {
-                "classification": "same",
-                "candidate_id": str(candidate.get("candidate_id") or ""),
-                "confidence": 0.92,
-                "reason": "deterministic dedupe key match",
-            }
-    for candidate in candidates:
-        if (
-            proposed_service
-            and proposed_service == _normalize_issue_match_text(candidate.get("service_name"))
-            and proposed_signal
-            and proposed_signal == _normalize_issue_match_text(candidate.get("signal_name"))
-        ):
-            return {
-                "classification": "related",
-                "candidate_id": str(candidate.get("candidate_id") or ""),
-                "confidence": 0.73,
-                "reason": "same service and signal family",
-            }
-    return {
-        "classification": "unrelated",
-        "candidate_id": "",
-        "confidence": 0.0,
-        "reason": "no strong local match",
-    }
+    return _shared_fallback_issue_dedupe_decision(proposed, candidates)
 
 
 def _extract_first_json_object(text: str) -> dict[str, Any]:
-    raw = str(text or "").strip()
-    if not raw:
-        return {}
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
-    parsed = _safe_json_loads(raw, {})
-    if isinstance(parsed, dict):
-        return parsed
-    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-    if not match:
-        return {}
-    parsed = _safe_json_loads(match.group(0), {})
-    return parsed if isinstance(parsed, dict) else {}
+    return _shared_extract_first_json_object(text)
 
 
 async def _classify_issue_dedupe_with_llm(
@@ -6239,71 +6056,13 @@ async def _classify_issue_dedupe_with_llm(
     proposed: dict[str, Any],
     candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    endpoint_url = str(settings.get("ai.endpoint_url") or "").strip()
-    model = str(settings.get("ai.model") or "").strip()
-    api_key = str(settings.get("ai.api_key") or "").strip()
-    thinking_level = str(settings.get("ai.thinking_level") or "off").strip() or "off"
-    if not endpoint_url or not model or not candidates:
-        return _fallback_issue_dedupe_decision(proposed, candidates)
-
-    compact_candidates = [
-        {
-            "candidate_id": str(item.get("candidate_id") or ""),
-            "issue_url": str(item.get("issue_url") or ""),
-            "issue_title": str(item.get("issue_title") or ""),
-            "service_name": str(item.get("service_name") or ""),
-            "signal_source": str(item.get("signal_source") or ""),
-            "signal_name": str(item.get("signal_name") or ""),
-            "anomaly_state": str(item.get("anomaly_state") or ""),
-            "dedup_key": str(item.get("dedup_key") or ""),
-            "copilot_assignment_status": str(item.get("copilot_assignment_status") or ""),
-            "has_open_pr": bool(item.get("pr_linked") or item.get("pr_url")),
-            "assignees": list(item.get("assignees") or []),
-        }
-        for item in candidates[:_GITHUB_ISSUE_DEDUPE_CANDIDATE_LIMIT]
-    ]
-    prompt = {
-        "task": "Classify whether the proposed observability incident matches any existing GitHub issue.",
-        "return_json_only": True,
-        "required_keys": ["classification", "candidate_id", "confidence", "reason"],
-        "allowed_classifications": ["same", "related", "unrelated"],
-        "proposed_incident": proposed,
-        "candidates": compact_candidates,
-    }
-    reply_text, _stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        [
-            {
-                "role": "system",
-                "content": (
-                    "You classify observability incidents against existing GitHub issues. "
-                    "Return a single JSON object only. Prefer 'same' only for clear duplicates, "
-                    "'related' for likely same fault family but materially different work, otherwise 'unrelated'."
-                ),
-            },
-            {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
-        ],
-        thinking_level=thinking_level,
-        max_tokens=400,
-        timeout=25,
+    return await _shared_classify_issue_dedupe_with_llm(
+        settings,
+        proposed,
+        candidates,
+        call_llm_endpoint=_call_llm_endpoint,
+        candidate_limit=_GITHUB_ISSUE_DEDUPE_CANDIDATE_LIMIT,
     )
-    parsed = _extract_first_json_object(reply_text)
-    classification = str(parsed.get("classification") or "").strip().lower()
-    if classification not in {"same", "related", "unrelated"}:
-        return _fallback_issue_dedupe_decision(proposed, candidates)
-    candidate_id = str(parsed.get("candidate_id") or "").strip()
-    try:
-        confidence = float(parsed.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    return {
-        "classification": classification,
-        "candidate_id": candidate_id,
-        "confidence": max(0.0, min(1.0, confidence)),
-        "reason": str(parsed.get("reason") or "").strip(),
-    }
 
 
 async def _create_github_issue_record(
@@ -6315,53 +6074,17 @@ async def _create_github_issue_record(
     *,
     mask_output_enabled: bool = True,
 ) -> dict[str, Any]:
-    if not github_token or not github_repo:
-        return {}
-    owner, repo = _parse_github_repo_owner_name(github_repo)
-    if not owner or not repo:
-        parts = [p for p in github_repo.strip("/").split("/") if p]
-        if len(parts) >= 2:
-            owner, repo = parts[-2], parts[-1]
-    if not owner or not repo:
-        return {}
-    issue_title = _mask_string_for_output(title) if mask_output_enabled else str(title or "")
-    issue_body = _mask_string_for_output(body_md) if mask_output_enabled else str(body_md or "")
-    issue_payload: dict[str, Any] = {
-        "title": issue_title,
-        "body": issue_body,
-        "labels": labels or ["sobs-agent", "automated"],
-    }
-    client = await _get_async_http_client()
-    try:
-        resp = await client.post(
-            f"https://api.github.com/repos/{owner}/{repo}/issues",
-            json=issue_payload,
-            headers=_github_api_headers(github_token, include_content_type=True),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        return {
-            "issue_url": str(result.get("html_url", "")),
-            "issue_number": int(result.get("number", 0) or 0),
-            "issue_title": str(result.get("title") or title),
-            "issue_state": str(result.get("state") or "open"),
-        }
-    except httpx.HTTPStatusError as exc:
-        detail = ""
-        try:
-            payload = exc.response.json()
-            if isinstance(payload, dict):
-                detail = str(payload.get("message") or "").strip()
-        except Exception:
-            detail = ""
-        if not detail:
-            detail = str(exc)
-        log.warning("GitHub issue creation failed: %s", detail)
-        return {"error": f"GitHub issue creation failed: {detail}"}
-    except Exception as exc:
-        log.warning("GitHub issue creation failed: %s", exc)
-        return {"error": f"GitHub issue creation failed: {exc}"}
+    return await _shared_create_github_issue_record(
+        github_token,
+        github_repo,
+        title,
+        body_md,
+        labels,
+        get_async_http_client=_get_async_http_client,
+        mask_string_for_output=_mask_string_for_output,
+        logger=log,
+        mask_output_enabled=mask_output_enabled,
+    )
 
 
 def _persist_github_work_item(
@@ -13729,62 +13452,6 @@ def _inventory_scope_ecosystem(scope_name: str) -> str:
     if scope_name.startswith("opentelemetry-") and "_" not in scope_name.split("/")[-1]:
         return "PyPI"
     return ""
-
-
-def _parse_github_repo_owner_name(repo_url: str) -> tuple[str, str]:
-    """Extract owner/repo from a GitHub repo URL.
-
-    Supports HTTPS, SSH, and plain owner/repo styles.
-    """
-    cleaned = (repo_url or "").strip()
-    if not cleaned:
-        return "", ""
-
-    direct_parts = [p for p in cleaned.split("/") if p]
-    if len(direct_parts) == 2 and "://" not in cleaned and not cleaned.startswith("git@"):
-        return direct_parts[0], direct_parts[1].removesuffix(".git")
-
-    if cleaned.startswith("git@github.com:"):
-        path = cleaned.split(":", 1)[1]
-    else:
-        parsed = urllib.parse.urlparse(cleaned)
-        if parsed.netloc.lower() != "github.com":
-            return "", ""
-        path = parsed.path.lstrip("/")
-
-    if path.endswith(".git"):
-        path = path[:-4]
-    parts = [p for p in path.split("/") if p]
-    if len(parts) < 2:
-        return "", ""
-    return parts[0], parts[1]
-
-
-def _build_github_repo_url(owner: str, repo: str) -> str:
-    owner_clean = (owner or "").strip().strip("/")
-    repo_clean = (repo or "").strip().strip("/").removesuffix(".git")
-    if not owner_clean or not repo_clean:
-        return ""
-    return f"https://github.com/{owner_clean}/{repo_clean}"
-
-
-def _resolve_github_repo_fields(repo_url: str, owner: str = "", repo: str = "") -> tuple[str, str, str]:
-    repo_url_clean = str(repo_url or "").strip()
-    owner_clean = str(owner or "").strip().strip("/")
-    repo_clean = str(repo or "").strip().strip("/").removesuffix(".git")
-
-    if (not owner_clean or not repo_clean) and repo_url_clean:
-        parsed_owner, parsed_repo = _parse_github_repo_owner_name(repo_url_clean)
-        if not owner_clean:
-            owner_clean = parsed_owner
-        if not repo_clean:
-            repo_clean = parsed_repo
-
-    canonical_repo_url = _build_github_repo_url(owner_clean, repo_clean)
-    if canonical_repo_url:
-        repo_url_clean = canonical_repo_url
-
-    return repo_url_clean, owner_clean, repo_clean
 
 
 def _parse_requirements_dependencies(content: str) -> list[dict[str, str]]:
@@ -25826,76 +25493,15 @@ _QUERY_LLM_MAX_TOKENS = 8192
 
 
 def _normalize_chart_spec_text(spec_raw: str) -> str:
-    """Extract a likely JSON object from a raw chart-spec model reply."""
-    spec = spec_raw.strip()
-    if spec.startswith("```"):
-        spec = re.sub(r"^```[a-zA-Z]*\n?", "", spec)
-        spec = re.sub(r"\n?```$", "", spec)
-    spec = spec.strip()
-
-    first_obj = spec.find("{")
-    last_obj = spec.rfind("}")
-    if first_obj >= 0 and last_obj > first_obj:
-        spec = spec[first_obj : last_obj + 1].strip()
-    return spec
-
-
-_JSON_VALUE_TOKEN_PATTERN = r'"(?:\\.|[^"\\])*"|true|false|null|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\}|\]'
+    return _shared_normalize_chart_spec_text(spec_raw)
 
 
 def _insert_missing_json_commas(text: str) -> str:
-    """Best-effort repair for missing commas between JSON values/items."""
-    repaired = str(text or "")
-    if not repaired:
-        return repaired
-
-    object_member_pattern = re.compile(
-        rf"({_JSON_VALUE_TOKEN_PATTERN})(\\s+)(\"(?:\\\\.|[^\"\\\\])*\"\\s*:)",
-        flags=re.DOTALL,
-    )
-    array_item_pattern = re.compile(
-        rf"({_JSON_VALUE_TOKEN_PATTERN})(\\s+)(\{{|\[|\"(?:\\\\.|[^\"\\\\])*\"|true|false|null|-?\\d)",
-        flags=re.DOTALL,
-    )
-
-    # Run a few stabilization passes because one insertion can unlock the next.
-    for _ in range(4):
-        previous = repaired
-        repaired = object_member_pattern.sub(r"\1,\2\3", repaired)
-        repaired = array_item_pattern.sub(r"\1,\2\3", repaired)
-        repaired = re.sub(r",\s*,+", ",", repaired)
-        repaired = re.sub(
-            r'([}\]"0-9eE])\s*(?="(?:\\.|[^"\\])*"\s*:)',
-            r"\1, ",
-            repaired,
-        )
-        if repaired == previous:
-            break
-    return repaired
+    return _shared_insert_missing_json_commas(text)
 
 
 def _parse_chart_spec_json(spec_raw: str) -> tuple[dict[str, Any] | None, str]:
-    """Parse chart JSON with a lightweight local repair pass."""
-    spec = _normalize_chart_spec_text(spec_raw)
-    if not spec:
-        return None, "empty chart spec"
-
-    try:
-        parsed = json.loads(spec)
-    except Exception:
-        repaired = re.sub(r"//[^\n]*", "", spec)  # // line comments
-        repaired = re.sub(r"/\*.*?\*/", "", repaired, flags=re.DOTALL)  # /* */ comments
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)  # trailing commas
-        repaired = _insert_missing_json_commas(repaired)
-        repaired = repaired.strip()
-        try:
-            parsed = json.loads(repaired)
-        except Exception as exc2:
-            return None, str(exc2)
-
-    if not isinstance(parsed, dict):
-        return None, "top-level chart spec must be a JSON object"
-    return parsed, ""
+    return _shared_parse_chart_spec_json(spec_raw)
 
 
 async def _repair_chart_spec_json_with_llm(
@@ -25903,40 +25509,14 @@ async def _repair_chart_spec_json_with_llm(
     parse_error: str,
     settings: dict[str, str],
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
-    """Ask the LLM for a strict JSON repair when local parsing fails."""
-    endpoint_url = settings.get("ai.endpoint_url", "").strip()
-    model = settings.get("ai.model", "").strip()
-    api_key = settings.get("ai.api_key", "").strip()
-    if not endpoint_url or not model:
-        return None, "AI endpoint not configured.", {}
-
-    user_message = (
-        "The chart JSON below failed to parse. Repair it and return only valid JSON.\n\n"
-        f"Parse error: {parse_error}\n\n"
-        f"Malformed chart JSON:\n{spec_raw}"
+    return await _shared_repair_chart_spec_json_with_llm(
+        spec_raw,
+        parse_error,
+        settings,
+        call_llm_endpoint=_call_llm_endpoint,
+        query_chart_json_repair_system_prompt=_QUERY_CHART_JSON_REPAIR_SYSTEM_PROMPT,
+        query_llm_max_tokens=_QUERY_LLM_MAX_TOKENS,
     )
-    messages = [
-        {"role": "system", "content": _QUERY_CHART_JSON_REPAIR_SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
-    ]
-    repaired_raw, repair_stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        messages,
-        max_tokens=_QUERY_LLM_MAX_TOKENS,
-        thinking_level="off",
-    )
-    if not repaired_raw:
-        error_detail = str(repair_stats.get("error") or "").strip()
-        if error_detail:
-            return None, f"LLM JSON repair failed: {error_detail}", repair_stats
-        return None, "LLM JSON repair returned empty content.", repair_stats
-
-    parsed, parse_err = _parse_chart_spec_json(repaired_raw)
-    if parsed is None:
-        return None, f"LLM JSON repair output was still invalid: {parse_err}", repair_stats
-    return parsed, "", repair_stats
 
 
 async def _vanna_generate_sql(
@@ -25947,76 +25527,20 @@ async def _vanna_generate_sql(
     chart_instruction: str = "",
     thinking_level: str = "off",
 ) -> tuple[str, str, dict[str, Any]]:
-    """Ask the configured LLM to generate SQL for *question*.
-
-    Returns ``(sql, error)`` where *error* is empty on success.
-    """
-    endpoint_url = settings.get("ai.endpoint_url", "").strip()
-    model = settings.get("ai.model", "").strip()
-    api_key = settings.get("ai.api_key", "").strip()
-
-    if not endpoint_url or not model:
-        return "", "AI endpoint not configured. Visit Settings → AI Configuration.", {}
-
-    system_prompt = _QUERY_SQL_SYSTEM_PROMPT.format(schema=schema_context)
-    allowlist_hint = "\n".join(f"- {name}" for name in sorted(_QUERY_ALLOWED_TABLES))
-    user_content = (
-        f"{question}\n\n" "Allowed queryable tables/views (must stay within this list):\n" f"{allowlist_hint}"
-    )
-    chart_guidance: list[str] = []
-    if preferred_chart_type:
-        chart_guidance.append(f"Preferred chart type: {preferred_chart_type}")
-    if chart_instruction:
-        chart_guidance.append(f"Chart instruction: {chart_instruction}")
-
-    if preferred_chart_type:
-        catalog = _load_chart_types_catalog()
-        chart_info = (catalog.get("chartTypes") or {}).get(preferred_chart_type) if isinstance(catalog, dict) else None
-        if isinstance(chart_info, dict):
-            ds = chart_info.get("dataStructure") or {}
-            if isinstance(ds, dict):
-                ds_type = str(ds.get("type") or "").strip()
-                ds_example = str(ds.get("example") or "").strip()
-                if ds_type:
-                    chart_guidance.append(f"Desired chart data shape: {ds_type}")
-                if ds_example:
-                    chart_guidance.append(f"Desired chart data example: {ds_example}")
-
-    if chart_guidance:
-        user_content = f"{user_content}\n\n" "Chart generation guidance (shape SQL output to fit this):\n" + "\n".join(
-            [f"- {line}" for line in chart_guidance]
-        )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
-
-    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
-    sql_raw, _stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        messages,
-        max_tokens=_QUERY_LLM_MAX_TOKENS,
+    return await _shared_vanna_generate_sql(
+        question,
+        schema_context,
+        settings,
+        preferred_chart_type=preferred_chart_type,
+        chart_instruction=chart_instruction,
         thinking_level=thinking_level,
-        timeout=endpoint_timeout,
+        call_llm_endpoint=_call_llm_endpoint,
+        load_chart_types_catalog=_load_chart_types_catalog,
+        resolve_endpoint_timeout_seconds=_resolve_endpoint_timeout_seconds,
+        query_sql_system_prompt=_QUERY_SQL_SYSTEM_PROMPT,
+        query_allowed_tables=_QUERY_ALLOWED_TABLES,
+        query_llm_max_tokens=_QUERY_LLM_MAX_TOKENS,
     )
-    if not sql_raw:
-        error_detail = str(_stats.get("error") or "").strip()
-        if error_detail:
-            return "", f"LLM request failed: {error_detail}", _stats
-        return "", "LLM did not return a response. Check AI settings.", _stats
-
-    # Strip markdown fences if the model included them despite instructions.
-    sql = sql_raw.strip()
-    if sql.startswith("```"):
-        sql = re.sub(r"^```[a-zA-Z]*\n?", "", sql)
-        sql = re.sub(r"\n?```$", "", sql)
-    sql = sql.strip()
-    if not sql:
-        return "", "LLM returned an empty SQL statement.", _stats
-    return sql, "", _stats
 
 
 async def _vanna_generate_named_queries(
@@ -26028,91 +25552,18 @@ async def _vanna_generate_named_queries(
     chart_instruction: str = "",
     thinking_level: str = "off",
 ) -> tuple[list[dict[str, str]], str, dict[str, Any]]:
-    """Ask the LLM for optional named dataset SQL queries for complex charts.
-
-    Returns ``(datasets, error, stats)`` where datasets is a list of
-    ``{"name": str, "sql": str, "purpose": str}``.
-    """
-    endpoint_url = settings.get("ai.endpoint_url", "").strip()
-    model = settings.get("ai.model", "").strip()
-    api_key = settings.get("ai.api_key", "").strip()
-
-    if not endpoint_url or not model:
-        return [], "AI endpoint not configured.", {}
-
-    preferred = preferred_chart_type or "auto"
-    instruction = chart_instruction or ""
-    system_prompt = (
-        "You are a ClickHouse SQL planner for chart datasets. "
-        "Return ONLY valid JSON with the shape: "
-        '{"datasets":[{"name":"...","sql":"SELECT ...","purpose":"..."}]}. '
-        "Rules: use only read-only SELECT/WITH queries; keep at most 3 datasets; "
-        "names should be short snake_case identifiers; no markdown."
-    )
-    user_message = (
-        f"Question: {question}\n\n"
-        f"Preferred chart type: {preferred}\n"
-        f"Chart instruction: {instruction}\n\n"
-        f"Primary SQL:\n{base_sql}\n\n"
-        f"Schema context:\n{schema_context}\n\n"
-        "If one dataset is sufficient, return an empty datasets array. "
-        "For network/flow charts (graph/sankey/chord), prefer separate nodes and links datasets."
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
-
-    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
-    plan_raw, stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        messages,
-        max_tokens=_QUERY_LLM_MAX_TOKENS,
+    return await _shared_vanna_generate_named_queries(
+        question,
+        schema_context,
+        base_sql,
+        settings,
+        preferred_chart_type=preferred_chart_type,
+        chart_instruction=chart_instruction,
         thinking_level=thinking_level,
-        timeout=endpoint_timeout,
+        call_llm_endpoint=_call_llm_endpoint,
+        resolve_endpoint_timeout_seconds=_resolve_endpoint_timeout_seconds,
+        query_llm_max_tokens=_QUERY_LLM_MAX_TOKENS,
     )
-    if not plan_raw:
-        return [], str(stats.get("error") or "").strip(), stats
-
-    plan_text = plan_raw.strip()
-    if plan_text.startswith("```"):
-        plan_text = re.sub(r"^```[a-zA-Z]*\n?", "", plan_text)
-        plan_text = re.sub(r"\n?```$", "", plan_text)
-    plan_text = plan_text.strip()
-
-    first_obj = plan_text.find("{")
-    last_obj = plan_text.rfind("}")
-    if first_obj >= 0 and last_obj > first_obj:
-        plan_text = plan_text[first_obj : last_obj + 1].strip()
-
-    try:
-        parsed = json.loads(plan_text)
-    except Exception:
-        return [], "", stats
-
-    raw_datasets = parsed.get("datasets") if isinstance(parsed, dict) else []
-    if not isinstance(raw_datasets, list):
-        return [], "", stats
-
-    datasets: list[dict[str, str]] = []
-    for item in raw_datasets[:3]:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip().lower()
-        sql = str(item.get("sql") or "").strip().rstrip(";")
-        purpose = str(item.get("purpose") or "").strip()
-        if not name or not re.match(r"^[a-z][a-z0-9_]{0,31}$", name):
-            continue
-        upper_sql = sql.upper().lstrip()
-        if not (upper_sql.startswith("SELECT") or upper_sql.startswith("WITH")):
-            continue
-        if sql == base_sql.strip().rstrip(";"):
-            continue
-        datasets.append({"name": name, "sql": sql, "purpose": purpose})
-
-    return datasets, "", stats
 
 
 async def _vanna_repair_sql(
@@ -26124,132 +25575,27 @@ async def _vanna_repair_sql(
     attempt_number: int,
     thinking_level: str = "off",
 ) -> tuple[str, str, dict[str, Any]]:
-    """Ask the LLM to fix SQL after an execution failure.
-
-    Returns ``(sql, error)`` where *error* is empty on success.
-    """
-    endpoint_url = settings.get("ai.endpoint_url", "").strip()
-    model = settings.get("ai.model", "").strip()
-    api_key = settings.get("ai.api_key", "").strip()
-
-    if not endpoint_url or not model:
-        return "", "AI endpoint not configured.", {}
-
-    system_prompt = _QUERY_SQL_SYSTEM_PROMPT.format(schema=schema_context)
-    user_message = (
-        f"Original question: {question}\n\n"
-        f"Previous SQL (attempt {attempt_number}):\n{previous_sql}\n\n"
-        f"Execution error:\n{execution_error}\n\n"
-        "Rewrite the SQL so it is valid for this schema and still answers the question. "
-        "Return ONLY raw SQL."
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
-
-    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
-    sql_raw, _stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        messages,
-        max_tokens=_QUERY_LLM_MAX_TOKENS,
+    return await _shared_vanna_repair_sql(
+        question,
+        schema_context,
+        previous_sql,
+        execution_error,
+        settings,
+        attempt_number,
         thinking_level=thinking_level,
-        timeout=endpoint_timeout,
-        empty_content_retry_instruction=(
-            "Return ONLY complete executable ClickHouse SQL. " "No reasoning, no markdown, no commentary."
-        ),
+        call_llm_endpoint=_call_llm_endpoint,
+        resolve_endpoint_timeout_seconds=_resolve_endpoint_timeout_seconds,
+        query_sql_system_prompt=_QUERY_SQL_SYSTEM_PROMPT,
+        query_llm_max_tokens=_QUERY_LLM_MAX_TOKENS,
     )
-    if not sql_raw:
-        error_detail = str(_stats.get("error") or "").strip()
-        if error_detail:
-            return "", f"LLM repair request failed: {error_detail}", _stats
-        return "", "LLM did not return a repaired SQL statement.", _stats
-
-    sql = sql_raw.strip()
-    if sql.startswith("```"):
-        sql = re.sub(r"^```[a-zA-Z]*\n?", "", sql)
-        sql = re.sub(r"\n?```$", "", sql)
-    sql = sql.strip()
-    if not sql:
-        return "", "LLM returned an empty repaired SQL statement.", _stats
-    return sql, "", _stats
 
 
 def _repair_truncated_in_clause_literals(sql: str) -> str:
-    """Best-effort fix for a truncated trailing ``IN (...)`` literal list.
-
-    Example input tail:
-        WHERE ServiceName IN ('load-svc-0','load-svc-
-
-    becomes:
-        WHERE ServiceName IN ('load-svc-0')
-    """
-    text = str(sql or "")
-    match = re.search(r"\bIN\s*\(([^)]*)$", text, flags=re.IGNORECASE | re.DOTALL)
-    if not match:
-        return text
-
-    items_raw = match.group(1)
-    if not items_raw.strip():
-        return text
-
-    cleaned_items: list[str] = []
-    for item in items_raw.split(","):
-        token = item.strip()
-        if not token:
-            continue
-        if token.count("'") % 2 != 0:
-            break
-        cleaned_items.append(token)
-
-    if not cleaned_items:
-        return text
-
-    return text[: match.start(1)] + ",".join(cleaned_items) + ")"
+    return _shared_repair_truncated_in_clause_literals(sql)
 
 
 def _auto_repair_incomplete_cte_sql(sql: str) -> str:
-    """Best-effort local fix for truncated CTE SQL.
-
-    This handles common model truncation output like:
-        WITH t AS (SELECT ... GROUP BY ... HAVING ...
-        WITH t AS (SELECT ... WHERE name IN ('a','b','c-
-
-    by balancing closing parentheses and appending a final
-    ``SELECT * FROM t`` when missing.
-    """
-    text = str(sql or "").strip().rstrip(";")
-    if not text:
-        return ""
-
-    if not re.match(r"^\s*with\b", text, flags=re.IGNORECASE):
-        return ""
-
-    text = _repair_truncated_in_clause_literals(text)
-    if text.count("'") % 2 != 0:
-        return ""
-
-    cte_match = re.match(r"^\s*with\s+([a-zA-Z_]\w*)\s+as\s*\(", text, flags=re.IGNORECASE)
-    if not cte_match:
-        return ""
-
-    has_final_select = re.search(r"\)\s*select\b", text, flags=re.IGNORECASE | re.DOTALL) is not None
-    open_parens = text.count("(")
-    close_parens = text.count(")")
-
-    if has_final_select and open_parens <= close_parens:
-        return ""
-
-    fixed = text
-    if open_parens > close_parens:
-        fixed += ")" * (open_parens - close_parens)
-
-    if re.search(r"\)\s*select\b", fixed, flags=re.IGNORECASE | re.DOTALL) is None:
-        fixed += f"\nSELECT * FROM {cte_match.group(1)}"
-
-    return fixed
+    return _shared_auto_repair_incomplete_cte_sql(sql)
 
 
 async def _vanna_generate_chart_spec(
@@ -26262,98 +25608,22 @@ async def _vanna_generate_chart_spec(
     named_datasets: list[dict[str, Any]] | None = None,
     thinking_level: str = "off",
 ) -> tuple[str, str, dict[str, Any]]:
-    """Ask the LLM to produce an ECharts option JSON for the result set.
-
-    Returns ``(json_spec, error)`` where *json_spec* is the raw JSON string.
-    """
-    endpoint_url = settings.get("ai.endpoint_url", "").strip()
-    model = settings.get("ai.model", "").strip()
-    api_key = settings.get("ai.api_key", "").strip()
-
-    if not endpoint_url or not model:
-        return "", "AI endpoint not configured.", {}
-
-    sample_str = json.dumps({"columns": columns, "rows": sample_rows[:20]}, ensure_ascii=False, default=str)
-    named_datasets_str = ""
-    if named_datasets:
-        condensed = []
-        for ds in named_datasets:
-            if not isinstance(ds, dict):
-                continue
-            condensed.append(
-                {
-                    "name": ds.get("name", ""),
-                    "purpose": ds.get("purpose", ""),
-                    "columns": ds.get("columns", []),
-                    "rows": (ds.get("rows", []) or [])[:20],
-                }
-            )
-        if condensed:
-            named_datasets_str = (
-                "\n\nNamed datasets (use when multi-dataset chart structures are needed):\n"
-                + json.dumps(condensed, ensure_ascii=False, default=str)
-            )
-    preference_lines: list[str] = []
-    if preferred_chart_type:
-        preference_lines.append(f"Preferred chart type: {preferred_chart_type}")
-    if chart_instruction:
-        preference_lines.append(f"Chart instruction: {chart_instruction}")
-    preference_block = "\n".join(preference_lines)
-    if preference_block:
-        preference_block = f"\n\nChart preferences:\n{preference_block}"
-
-    user_message = (
-        f"Original question: {question}\n\n"
-        f"Result set (columns + up to 20 sample rows):\n{sample_str}\n\n"
-        f"{named_datasets_str}"
-        f"{preference_block}"
-        "Produce an ECharts option JSON object for this data."
-    )
-    messages = [
-        {"role": "system", "content": _QUERY_CHART_SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
-    ]
-
-    endpoint_timeout = _resolve_endpoint_timeout_seconds(settings)
-    spec_raw, _stats = await _call_llm_endpoint(
-        endpoint_url,
-        model,
-        api_key,
-        messages,
-        max_tokens=_QUERY_LLM_MAX_TOKENS,
-        thinking_level=thinking_level,
-        timeout=endpoint_timeout,
-    )
-    if not spec_raw:
-        error_detail = str(_stats.get("error") or "").strip()
-        if error_detail:
-            return "", f"LLM chart request failed: {error_detail}", _stats
-        return "", "LLM did not return a chart spec.", _stats
-
-    parsed, parse_err = _parse_chart_spec_json(spec_raw)
-    if parsed is not None:
-        if parsed == {}:
-            return "", "LLM returned an empty chart spec object.", _stats
-        return json.dumps(parsed, ensure_ascii=False), "", _stats
-
-    repaired_parsed, repair_error, repair_stats = await _repair_chart_spec_json_with_llm(
-        spec_raw,
-        parse_err,
+    return await _shared_vanna_generate_chart_spec(
+        columns,
+        sample_rows,
+        question,
         settings,
+        preferred_chart_type=preferred_chart_type,
+        chart_instruction=chart_instruction,
+        named_datasets=named_datasets,
+        thinking_level=thinking_level,
+        call_llm_endpoint=_call_llm_endpoint,
+        resolve_endpoint_timeout_seconds=_resolve_endpoint_timeout_seconds,
+        query_chart_system_prompt=_QUERY_CHART_SYSTEM_PROMPT,
+        query_chart_json_repair_system_prompt=_QUERY_CHART_JSON_REPAIR_SYSTEM_PROMPT,
+        query_llm_max_tokens=_QUERY_LLM_MAX_TOKENS,
+        repair_chart_spec_json_with_llm=_repair_chart_spec_json_with_llm,
     )
-    if repaired_parsed is None:
-        if repair_error:
-            return "", f"Chart spec JSON parse error: {parse_err}. {repair_error}", _stats
-        return "", f"Chart spec JSON parse error: {parse_err}", _stats
-
-    if repaired_parsed == {}:
-        return "", "LLM JSON repair returned an empty chart spec object.", _stats
-
-    merged_stats: dict[str, Any] = dict(_stats)
-    merged_stats["chart_json_repair"] = 1
-    if repair_stats:
-        merged_stats["chart_json_repair_stats"] = repair_stats
-    return json.dumps(repaired_parsed, ensure_ascii=False), "", merged_stats
 
 
 def _extract_chart_option_placeholders(option_json: str) -> set[str]:
@@ -29427,35 +28697,16 @@ async def _inspect_repo_for_onboarding(github_token: str, owner: str, repo: str)
 
 
 async def _github_get_issue_detail(github_token: str, github_repo: str, issue_number: int) -> dict[str, Any]:
-    """Fetch a single GitHub issue payload; returns empty dict on error."""
-    if not github_token or not github_repo or issue_number <= 0:
-        return {}
-    owner, repo = _parse_github_repo_owner_name(github_repo)
-    if not owner or not repo:
-        return {}
-    client = await _get_async_http_client()
-    try:
-        resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}",
-            headers=_github_api_headers(github_token),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json() if resp.content else {}
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
+    return await _shared_github_get_issue_detail(
+        github_token,
+        github_repo,
+        issue_number,
+        get_async_http_client=_get_async_http_client,
+    )
 
 
 def _github_issue_is_new_state(issue_payload: dict[str, Any]) -> bool:
-    """Return True when an issue is still untouched/new from onboarding perspective."""
-    if not isinstance(issue_payload, dict):
-        return False
-    state = str(issue_payload.get("state") or "").strip().lower()
-    comments = int(issue_payload.get("comments") or 0)
-    created_at = str(issue_payload.get("created_at") or "").strip()
-    updated_at = str(issue_payload.get("updated_at") or "").strip()
-    return state == "open" and comments == 0 and bool(created_at) and created_at == updated_at
+    return _shared_github_issue_is_new_state(issue_payload)
 
 
 async def _update_github_issue_record(
@@ -29468,50 +28719,18 @@ async def _update_github_issue_record(
     *,
     mask_output_enabled: bool = True,
 ) -> dict[str, Any]:
-    """Update an existing GitHub issue and return normalized metadata."""
-    if not github_token or not github_repo or issue_number <= 0:
-        return {}
-    owner, repo = _parse_github_repo_owner_name(github_repo)
-    if not owner or not repo:
-        return {}
-
-    issue_title = _mask_string_for_output(title) if mask_output_enabled else str(title or "")
-    issue_body = _mask_string_for_output(body_md) if mask_output_enabled else str(body_md or "")
-    issue_payload: dict[str, Any] = {"title": issue_title, "body": issue_body}
-    if labels is not None:
-        issue_payload["labels"] = labels
-
-    client = await _get_async_http_client()
-    try:
-        resp = await client.patch(
-            f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}",
-            json=issue_payload,
-            headers=_github_api_headers(github_token, include_content_type=True),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        result = resp.json() if resp.content else {}
-        return {
-            "issue_url": str(result.get("html_url", "")),
-            "issue_number": int(result.get("number", 0) or issue_number),
-            "issue_title": str(result.get("title") or title),
-            "issue_state": str(result.get("state") or "open"),
-        }
-    except httpx.HTTPStatusError as exc:
-        detail = ""
-        try:
-            payload = exc.response.json()
-            if isinstance(payload, dict):
-                detail = str(payload.get("message") or "").strip()
-        except Exception:
-            detail = ""
-        if not detail:
-            detail = str(exc)
-        log.warning("GitHub issue update failed: %s", detail)
-        return {"error": f"GitHub issue update failed: {detail}"}
-    except Exception as exc:
-        log.warning("GitHub issue update failed: %s", exc)
-        return {"error": f"GitHub issue update failed: {exc}"}
+    return await _shared_update_github_issue_record(
+        github_token,
+        github_repo,
+        issue_number,
+        title,
+        body_md,
+        labels,
+        get_async_http_client=_get_async_http_client,
+        mask_string_for_output=_mask_string_for_output,
+        logger=log,
+        mask_output_enabled=mask_output_enabled,
+    )
 
 
 async def _create_or_update_onboarding_issue(
@@ -29521,55 +28740,22 @@ async def _create_or_update_onboarding_issue(
     body_md: str,
     labels: list[str],
 ) -> dict[str, Any]:
-    """Create onboarding issue once; update it only when it remains in untouched/new state."""
-    open_issues = await _fetch_open_github_issues(github_token, github_repo)
-    title_norm = str(title or "").strip()
-    existing = next((item for item in open_issues if str(item.get("issue_title") or "").strip() == title_norm), None)
-
-    if not existing:
-        created = await _create_github_issue_record(
-            github_token,
-            github_repo,
-            title,
-            body_md,
-            labels=labels,
-            mask_output_enabled=False,
-        )
-        if "error" in created:
-            return created
-        created["status"] = "created"
-        created["note"] = "Created a new onboarding issue."
-        return created
-
-    issue_number = int(existing.get("issue_number", 0) or 0)
-    issue_url = str(existing.get("issue_url", ""))
-    detail = await _github_get_issue_detail(github_token, github_repo, issue_number)
-
-    if detail and _github_issue_is_new_state(detail):
-        updated = await _update_github_issue_record(
-            github_token,
-            github_repo,
-            issue_number,
-            title,
-            body_md,
-            labels=labels,
-            mask_output_enabled=False,
-        )
-        if "error" in updated:
-            return updated
-        updated["status"] = "updated"
-        updated["note"] = "Updated the existing onboarding issue because it was still new."
-        return updated
-
-    existing_state = str((detail or {}).get("state") or existing.get("issue_state") or "open")
-    return {
-        "issue_url": str((detail or {}).get("html_url") or issue_url),
-        "issue_number": issue_number,
-        "issue_title": str((detail or {}).get("title") or existing.get("issue_title") or title),
-        "issue_state": existing_state,
-        "status": "reused",
-        "note": "Existing onboarding issue is not in new state; left unchanged.",
-    }
+    return await _shared_create_or_update_onboarding_issue(
+        github_token,
+        github_repo,
+        title,
+        body_md,
+        labels,
+        get_async_http_client=_get_async_http_client,
+        mask_string_for_output=_mask_string_for_output,
+        logger=log,
+        open_issue_limit=_GITHUB_ISSUE_DEDUPE_CANDIDATE_LIMIT,
+        fetch_open_github_issues=_fetch_open_github_issues,
+        create_github_issue_record=_create_github_issue_record,
+        github_get_issue_detail=_github_get_issue_detail,
+        update_github_issue_record=_update_github_issue_record,
+        github_issue_is_new_state=_github_issue_is_new_state,
+    )
 
 
 def _build_ci_metadata_issue_body(owner: str, repo: str, has_github_actions: bool) -> str:
