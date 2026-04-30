@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -77,6 +78,22 @@ def _build_agent_issue_title(rule: dict, trigger_fields: dict[str, Any]) -> str:
     return f"[SOBS Agent] {focus} — {anomaly_state} state detected"
 
 
+def _load_recent_work_item_candidates(
+    db,
+    github_repo: str,
+    limit: int,
+    *,
+    serialize_github_work_item_row,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        "SELECT * FROM sobs_github_work_items FINAL "
+        "WHERE IsDeleted=0 AND GithubRepo=? AND IssueUrl != '' "
+        "ORDER BY CreatedAt DESC LIMIT ?",
+        [github_repo, max(1, int(limit))],
+    ).fetchall()
+    return [serialize_github_work_item_row(row) for row in rows]
+
+
 def _serialize_github_work_item_row(row: dict | Any, *, safe_json_loads) -> dict[str, Any]:
     r = row if isinstance(row, dict) else dict(row)
     related_issue_urls_raw = safe_json_loads(r.get("RelatedIssueUrls", "[]"), [])
@@ -140,11 +157,207 @@ def _serialize_github_work_item_row(row: dict | Any, *, safe_json_loads) -> dict
     }
 
 
+def _persist_github_work_item(
+    db,
+    run_id: str,
+    rule: dict,
+    trigger_context: dict,
+    github_issue_url: str,
+    analysis: str,
+    suggestion: str,
+    agent_action: str,
+    *,
+    issue_title: str = "",
+    issue_state: str = "",
+    dedup_key: str = "",
+    dedup_decision: str = "new_issue",
+    dedup_confidence: float = 0.0,
+    canonical_issue_url: str = "",
+    canonical_issue_number: int = 0,
+    related_issue_urls: list[str] | None = None,
+    occurrence_count: int = 1,
+    copilot_assignment_requested_at: int = 0,
+    copilot_assignment_status: str = "not_requested",
+    copilot_assignment_reason: str = "",
+    pr_linked: bool = False,
+    pr_number: int = 0,
+    pr_url: str = "",
+    normalize_ch_timestamp,
+    extract_agent_trigger_fields,
+    safe_json_dumps,
+    insert_rows_json_each_row,
+    invalidate_work_items_cache,
+    logger,
+    now=None,
+) -> None:
+    try:
+        now_fn = now or (lambda: datetime.now(timezone.utc))
+        now_ts = normalize_ch_timestamp(now_fn())
+        issue_number = 0
+        try:
+            parts = github_issue_url.rstrip("/").split("/")
+            if parts and parts[-1].isdigit():
+                issue_number = int(parts[-1])
+        except Exception:
+            pass
+
+        trigger_fields = extract_agent_trigger_fields(trigger_context)
+        service_name = str(trigger_fields.get("service_name") or "")
+        anomaly_rule_id = str(trigger_fields.get("anomaly_rule_id") or "")
+        anomaly_state = str(trigger_fields.get("anomaly_state") or "")
+        signal_source = str(trigger_fields.get("signal_source") or "")
+        signal_name = str(trigger_fields.get("signal_name") or "")
+        signal_value = float(trigger_fields.get("signal_value") or 0.0)
+
+        github_repo = ""
+        issue_source_url = canonical_issue_url or github_issue_url
+        try:
+            parts = issue_source_url.split("/")
+            if len(parts) >= 4:
+                github_repo = f"{parts[-4]}/{parts[-3]}"
+        except Exception:
+            pass
+
+        canonical_number = int(canonical_issue_number or issue_number or 0)
+        resolved_issue_url = github_issue_url or canonical_issue_url
+
+        work_item = {
+            "Id": run_id,
+            "CreatedAt": now_ts,
+            "CompletedAt": now_ts,
+            "AgentRunId": run_id,
+            "AgentRuleId": rule.get("id", ""),
+            "AgentRuleName": rule.get("name", ""),
+            "AgentAction": agent_action,
+            "ServiceName": service_name,
+            "AnomalyRuleId": anomaly_rule_id,
+            "AnomalyState": anomaly_state,
+            "SignalSource": signal_source,
+            "SignalName": signal_name,
+            "SignalValue": signal_value,
+            "GithubRepo": github_repo,
+            "DedupKey": dedup_key,
+            "DedupDecision": dedup_decision,
+            "DedupConfidence": float(dedup_confidence or 0.0),
+            "IssueNumber": issue_number,
+            "IssueUrl": resolved_issue_url,
+            "CanonicalIssueNumber": canonical_number,
+            "CanonicalIssueUrl": canonical_issue_url or resolved_issue_url,
+            "RelatedIssueUrls": safe_json_dumps(related_issue_urls or []),
+            "OccurrenceCount": max(1, int(occurrence_count or 1)),
+            "IssueState": issue_state,
+            "IssueTitle": issue_title,
+            "AnalysisSummary": analysis[:500] if analysis else "",
+            "SuggestionSummary": suggestion[:500] if suggestion else "",
+            "CopilotAssignmentRequestedAt": int(copilot_assignment_requested_at or 0),
+            "CopilotAssignmentStatus": copilot_assignment_status,
+            "CopilotAssignmentReason": copilot_assignment_reason,
+            "PrLinked": 1 if pr_linked else 0,
+            "PrNumber": int(pr_number or 0),
+            "PrUrl": pr_url,
+            "IsDeleted": 0,
+            "Version": int(time.time() * 1000),
+        }
+
+        insert_rows_json_each_row(db, "sobs_github_work_items", [work_item])
+        invalidate_work_items_cache()
+    except Exception as exc:
+        logger.warning("Failed to persist work item: %s", exc)
+
+
 def _parse_issue_ref_from_url(issue_url: str) -> tuple[str, str, int]:
     match = re.search(r"github\.com/([^/]+)/([^/]+)/issues/(\d+)", str(issue_url or ""))
     if not match:
         return "", "", 0
     return match.group(1), match.group(2), int(match.group(3))
+
+
+def _build_agent_context_summary(db, trigger_context: dict, *, safe_json_loads) -> str:
+    lines: list[str] = []
+    lines.append("=== SOBS Observability Context ===")
+
+    rule_name = trigger_context.get("rule_name", "unknown rule")
+    trigger_state = trigger_context.get("trigger_state", "")
+    lines.append(f"Triggered by: {rule_name} ({trigger_state})")
+
+    extra = trigger_context.get("extra", "")
+    extra_dict: dict[str, Any] = {}
+    if isinstance(extra, dict):
+        extra_dict = extra
+    elif extra:
+        extra_dict = safe_json_loads(str(extra), {})
+
+    additional_context = str(extra_dict.get("additional_context") or "").strip()
+    if additional_context:
+        lines.append(f"\nUser-provided context: {additional_context}")
+
+    service = str(extra_dict.get("service") or trigger_context.get("service") or "").strip()
+    err_type = str(extra_dict.get("err_type") or "").strip()
+    if service and err_type:
+        try:
+            freq_row = db.execute(
+                "SELECT "
+                "  countIf(Timestamp >= now() - INTERVAL 1 HOUR) AS c_1h, "
+                "  count() AS c_24h "
+                "FROM otel_logs "
+                "WHERE Timestamp >= now() - INTERVAL 24 HOUR "
+                "  AND SeverityText IN ('ERROR','FATAL') "
+                "  AND ServiceName = ? "
+                "  AND LogAttributes['exception.type'] = ?",
+                [service, err_type],
+            ).fetchone()
+            count_1h = int(freq_row["c_1h"]) if freq_row else 0
+            count_24h = int(freq_row["c_24h"]) if freq_row else 0
+            lines.append(f"\nEvent frequency ({service} / {err_type}):")
+            lines.append(f"  Last 1h:  {count_1h} occurrence(s)")
+            lines.append(f"  Last 24h: {count_24h} occurrence(s)")
+            if count_1h <= 1 and count_24h <= 2:
+                lines.append("  Noise indicator: LOW recurrence — may be an isolated event")
+            elif count_1h >= 10 or count_24h >= 50:
+                lines.append("  Noise indicator: HIGH recurrence — persistent or systemic pattern")
+            else:
+                lines.append("  Noise indicator: MODERATE recurrence — monitor for escalation")
+        except Exception:
+            pass
+
+    try:
+        err_rows = db.execute(
+            "SELECT ServiceName, ExceptionType, count() AS c "
+            "FROM otel_logs FINAL "
+            "WHERE Timestamp >= now() - INTERVAL 1 HOUR AND SeverityText IN ('ERROR','FATAL') "
+            "GROUP BY ServiceName, ExceptionType ORDER BY c DESC LIMIT 5"
+        ).fetchall()
+        if err_rows:
+            lines.append("\nRecent errors (last 1h, all services):")
+            for row in err_rows:
+                lines.append(f"  {row['ServiceName']} | {row['ExceptionType']} x{row['c']}")
+    except Exception:
+        pass
+
+    try:
+        anom_rows = db.execute(
+            "SELECT ServiceName, Name AS Signal, anomaly_state "
+            "FROM v_derived_signals_anomaly "
+            "WHERE anomaly_state != 'normal' "
+            "AND time >= now() - INTERVAL 2 HOUR "
+            "LIMIT 5"
+        ).fetchall()
+        if anom_rows:
+            lines.append("\nActive anomalies:")
+            for row in anom_rows:
+                lines.append(f"  {row['ServiceName']} | {row['Signal']} → {row['anomaly_state']}")
+    except Exception:
+        pass
+
+    rendered_extra_keys = {"additional_context", "mask_output", "initiated_by"}
+    if extra_dict:
+        remaining = {key: value for key, value in extra_dict.items() if key not in rendered_extra_keys}
+        if remaining:
+            lines.append(f"\nTrigger details: {remaining}")
+    elif extra:
+        lines.append(f"\nAdditional context: {extra}")
+
+    return "\n".join(lines)
 
 
 def _derive_copilot_assignment_status(

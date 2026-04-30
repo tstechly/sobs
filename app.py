@@ -62,13 +62,16 @@ import config as _config
 import masking as _masking
 import mcp as _mcp
 import telemetry as _telemetry
+from shared.agent_work_items import _build_agent_context_summary as _shared_build_agent_context_summary
 from shared.agent_work_items import _build_agent_issue_title as _shared_build_agent_issue_title
 from shared.agent_work_items import _build_github_work_item_dedup_key as _shared_build_github_work_item_dedup_key
 from shared.agent_work_items import _derive_copilot_assignment_status as _shared_derive_copilot_assignment_status
 from shared.agent_work_items import _extract_agent_trigger_fields as _shared_extract_agent_trigger_fields
+from shared.agent_work_items import _load_recent_work_item_candidates as _shared_load_recent_work_item_candidates
 from shared.agent_work_items import _normalize_issue_match_text as _shared_normalize_issue_match_text
 from shared.agent_work_items import _parse_bounded_int_setting as _shared_parse_bounded_int_setting
 from shared.agent_work_items import _parse_issue_ref_from_url as _shared_parse_issue_ref_from_url
+from shared.agent_work_items import _persist_github_work_item as _shared_persist_github_work_item
 from shared.agent_work_items import _serialize_github_work_item_row as _shared_serialize_github_work_item_row
 from shared.ai_chart import _insert_missing_json_commas as _shared_insert_missing_json_commas
 from shared.ai_chart import _normalize_chart_spec_text as _shared_normalize_chart_spec_text
@@ -5030,13 +5033,12 @@ def _load_recent_work_item_candidates(
     github_repo: str,
     limit: int = _GITHUB_ISSUE_DEDUPE_CANDIDATE_LIMIT,
 ) -> list[dict[str, Any]]:
-    rows = db.execute(
-        "SELECT * FROM sobs_github_work_items FINAL "
-        "WHERE IsDeleted=0 AND GithubRepo=? AND IssueUrl != '' "
-        "ORDER BY CreatedAt DESC LIMIT ?",
-        [github_repo, max(1, int(limit))],
-    ).fetchall()
-    return [_serialize_github_work_item_row(r) for r in rows]
+    return _shared_load_recent_work_item_candidates(
+        db,
+        github_repo,
+        limit,
+        serialize_github_work_item_row=_serialize_github_work_item_row,
+    )
 
 
 def _fallback_issue_dedupe_decision(
@@ -5113,79 +5115,37 @@ def _persist_github_work_item(
     pr_url: str = "",
 ) -> None:
     """Persist a GitHub issue decision as a work item for tracking and cross-linking."""
-
-    try:
-        now_ts = _normalize_ch_timestamp(datetime.now(timezone.utc))
-        issue_number = 0
-        try:
-            parts = github_issue_url.rstrip("/").split("/")
-            if parts and parts[-1].isdigit():
-                issue_number = int(parts[-1])
-        except Exception:
-            pass
-
-        trigger_fields = _extract_agent_trigger_fields(trigger_context)
-        service_name = str(trigger_fields.get("service_name") or "")
-        anomaly_rule_id = str(trigger_fields.get("anomaly_rule_id") or "")
-        anomaly_state = str(trigger_fields.get("anomaly_state") or "")
-        signal_source = str(trigger_fields.get("signal_source") or "")
-        signal_name = str(trigger_fields.get("signal_name") or "")
-        signal_value = float(trigger_fields.get("signal_value") or 0.0)
-
-        github_repo = ""
-        issue_source_url = canonical_issue_url or github_issue_url
-        try:
-            parts = issue_source_url.split("/")
-            if len(parts) >= 4:
-                github_repo = f"{parts[-4]}/{parts[-3]}"
-        except Exception:
-            pass
-
-        canonical_number = int(canonical_issue_number or issue_number or 0)
-        resolved_issue_url = github_issue_url or canonical_issue_url
-
-        work_item = {
-            "Id": run_id,
-            "CreatedAt": now_ts,
-            "CompletedAt": now_ts,
-            "AgentRunId": run_id,
-            "AgentRuleId": rule.get("id", ""),
-            "AgentRuleName": rule.get("name", ""),
-            "AgentAction": agent_action,
-            "ServiceName": service_name,
-            "AnomalyRuleId": anomaly_rule_id,
-            "AnomalyState": anomaly_state,
-            "SignalSource": signal_source,
-            "SignalName": signal_name,
-            "SignalValue": signal_value,
-            "GithubRepo": github_repo,
-            "DedupKey": dedup_key,
-            "DedupDecision": dedup_decision,
-            "DedupConfidence": float(dedup_confidence or 0.0),
-            "IssueNumber": issue_number,
-            "IssueUrl": resolved_issue_url,
-            "CanonicalIssueNumber": canonical_number,
-            "CanonicalIssueUrl": canonical_issue_url or resolved_issue_url,
-            "RelatedIssueUrls": _safe_json_dumps(related_issue_urls or []),
-            "OccurrenceCount": max(1, int(occurrence_count or 1)),
-            "IssueState": issue_state,
-            "IssueTitle": issue_title,
-            "AnalysisSummary": analysis[:500] if analysis else "",
-            "SuggestionSummary": suggestion[:500] if suggestion else "",
-            "CopilotAssignmentRequestedAt": int(copilot_assignment_requested_at or 0),
-            "CopilotAssignmentStatus": copilot_assignment_status,
-            "CopilotAssignmentReason": copilot_assignment_reason,
-            "PrLinked": 1 if pr_linked else 0,
-            "PrNumber": int(pr_number or 0),
-            "PrUrl": pr_url,
-            "IsDeleted": 0,
-            "Version": int(time.time() * 1000),
-        }
-
-        _insert_rows_json_each_row(db, "sobs_github_work_items", [work_item])
-        _invalidate_work_items_cache()
-    except Exception as exc:
-        app.logger.warning("Failed to persist work item: %s", exc)
+    _shared_persist_github_work_item(
+        db,
+        run_id,
+        rule,
+        trigger_context,
+        github_issue_url,
+        analysis,
+        suggestion,
+        agent_action,
+        issue_title=issue_title,
+        issue_state=issue_state,
+        dedup_key=dedup_key,
+        dedup_decision=dedup_decision,
+        dedup_confidence=dedup_confidence,
+        canonical_issue_url=canonical_issue_url,
+        canonical_issue_number=canonical_issue_number,
+        related_issue_urls=related_issue_urls,
+        occurrence_count=occurrence_count,
+        copilot_assignment_requested_at=copilot_assignment_requested_at,
+        copilot_assignment_status=copilot_assignment_status,
+        copilot_assignment_reason=copilot_assignment_reason,
+        pr_linked=pr_linked,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        normalize_ch_timestamp=_normalize_ch_timestamp,
+        extract_agent_trigger_fields=_extract_agent_trigger_fields,
+        safe_json_dumps=_safe_json_dumps,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        invalidate_work_items_cache=_invalidate_work_items_cache,
+        logger=app.logger,
+    )
 
 
 def _persist_onboarding_work_item(
@@ -5226,100 +5186,7 @@ def _persist_onboarding_work_item(
 
 
 def _build_agent_context_summary(db: ChDbConnection, trigger_context: dict) -> str:
-    """Build a plain-text summary of current observability state for the LLM."""
-    lines: list[str] = []
-    lines.append("=== SOBS Observability Context ===")
-
-    rule_name = trigger_context.get("rule_name", "unknown rule")
-    trigger_state = trigger_context.get("trigger_state", "")
-    lines.append(f"Triggered by: {rule_name} ({trigger_state})")
-
-    # Additional context from trigger (user-provided or automated)
-    extra = trigger_context.get("extra", "")
-    extra_dict: dict[str, Any] = {}
-    if isinstance(extra, dict):
-        extra_dict = extra
-    elif extra:
-        extra_dict = _safe_json_loads(str(extra), {})
-
-    additional_context = str(extra_dict.get("additional_context") or "").strip()
-    if additional_context:
-        lines.append(f"\nUser-provided context: {additional_context}")
-
-    # Event frequency / noise analysis — only when we have enough scope (service + err_type).
-    # Without both, the counts would represent "all errors for this service" which is too
-    # broad to be a meaningful noise indicator and can mislead the LLM.
-    service = str(extra_dict.get("service") or trigger_context.get("service") or "").strip()
-    err_type = str(extra_dict.get("err_type") or "").strip()
-    if service and err_type:
-        try:
-            # Single query with countIf for both windows to halve DB round-trips.
-            freq_row = db.execute(
-                "SELECT "
-                "  countIf(Timestamp >= now() - INTERVAL 1 HOUR) AS c_1h, "
-                "  count() AS c_24h "
-                "FROM otel_logs "
-                "WHERE Timestamp >= now() - INTERVAL 24 HOUR "
-                "  AND SeverityText IN ('ERROR','FATAL') "
-                "  AND ServiceName = ? "
-                "  AND LogAttributes['exception.type'] = ?",
-                [service, err_type],
-            ).fetchone()
-            count_1h = int(freq_row["c_1h"]) if freq_row else 0
-            count_24h = int(freq_row["c_24h"]) if freq_row else 0
-            lines.append(f"\nEvent frequency ({service} / {err_type}):")
-            lines.append(f"  Last 1h:  {count_1h} occurrence(s)")
-            lines.append(f"  Last 24h: {count_24h} occurrence(s)")
-            if count_1h <= 1 and count_24h <= 2:
-                lines.append("  Noise indicator: LOW recurrence — may be an isolated event")
-            elif count_1h >= 10 or count_24h >= 50:
-                lines.append("  Noise indicator: HIGH recurrence — persistent or systemic pattern")
-            else:
-                lines.append("  Noise indicator: MODERATE recurrence — monitor for escalation")
-        except Exception:
-            pass
-
-    # Recent errors (broader context across all services)
-    try:
-        err_rows = db.execute(
-            "SELECT ServiceName, ExceptionType, count() AS c "
-            "FROM otel_logs FINAL "
-            "WHERE Timestamp >= now() - INTERVAL 1 HOUR AND SeverityText IN ('ERROR','FATAL') "
-            "GROUP BY ServiceName, ExceptionType ORDER BY c DESC LIMIT 5"
-        ).fetchall()
-        if err_rows:
-            lines.append("\nRecent errors (last 1h, all services):")
-            for r in err_rows:
-                lines.append(f"  {r['ServiceName']} | {r['ExceptionType']} x{r['c']}")
-    except Exception:
-        pass
-
-    # Recent anomaly states
-    try:
-        anom_rows = db.execute(
-            "SELECT ServiceName, Name AS Signal, anomaly_state "
-            "FROM v_derived_signals_anomaly "
-            "WHERE anomaly_state != 'normal' "
-            "AND time >= now() - INTERVAL 2 HOUR "
-            "LIMIT 5"
-        ).fetchall()
-        if anom_rows:
-            lines.append("\nActive anomalies:")
-            for r in anom_rows:
-                lines.append(f"  {r['ServiceName']} | {r['Signal']} → {r['anomaly_state']}")
-    except Exception:
-        pass
-
-    # Remaining extra fields (exclude already-rendered keys)
-    _RENDERED_EXTRA_KEYS = {"additional_context", "mask_output", "initiated_by"}
-    if extra_dict:
-        remaining = {k: v for k, v in extra_dict.items() if k not in _RENDERED_EXTRA_KEYS}
-        if remaining:
-            lines.append(f"\nTrigger details: {remaining}")
-    elif extra:
-        lines.append(f"\nAdditional context: {extra}")
-
-    return "\n".join(lines)
+    return _shared_build_agent_context_summary(db, trigger_context, safe_json_loads=_safe_json_loads)
 
 
 def _extract_trigger_service_name(trigger_context: dict[str, Any]) -> str:
