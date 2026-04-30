@@ -105,6 +105,7 @@ from shared.onboarding import _github_file_text as _shared_github_file_text
 from shared.onboarding import _github_import_repo_metadata as _shared_github_import_repo_metadata
 from shared.onboarding import _github_list_directory as _shared_github_list_directory
 from shared.onboarding import _github_list_repositories_for_owner as _shared_github_list_repositories_for_owner
+from shared.onboarding import _inspect_onboarding_repository as _shared_inspect_onboarding_repository
 from shared.onboarding import _inspect_repo_for_onboarding as _shared_inspect_repo_for_onboarding
 from shared.onboarding import _parse_gemfile_lock_dependencies as _shared_parse_gemfile_lock_dependencies
 from shared.onboarding import _parse_go_sum_dependencies as _shared_parse_go_sum_dependencies
@@ -28654,46 +28655,26 @@ async def api_onboarding_inspect_repo():
     db = get_db()
     app_id = request.args.get("app_id", "").strip()
     repo_param = request.args.get("repo", "").strip()
-
-    repo_url = ""
-    if app_id:
-        row = db.execute(
-            "SELECT RepoUrl FROM sobs_apps FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
-            [app_id],
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "App not found"}), 404
-        repo_url = str(row[0] or "")
-    elif repo_param:
-        repo_url = repo_param
-    else:
-        return jsonify({"ok": False, "error": "app_id or repo parameter required"}), 400
-
-    owner, repo = _parse_github_repo_owner_name(repo_url)
-    if not owner or not repo:
-        return jsonify({"ok": False, "error": f"Could not parse owner/repo from '{repo_url}'"}), 400
-
-    # Resolve token: repo-scoped first, then global fallback
-    github_token = _load_repo_scoped_github_token(db, owner, repo)
-    if not github_token:
-        github_token = _load_ai_setting(db, "ai.github_token", "").strip()
-    if not github_token:
-        return jsonify(
-            {
-                "ok": True,
-                "owner": owner,
-                "repo": repo,
-                "has_github_actions": False,
-                "sobs_ci_found": False,
-                "sobs_otel_found": False,
-                "copilot_available": False,
-                "workflow_files": [],
-                "error": "No GitHub token configured for this repository",
-            }
-        )
-
-    result = await _inspect_repo_for_onboarding(github_token, owner, repo)
-    return jsonify({"ok": True, "owner": owner, "repo": repo, **result})
+    status_code, payload = await _shared_inspect_onboarding_repository(
+        db=db,
+        app_id=app_id,
+        repo_param=repo_param,
+        load_app_repo_url=lambda current_db, current_app_id: str(
+            (
+                current_db.execute(
+                    "SELECT RepoUrl FROM sobs_apps FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
+                    [current_app_id],
+                ).fetchone()
+                or [""]
+            )[0]
+            or ""
+        ),
+        parse_github_repo_owner_name=_parse_github_repo_owner_name,
+        load_repo_scoped_github_token=_load_repo_scoped_github_token,
+        load_ai_setting=_load_ai_setting,
+        inspect_repo_for_onboarding=_inspect_repo_for_onboarding,
+    )
+    return jsonify(payload), status_code
 
 
 @app.route("/api/onboarding/create-issues", methods=["POST"])

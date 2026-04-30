@@ -12,6 +12,7 @@ from shared.onboarding import (
     _github_import_repo_metadata,
     _github_list_directory,
     _github_list_repositories_for_owner,
+    _inspect_onboarding_repository,
     _inspect_repo_for_onboarding,
     _parse_gemfile_lock_dependencies,
     _parse_go_sum_dependencies,
@@ -891,6 +892,112 @@ def test_create_onboarding_repository_entry_persists_row_and_optional_settings()
         ("ai.github_token_last_validation_message", ""),
         ("ai.github_repo", "octo/checkout-service"),
     ]
+
+
+async def test_inspect_onboarding_repository_handles_missing_params_and_unknown_app():
+    missing_status, missing_payload = await _inspect_onboarding_repository(
+        db=object(),
+        app_id="",
+        repo_param="",
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("owner", "repo"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+        inspect_repo_for_onboarding=_return_bool,  # type: ignore[arg-type]
+    )
+    unknown_status, unknown_payload = await _inspect_onboarding_repository(
+        db=object(),
+        app_id="missing-app",
+        repo_param="",
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("owner", "repo"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+        inspect_repo_for_onboarding=_return_bool,  # type: ignore[arg-type]
+    )
+
+    assert missing_status == 400
+    assert missing_payload == {"ok": False, "error": "app_id or repo parameter required"}
+    assert unknown_status == 404
+    assert unknown_payload == {"ok": False, "error": "App not found"}
+
+
+async def test_inspect_onboarding_repository_handles_invalid_repo_and_missing_token():
+    invalid_status, invalid_payload = await _inspect_onboarding_repository(
+        db=object(),
+        app_id="",
+        repo_param="not-a-valid-url",
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("", ""),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+        inspect_repo_for_onboarding=_return_bool,  # type: ignore[arg-type]
+    )
+    no_token_status, no_token_payload = await _inspect_onboarding_repository(
+        db=object(),
+        app_id="",
+        repo_param="octo/checkout-service",
+        load_app_repo_url=lambda _db, _app_id: "",
+        parse_github_repo_owner_name=lambda repo_url: ("octo", "checkout-service"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "",
+        load_ai_setting=lambda _db, _key, _default: "",
+        inspect_repo_for_onboarding=_return_bool,  # type: ignore[arg-type]
+    )
+
+    assert invalid_status == 400
+    assert invalid_payload == {"ok": False, "error": "Could not parse owner/repo from 'not-a-valid-url'"}
+    assert no_token_status == 200
+    assert no_token_payload == {
+        "ok": True,
+        "owner": "octo",
+        "repo": "checkout-service",
+        "has_github_actions": False,
+        "sobs_ci_found": False,
+        "sobs_otel_found": False,
+        "copilot_available": False,
+        "workflow_files": [],
+        "error": "No GitHub token configured for this repository",
+    }
+
+
+async def test_inspect_onboarding_repository_prefers_repo_token_and_returns_inspection_result():
+    captured: dict[str, str] = {}
+
+    async def _fake_inspect(github_token: str, owner: str, repo: str) -> dict[str, Any]:
+        captured["token"] = github_token
+        captured["owner"] = owner
+        captured["repo"] = repo
+        return {
+            "has_github_actions": True,
+            "sobs_ci_found": True,
+            "sobs_otel_found": False,
+            "copilot_available": True,
+            "workflow_files": [".github/workflows/ci.yml"],
+        }
+
+    status_code, payload = await _inspect_onboarding_repository(
+        db=object(),
+        app_id="saved-app",
+        repo_param="",
+        load_app_repo_url=lambda _db, _app_id: "https://github.com/octo/checkout-service",
+        parse_github_repo_owner_name=lambda repo_url: ("octo", "checkout-service"),
+        load_repo_scoped_github_token=lambda _db, _owner, _repo: "repo-token",
+        load_ai_setting=lambda _db, _key, _default: "global-token",
+        inspect_repo_for_onboarding=_fake_inspect,
+    )
+
+    assert status_code == 200
+    assert captured == {"token": "repo-token", "owner": "octo", "repo": "checkout-service"}
+    assert payload == {
+        "ok": True,
+        "owner": "octo",
+        "repo": "checkout-service",
+        "has_github_actions": True,
+        "sobs_ci_found": True,
+        "sobs_otel_found": False,
+        "copilot_available": True,
+        "workflow_files": [".github/workflows/ci.yml"],
+    }
 
 
 async def test_create_onboarding_issue_result_returns_error_without_assignment_or_persistence():

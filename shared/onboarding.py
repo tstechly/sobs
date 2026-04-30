@@ -994,3 +994,48 @@ def _create_onboarding_repository_entry(
         "owner": owner,
         "repo": repo,
     }
+
+
+async def _inspect_onboarding_repository(
+    *,
+    db: Any,
+    app_id: str,
+    repo_param: str,
+    load_app_repo_url: Callable[[Any, str], str],
+    parse_github_repo_owner_name: Callable[[str], tuple[str, str]],
+    load_repo_scoped_github_token: Callable[[Any, str, str], str],
+    load_ai_setting: Callable[[Any, str, str], str],
+    inspect_repo_for_onboarding: Callable[[str, str, str], Awaitable[dict[str, Any]]],
+) -> tuple[int, dict[str, Any]]:
+    repo_url = ""
+    if app_id:
+        repo_url = load_app_repo_url(db, app_id)
+        if not repo_url:
+            return 404, {"ok": False, "error": "App not found"}
+    elif repo_param:
+        repo_url = repo_param
+    else:
+        return 400, {"ok": False, "error": "app_id or repo parameter required"}
+
+    owner, repo = parse_github_repo_owner_name(repo_url)
+    if not owner or not repo:
+        return 400, {"ok": False, "error": f"Could not parse owner/repo from '{repo_url}'"}
+
+    github_token = load_repo_scoped_github_token(db, owner, repo)
+    if not github_token:
+        github_token = load_ai_setting(db, "ai.github_token", "").strip()
+    if not github_token:
+        return 200, {
+            "ok": True,
+            "owner": owner,
+            "repo": repo,
+            "has_github_actions": False,
+            "sobs_ci_found": False,
+            "sobs_otel_found": False,
+            "copilot_available": False,
+            "workflow_files": [],
+            "error": "No GitHub token configured for this repository",
+        }
+
+    result = await inspect_repo_for_onboarding(github_token, owner, repo)
+    return 200, {"ok": True, "owner": owner, "repo": repo, **result}
