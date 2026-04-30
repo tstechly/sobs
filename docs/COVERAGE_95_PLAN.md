@@ -25,6 +25,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/app_settings.py` now measures `98%` line coverage in its dedicated direct test run after extracting generic app-setting load/save/delete helpers, monotonic app-setting timestamp generation, JSON string-list setting helpers, masking custom key/pattern loaders and savers, masking settings aggregation, and masking runtime-rule refresh handling from `app.py`.
 - `shared/notifications.py` now measures `100%` line coverage in its dedicated direct test run after extracting notification channel loading, condition normalization/parsing, notification rule loading, notification log loading, channel config masking, and per-channel mask-output resolution from `app.py`.
 - `shared/sql_where.py` now measures `100%` line coverage in its dedicated direct test run after extracting time-window WHERE fragment helpers, WHERE clause assembly, regex-expression clause assembly, SQL replacement outside quoted literals, AI SQL WHERE normalization, and the central user SQL WHERE validation helper from `app.py`.
+- `shared/tag_rules.py` now measures `100%` line coverage in its dedicated direct test run after extracting stable record-id helpers, tag-rule condition JSON parsing, tag-rule loading with legacy fallback semantics, single-condition matching, composite tag-rule matching, and tag-rule attribute-key suggestion ranking from `app.py`.
 - `shared/github.py` measures `97.06%` line coverage, which validates Milestone 1 as a successful high-confidence extraction.
 - `shared/github_issues.py` now measures `96.4%` line coverage after the dedicated branch tests added in this phase.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run after extracting the managed CI push API-key TTL, hashing, status, validation, rotation, revocation, and realtime-flag helpers in Milestone 5.
@@ -154,6 +155,7 @@ Measured result so far:
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/notifications.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/sql_where.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/tag_rules.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
 - `app.py` now delegates agent rule loading, single-rule loading, agent run loading, agent-run counter helpers, trigger service-name extraction, and agent GitHub target resolution to `shared/agent_state.py`.
@@ -164,6 +166,7 @@ Measured result so far:
 - `app.py` now delegates the managed CI push API-key TTL, expiry, hashing, status, validation, rotation, revocation, and realtime-flag helpers to `shared/ci_push.py`.
 - `app.py` now delegates notification channel loading, condition normalization/parsing, notification rule loading, notification log loading, channel config masking, and per-channel mask-output resolution to `shared/notifications.py`.
 - `app.py` now delegates time-window WHERE fragment helpers, WHERE clause assembly, regex-expression clause assembly, SQL replacement outside quoted literals, AI SQL WHERE normalization, and central user SQL WHERE validation to `shared/sql_where.py` while preserving the app-level wrappers used by filter validation and query-route tests.
+- `app.py` now delegates stable record-id helpers, tag-rule condition parsing, tag-rule loading with legacy fallback semantics, single-condition matching, composite tag-rule matching, and attribute-key suggestion ranking to `shared/tag_rules.py` while preserving the app-level helpers used by tag settings, ingest auto-tagging, and existing tests.
 - `app.py` now delegates the write-batch runner, worker loop, worker startup, enqueue, queue-depth, and worker-shutdown helpers to `shared/write_queue.py` while preserving app-level queue APIs for route tests.
 
 Why these slices were taken early:

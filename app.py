@@ -235,6 +235,13 @@ from shared.sql_where import _replace_sql_outside_single_quotes as _shared_repla
 from shared.sql_where import _time_window_conditions as _shared_time_window_conditions
 from shared.sql_where import _validate_user_sql_where as _shared_validate_user_sql_where
 from shared.sql_where import _where_clause as _shared_where_clause
+from shared.tag_rules import _load_tag_rules as _shared_load_tag_rules
+from shared.tag_rules import _match_single_condition as _shared_match_single_condition
+from shared.tag_rules import _match_tag_rule as _shared_match_tag_rule
+from shared.tag_rules import _parse_tag_rule_conditions_json as _shared_parse_tag_rule_conditions_json
+from shared.tag_rules import _record_id_for_log as _shared_record_id_for_log
+from shared.tag_rules import _record_id_for_span as _shared_record_id_for_span
+from shared.tag_rules import _tag_rule_attribute_key_suggestions as _shared_tag_rule_attribute_key_suggestions
 from shared.write_queue import _WRITE_STOP as _SHARED_WRITE_STOP
 from shared.write_queue import _ensure_write_worker as _shared_ensure_write_worker
 from shared.write_queue import _queue_write as _shared_queue_write
@@ -5821,7 +5828,8 @@ def _run_write_batch(tasks: list[_WriteTask]) -> None:
 
 
 def _write_worker_main() -> None:
-    assert _write_queue is not None
+    if _write_queue is None:
+        return
     _shared_write_worker_main(
         write_queue=_write_queue,
         write_stop=_WRITE_STOP,
@@ -5833,6 +5841,8 @@ def _write_worker_main() -> None:
 
 def _ensure_write_worker() -> None:
     global _write_queue, _write_thread
+    if _write_queue is None:
+        _write_queue = queue.Queue(maxsize=max(1, WRITE_QUEUE_MAX))
     _write_queue, _write_thread = _shared_ensure_write_worker(
         write_queue=_write_queue,
         write_thread=_write_thread,
@@ -9500,79 +9510,22 @@ _TAG_RULE_RECORD_TYPES = ("log", "trace", "error", "ai", "rum", "all")
 
 def _record_id_for_log(ts: str, service: str, trace_id: str, span_id: str) -> str:
     """Compute a stable record ID for a log/rum/error event."""
-    key = f"{service}|{ts}|{trace_id}|{span_id}"
-    return hashlib.md5(key.encode()).hexdigest()
+    return _shared_record_id_for_log(ts, service, trace_id, span_id)
 
 
 def _record_id_for_span(trace_id: str, span_id: str) -> str:
     """Compute a stable record ID for a trace span."""
-    key = f"{trace_id}|{span_id}"
-    return hashlib.md5(key.encode()).hexdigest()
+    return _shared_record_id_for_span(trace_id, span_id)
 
 
 def _parse_tag_rule_conditions_json(raw: Any) -> list[dict[str, str]]:
     """Best-effort decode for ConditionsJson with safe fallback semantics."""
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-
-    normalized: list[dict[str, str]] = []
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        normalized.append(
-            {
-                "match_field": str(item.get("match_field", "") or ""),
-                "match_operator": str(item.get("match_operator", "") or ""),
-                "match_value": str(item.get("match_value", "") or ""),
-                "match_attr_key": str(item.get("match_attr_key", "") or ""),
-            }
-        )
-    return normalized
+    return _shared_parse_tag_rule_conditions_json(raw)
 
 
 def _load_tag_rules(db: ChDbConnection) -> list[dict]:
     """Load all active tag rules."""
-    rows = db.execute(
-        "SELECT Id, Name, RecordTypes, MatchField, MatchOperator, MatchValue, "
-        "MatchAttrKey, TagKey, TagValue, ConditionsJson "
-        "FROM sobs_tag_rules FINAL WHERE IsDeleted = 0 ORDER BY Name"
-    ).fetchall()
-    loaded: list[dict] = []
-    for row in rows:
-        conditions = _parse_tag_rule_conditions_json(row["ConditionsJson"])
-        # Backward compatibility for pre-ConditionsJson rules.
-        if not conditions and str(row["MatchField"] or "").strip():
-            conditions = [
-                {
-                    "match_field": str(row["MatchField"] or ""),
-                    "match_operator": str(row["MatchOperator"] or "eq"),
-                    "match_value": str(row["MatchValue"] or ""),
-                    "match_attr_key": str(row["MatchAttrKey"] or ""),
-                }
-            ]
-
-        loaded.append(
-            {
-                "id": str(row["Id"]),
-                "name": str(row["Name"]),
-                "record_types": [t.strip() for t in str(row["RecordTypes"]).split(",") if t.strip()],
-                "match_field": str(row["MatchField"]),
-                "match_operator": str(row["MatchOperator"]),
-                "match_value": str(row["MatchValue"]),
-                "match_attr_key": str(row["MatchAttrKey"]),
-                "tag_key": str(row["TagKey"]),
-                "tag_value": str(row["TagValue"]),
-                "conditions": conditions,
-            }
-        )
-    return loaded
+    return _shared_load_tag_rules(db, parse_tag_rule_conditions_json=_parse_tag_rule_conditions_json)
 
 
 def _match_tag_rule(
@@ -9591,32 +9544,16 @@ def _match_tag_rule(
     match.  For simple rules the single ``match_field``/``match_operator``/
     ``match_value`` triple is evaluated as before.
     """
-    rule_types = rule["record_types"]
-    if rule_types and "all" not in rule_types and record_type not in rule_types:
-        return False
-
-    conditions: list[dict] = rule.get("conditions") or []
-    if conditions:
-        # Composite rule – every condition in the list must match.
-        return all(
-            _match_single_condition(cond, service, severity, body, attrs, span_name, event_type) for cond in conditions
-        )
-
-    # Simple (legacy) rule – evaluate the single condition stored directly on
-    # the rule dict.
-    return _match_single_condition(
-        {
-            "match_field": rule["match_field"],
-            "match_operator": rule["match_operator"],
-            "match_value": rule["match_value"],
-            "match_attr_key": rule["match_attr_key"],
-        },
+    return _shared_match_tag_rule(
+        rule,
+        record_type,
         service,
         severity,
         body,
         attrs,
         span_name,
         event_type,
+        match_single_condition=_match_single_condition,
     )
 
 
@@ -9630,53 +9567,17 @@ def _match_single_condition(
     event_type: str = "",
 ) -> bool:
     """Evaluate a single condition dict against the record fields."""
-    field = cond.get("match_field", "")
-    if field == "service_name":
-        value = service
-    elif field == "severity":
-        value = severity
-    elif field == "body":
-        value = body
-    elif field == "span_name":
-        value = span_name
-    elif field == "event_type":
-        value = event_type
-    elif field == "attribute":
-        value = str(attrs.get(cond.get("match_attr_key", ""), "")) if isinstance(attrs, dict) else ""
-    else:
-        value = ""
-
-    operator = cond.get("match_operator", "")
-    match_value = cond.get("match_value", "")
-    if operator == "eq":
-        return value == match_value
-    if operator == "contains":
-        return match_value.lower() in value.lower()
-    if operator == "regex":
-        try:
-            return bool(re.search(match_value, value))
-        except re.error:
-            return False
-    return False
+    return _shared_match_single_condition(cond, service, severity, body, attrs, span_name, event_type)
 
 
 def _tag_rule_attribute_key_suggestions(db: ChDbConnection, query_text: str, limit: int) -> list[str]:
-    keys: set[str] = set()
-    for record_type in _ATTR_KEY_RECORD_TYPES:
-        keys.update(_get_cached_attr_keys(db, record_type))
-
-    q = query_text.strip().lower()
-    ranked = sorted(
-        (k for k in keys if k),
-        key=lambda k: (
-            0 if q and k.lower().startswith(q) else 1,
-            0 if q and q in k.lower() else 1,
-            k.lower(),
-        ),
+    return _shared_tag_rule_attribute_key_suggestions(
+        db,
+        query_text,
+        limit,
+        attr_key_record_types=_ATTR_KEY_RECORD_TYPES,
+        get_cached_attr_keys=_get_cached_attr_keys,
     )
-    if q:
-        ranked = [k for k in ranked if q in k.lower()]
-    return ranked[:limit]
 
 
 def _tag_rule_value_suggestions(
