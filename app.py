@@ -245,6 +245,17 @@ from shared.otlp_security import _origin_allowed_for_otlp as _shared_origin_allo
 from shared.otlp_security import _otlp_cors_allow_methods as _shared_otlp_cors_allow_methods
 from shared.otlp_security import _path_needs_otlp_cors as _shared_path_needs_otlp_cors
 from shared.otlp_security import _request_is_secure_context as _shared_request_is_secure_context
+from shared.output_masking import _get_masking_settings_flags as _shared_get_masking_settings_flags
+from shared.output_masking import _is_output_masking_enabled as _shared_is_output_masking_enabled
+from shared.output_masking import _is_sql_output_masking_enabled as _shared_is_sql_output_masking_enabled
+from shared.output_masking import (
+    _jsonify_with_optional_sql_output_mask as _shared_jsonify_with_optional_sql_output_mask,
+)
+from shared.output_masking import _mask_json_payload as _shared_mask_json_payload
+from shared.output_masking import _mask_payload_for_output_json as _shared_mask_payload_for_output_json
+from shared.output_masking import _mask_string_for_output as _shared_mask_string_for_output
+from shared.output_masking import _mask_value_for_output as _shared_mask_value_for_output
+from shared.output_masking import _set_masking_settings_cache as _shared_set_masking_settings_cache
 from shared.raw_metrics_window import _ensure_raw_metrics_retention as _shared_ensure_raw_metrics_retention
 from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _shared_list_trace_overlapping_raw_windows
 from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
@@ -335,37 +346,29 @@ def _set_masking_settings_cache(
     sql_output_enabled: bool | None = None,
     loaded: bool = True,
 ) -> None:
-    with _MASKING_SETTINGS_CACHE_LOCK:
-        if output_enabled is not None:
-            _MASKING_SETTINGS_CACHE["output_enabled"] = bool(output_enabled)
-        if sql_output_enabled is not None:
-            _MASKING_SETTINGS_CACHE["sql_output_enabled"] = bool(sql_output_enabled)
-        _MASKING_SETTINGS_CACHE["loaded"] = loaded
+    _shared_set_masking_settings_cache(
+        cache_state={"lock": _MASKING_SETTINGS_CACHE_LOCK, "values": _MASKING_SETTINGS_CACHE},
+        output_enabled=output_enabled,
+        sql_output_enabled=sql_output_enabled,
+        loaded=loaded,
+    )
 
 
 def _get_masking_settings_flags(db: "ChDbConnection | None" = None) -> tuple[bool, bool]:
-    with _MASKING_SETTINGS_CACHE_LOCK:
-        if _MASKING_SETTINGS_CACHE["loaded"]:
-            output_enabled = bool(_MASKING_SETTINGS_CACHE["output_enabled"])
-            sql_output_enabled = bool(_MASKING_SETTINGS_CACHE["sql_output_enabled"])
-            return output_enabled, sql_output_enabled
-
-    db_conn = db or get_db()
-    output_enabled = _is_truthy_setting(_get_app_setting(db_conn, _MASKING_OUTPUT_ENABLED_SETTING), default=True)
-    sql_output_enabled = _is_truthy_setting(
-        _get_app_setting(db_conn, _MASKING_SQL_OUTPUT_ENABLED_SETTING), default=True
+    return _shared_get_masking_settings_flags(
+        db,
+        cache_state={"lock": _MASKING_SETTINGS_CACHE_LOCK, "values": _MASKING_SETTINGS_CACHE},
+        get_db=get_db,
+        get_app_setting=_get_app_setting,
+        is_truthy_setting=_is_truthy_setting,
+        masking_output_enabled_setting=_MASKING_OUTPUT_ENABLED_SETTING,
+        masking_sql_output_enabled_setting=_MASKING_SQL_OUTPUT_ENABLED_SETTING,
+        set_masking_settings_cache=_set_masking_settings_cache,
     )
-    _set_masking_settings_cache(
-        output_enabled=output_enabled,
-        sql_output_enabled=sql_output_enabled,
-        loaded=True,
-    )
-    return output_enabled, sql_output_enabled
 
 
 def _mask_json_payload(value: Any) -> Any:
-    """Mask observability payloads before sending them as JSON."""
-    return _mask_payload_for_output_json(value, mask_sql_fields=True)
+    return _shared_mask_json_payload(value, mask_payload_for_output_json=_mask_payload_for_output_json)
 
 
 def masked_jsonify(*args: Any, **kwargs: Any) -> Response:
@@ -457,55 +460,51 @@ def _mask_payload_for_output_json(
     db: "ChDbConnection | None" = None,
     mask_sql_fields: bool = True,
 ) -> Any:
-    safe_value = _coerce_undefined_for_json(value)
-    if not _is_output_masking_enabled(db):
-        return safe_value
-
-    if isinstance(safe_value, dict):
-        masked: dict[Any, Any] = {}
-        for key, item in safe_value.items():
-            key_name = _masking.normalize_sensitive_key(key)
-            if key_name in _masking.SENSITIVE_KEYS:
-                masked[key] = _masking.MASK
-                continue
-            if key_name in _SQL_OUTPUT_MASK_FIELD_NAMES and isinstance(item, str) and not mask_sql_fields:
-                masked[key] = item
-                continue
-            masked[key] = _mask_payload_for_output_json(item, db=db, mask_sql_fields=mask_sql_fields)
-        return masked
-    if isinstance(safe_value, list):
-        return [_mask_payload_for_output_json(item, db=db, mask_sql_fields=mask_sql_fields) for item in safe_value]
-    if isinstance(safe_value, tuple):
-        return tuple(_mask_payload_for_output_json(item, db=db, mask_sql_fields=mask_sql_fields) for item in safe_value)
-    return _mask_value_for_output(safe_value, db)
+    return _shared_mask_payload_for_output_json(
+        value,
+        db=db,
+        mask_sql_fields=mask_sql_fields,
+        coerce_undefined_for_json=_coerce_undefined_for_json,
+        is_output_masking_enabled=_is_output_masking_enabled,
+        masking_module=_masking,
+        sql_output_mask_field_names=_SQL_OUTPUT_MASK_FIELD_NAMES,
+        mask_value_for_output=_mask_value_for_output,
+    )
 
 
 def _is_output_masking_enabled(db: "ChDbConnection | None" = None) -> bool:
-    output_enabled, _sql_output_enabled = _get_masking_settings_flags(db)
-    return output_enabled
+    return _shared_is_output_masking_enabled(db, get_masking_settings_flags=_get_masking_settings_flags)
 
 
 def _mask_value_for_output(value: Any, db: "ChDbConnection | None" = None) -> Any:
-    if not _is_output_masking_enabled(db):
-        return value
-    return _masking.mask_value(value)
+    return _shared_mask_value_for_output(
+        value,
+        db=db,
+        is_output_masking_enabled=_is_output_masking_enabled,
+        masking_module=_masking,
+    )
 
 
 def _mask_string_for_output(value: Any, db: "ChDbConnection | None" = None) -> str:
-    if not _is_output_masking_enabled(db):
-        if value is None:
-            return ""
-        return str(value)
-    return _masking.mask_string(value)
+    return _shared_mask_string_for_output(
+        value,
+        db=db,
+        is_output_masking_enabled=_is_output_masking_enabled,
+        masking_module=_masking,
+    )
 
 
 def _is_sql_output_masking_enabled(db: "ChDbConnection | None" = None) -> bool:
-    _output_enabled, sql_output_enabled = _get_masking_settings_flags(db)
-    return sql_output_enabled
+    return _shared_is_sql_output_masking_enabled(db, get_masking_settings_flags=_get_masking_settings_flags)
 
 
 def _jsonify_with_optional_sql_output_mask(payload: Any) -> Response:
-    return _base_jsonify(_mask_payload_for_output_json(payload, mask_sql_fields=_is_sql_output_masking_enabled()))
+    return _shared_jsonify_with_optional_sql_output_mask(
+        payload,
+        base_jsonify=_base_jsonify,
+        mask_payload_for_output_json=_mask_payload_for_output_json,
+        is_sql_output_masking_enabled=_is_sql_output_masking_enabled,
+    )
 
 
 _ASYNC_HTTP_CLIENT: httpx.AsyncClient | None = None
