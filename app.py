@@ -75,7 +75,6 @@ from shared.ai_sql import _vanna_generate_named_queries as _shared_vanna_generat
 from shared.ai_sql import _vanna_generate_sql as _shared_vanna_generate_sql
 from shared.ai_sql import _vanna_repair_sql as _shared_vanna_repair_sql
 from shared.github import (
-    _build_github_repo_url,
     _github_repo_token_key,
     _github_token_expiry_status,
     _normalize_github_token_expiry_input,
@@ -102,7 +101,9 @@ from shared.onboarding import _build_otel_audit_issue_body as _shared_build_otel
 from shared.onboarding import _create_onboarding_issue_result as _shared_create_onboarding_issue_result
 from shared.onboarding import _decode_github_contents_payload as _shared_decode_github_contents_payload
 from shared.onboarding import _github_file_text as _shared_github_file_text
+from shared.onboarding import _github_import_repo_metadata as _shared_github_import_repo_metadata
 from shared.onboarding import _github_list_directory as _shared_github_list_directory
+from shared.onboarding import _github_list_repositories_for_owner as _shared_github_list_repositories_for_owner
 from shared.onboarding import _inspect_repo_for_onboarding as _shared_inspect_repo_for_onboarding
 from shared.onboarding import _parse_gemfile_lock_dependencies as _shared_parse_gemfile_lock_dependencies
 from shared.onboarding import _parse_go_sum_dependencies as _shared_parse_go_sum_dependencies
@@ -28631,52 +28632,15 @@ async def api_onboarding_import_repo():
         return jsonify({"ok": False, "error": "Enter a valid GitHub owner and repository name"}), 400
 
     github_token = token_override or _load_ai_setting(db, "ai.github_token", "").strip()
-    if github_token:
-        headers = _github_api_headers(github_token)
-    else:
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-
-    client = await _get_async_http_client()
-    try:
-        resp = await client.get(
-            f"https://api.github.com/repos/{owner}/{repo}",
-            headers=headers,
-            timeout=15,
-        )
-        payload = resp.json() if resp.content else {}
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"GitHub lookup failed: {exc}"}), 502
-
-    if resp.status_code != 200:
-        detail = ""
-        if isinstance(payload, dict):
-            detail = str(payload.get("message") or "").strip()
-        return jsonify({"ok": False, "error": detail or f"GitHub lookup failed ({resp.status_code})"}), 400
-
-    if not isinstance(payload, dict):
-        return jsonify({"ok": False, "error": "Unexpected GitHub response payload"}), 502
-
-    full_name = str(payload.get("full_name") or f"{owner}/{repo}").strip()
-    imported_repo_url = str(payload.get("html_url") or f"https://github.com/{owner}/{repo}").strip()
-    suggested_name = str(payload.get("name") or repo).strip() or repo
-
-    return jsonify(
-        {
-            "ok": True,
-            "owner": owner,
-            "repo": repo,
-            "full_name": full_name,
-            "repo_url": imported_repo_url,
-            "name": suggested_name,
-            "slug": _app_slug(suggested_name),
-            "default_branch": str(payload.get("default_branch") or ""),
-            "visibility": str(payload.get("visibility") or "public"),
-            "description": str(payload.get("description") or ""),
-        }
+    status_code, payload = await _shared_github_import_repo_metadata(
+        github_token,
+        owner,
+        repo,
+        get_async_http_client=_get_async_http_client,
     )
+    if payload.get("ok"):
+        payload["slug"] = _app_slug(str(payload.get("name") or repo))
+    return jsonify(payload), status_code
 
 
 @app.route("/api/onboarding/list-repos", methods=["POST"])
@@ -28692,71 +28656,12 @@ async def api_onboarding_list_repos():
         return jsonify({"ok": False, "error": "Owner or username is required"}), 400
 
     github_token = token_override or _load_ai_setting(db, "ai.github_token", "").strip()
-    token_used = bool(github_token)
-    headers = (
-        _github_api_headers(github_token)
-        if github_token
-        else {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
+    status_code, payload = await _shared_github_list_repositories_for_owner(
+        github_token,
+        owner,
+        get_async_http_client=_get_async_http_client,
     )
-
-    endpoints: list[str] = []
-    if token_used:
-        endpoints.append(f"https://api.github.com/users/{owner}/repos?per_page=100&type=all&sort=full_name")
-        endpoints.append(f"https://api.github.com/orgs/{owner}/repos?per_page=100&type=all&sort=full_name")
-    else:
-        endpoints.append(f"https://api.github.com/users/{owner}/repos?per_page=100&type=public&sort=full_name")
-        endpoints.append(f"https://api.github.com/orgs/{owner}/repos?per_page=100&type=public&sort=full_name")
-
-    client = await _get_async_http_client()
-    payload: Any = None
-    response_status = 0
-    for url in endpoints:
-        try:
-            resp = await client.get(url, headers=headers, timeout=15)
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"GitHub lookup failed: {exc}"}), 502
-
-        response_status = int(resp.status_code)
-        payload = resp.json() if resp.content else None
-        if response_status == 200:
-            break
-
-    if response_status != 200 or not isinstance(payload, list):
-        detail = ""
-        if isinstance(payload, dict):
-            detail = str(payload.get("message") or "").strip()
-        return jsonify({"ok": False, "error": detail or f"GitHub lookup failed ({response_status})"}), 400
-
-    repos: list[dict[str, Any]] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        repo_name = str(item.get("name") or "").strip()
-        if not repo_name:
-            continue
-        repo_owner = str((item.get("owner") or {}).get("login") or owner).strip()
-        repos.append(
-            {
-                "name": repo_name,
-                "full_name": str(item.get("full_name") or f"{repo_owner}/{repo_name}").strip(),
-                "repo_url": str(item.get("html_url") or _build_github_repo_url(repo_owner, repo_name)).strip(),
-                "private": bool(item.get("private", False)),
-            }
-        )
-
-    repos.sort(key=lambda r: str(r.get("name", "")).lower())
-    return jsonify(
-        {
-            "ok": True,
-            "owner": owner,
-            "repos": repos,
-            "token_used": token_used,
-            "visibility_note": ("Need PAT to see private repositories." if not token_used else ""),
-        }
-    )
+    return jsonify(payload), status_code
 
 
 @app.route("/api/onboarding/inspect-repo", methods=["GET"])

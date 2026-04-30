@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from shared.github import _build_github_repo_url
 from shared.github_issues import _github_api_headers, _safe_json_loads
 
 _SOBS_CI_METADATA_INDICATORS: list[str] = [
@@ -215,6 +216,129 @@ async def _github_file_text(
         return (raw.decode("utf-8", errors="replace") if raw else ""), ""
     except Exception as exc:
         return "", f"GitHub API request failed for {path}: {exc}"
+
+
+async def _github_import_repo_metadata(
+    github_token: str,
+    owner: str,
+    repo: str,
+    *,
+    get_async_http_client: Callable[[], Awaitable[Any]],
+) -> tuple[int, dict[str, Any]]:
+    headers = (
+        _github_api_headers(github_token)
+        if github_token
+        else {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+    )
+    client = await get_async_http_client()
+    try:
+        resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}",
+            headers=headers,
+            timeout=15,
+        )
+        payload = resp.json() if resp.content else {}
+    except Exception as exc:
+        return 502, {"ok": False, "error": f"GitHub lookup failed: {exc}"}
+
+    if resp.status_code != 200:
+        detail = ""
+        if isinstance(payload, dict):
+            detail = str(payload.get("message") or "").strip()
+        return 400, {"ok": False, "error": detail or f"GitHub lookup failed ({resp.status_code})"}
+
+    if not isinstance(payload, dict):
+        return 502, {"ok": False, "error": "Unexpected GitHub response payload"}
+
+    full_name = str(payload.get("full_name") or f"{owner}/{repo}").strip()
+    imported_repo_url = str(payload.get("html_url") or f"https://github.com/{owner}/{repo}").strip()
+    suggested_name = str(payload.get("name") or repo).strip() or repo
+    return 200, {
+        "ok": True,
+        "owner": owner,
+        "repo": repo,
+        "full_name": full_name,
+        "repo_url": imported_repo_url,
+        "name": suggested_name,
+        "slug": suggested_name,
+        "default_branch": str(payload.get("default_branch") or ""),
+        "visibility": str(payload.get("visibility") or "public"),
+        "description": str(payload.get("description") or ""),
+    }
+
+
+async def _github_list_repositories_for_owner(
+    github_token: str,
+    owner: str,
+    *,
+    get_async_http_client: Callable[[], Awaitable[Any]],
+) -> tuple[int, dict[str, Any]]:
+    token_used = bool(github_token)
+    headers = (
+        _github_api_headers(github_token)
+        if github_token
+        else {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+    )
+
+    endpoints: list[str] = []
+    if token_used:
+        endpoints.append(f"https://api.github.com/users/{owner}/repos?per_page=100&type=all&sort=full_name")
+        endpoints.append(f"https://api.github.com/orgs/{owner}/repos?per_page=100&type=all&sort=full_name")
+    else:
+        endpoints.append(f"https://api.github.com/users/{owner}/repos?per_page=100&type=public&sort=full_name")
+        endpoints.append(f"https://api.github.com/orgs/{owner}/repos?per_page=100&type=public&sort=full_name")
+
+    client = await get_async_http_client()
+    payload: Any = None
+    response_status = 0
+    for url in endpoints:
+        try:
+            resp = await client.get(url, headers=headers, timeout=15)
+        except Exception as exc:
+            return 502, {"ok": False, "error": f"GitHub lookup failed: {exc}"}
+
+        response_status = int(resp.status_code)
+        payload = resp.json() if resp.content else None
+        if response_status == 200:
+            break
+
+    if response_status != 200 or not isinstance(payload, list):
+        detail = ""
+        if isinstance(payload, dict):
+            detail = str(payload.get("message") or "").strip()
+        return 400, {"ok": False, "error": detail or f"GitHub lookup failed ({response_status})"}
+
+    repos: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        repo_name = str(item.get("name") or "").strip()
+        if not repo_name:
+            continue
+        repo_owner = str((item.get("owner") or {}).get("login") or owner).strip()
+        repos.append(
+            {
+                "name": repo_name,
+                "full_name": str(item.get("full_name") or f"{repo_owner}/{repo_name}").strip(),
+                "repo_url": str(item.get("html_url") or _build_github_repo_url(repo_owner, repo_name)).strip(),
+                "private": bool(item.get("private", False)),
+            }
+        )
+
+    repos.sort(key=lambda repo_item: str(repo_item.get("name", "")).lower())
+    return 200, {
+        "ok": True,
+        "owner": owner,
+        "repos": repos,
+        "token_used": token_used,
+        "visibility_note": ("Need PAT to see private repositories." if not token_used else ""),
+    }
 
 
 async def _inspect_repo_for_onboarding(

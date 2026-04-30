@@ -8,7 +8,9 @@ from shared.onboarding import (
     _create_onboarding_issue_result,
     _decode_github_contents_payload,
     _github_file_text,
+    _github_import_repo_metadata,
     _github_list_directory,
+    _github_list_repositories_for_owner,
     _inspect_repo_for_onboarding,
     _parse_gemfile_lock_dependencies,
     _parse_go_sum_dependencies,
@@ -41,6 +43,31 @@ class _FakeClient:
 
 
 async def _get_fake_client(client: _FakeClient) -> _FakeClient:
+    return client
+
+
+class _FakeGithubResponse:
+    def __init__(self, status_code: int, payload: Any):
+        self.status_code = status_code
+        self._payload = payload
+        self.content = b"" if payload is None else b"payload"
+
+    def json(self):
+        return self._payload
+
+
+class _FakeGithubLookupClient:
+    def __init__(self, responses: dict[str, _FakeGithubResponse], errors: dict[str, Exception] | None = None):
+        self.responses = responses
+        self.errors = errors or {}
+
+    async def get(self, url: str, headers=None, timeout=0):
+        if url in self.errors:
+            raise self.errors[url]
+        return self.responses[url]
+
+
+async def _get_fake_lookup_client(client: _FakeGithubLookupClient) -> _FakeGithubLookupClient:
     return client
 
 
@@ -123,7 +150,6 @@ def test_parse_package_lock_dependencies_handles_invalid_and_duplicate_entries()
         }
     )
 
-    assert _parse_package_lock_dependencies("[]") == []
     assert _parse_package_lock_dependencies(packages_content) == [
         {"package": "react", "version": "18.3.1", "ecosystem": "npm"},
     ]
@@ -131,6 +157,176 @@ def test_parse_package_lock_dependencies_handles_invalid_and_duplicate_entries()
     assert _parse_package_lock_dependencies(legacy_content) == [
         {"package": "vite", "version": "5.4.0", "ecosystem": "npm"},
     ]
+    assert _parse_package_lock_dependencies("[]") == []
+
+
+async def test_github_import_repo_metadata_success():
+    url = "https://api.github.com/repos/octo/checkout-service"
+    client = _FakeGithubLookupClient(
+        {
+            url: _FakeGithubResponse(
+                200,
+                {
+                    "name": "checkout-service",
+                    "full_name": "octo/checkout-service",
+                    "html_url": "https://github.com/octo/checkout-service",
+                    "default_branch": "main",
+                    "visibility": "private",
+                    "description": "Checkout API",
+                },
+            )
+        }
+    )
+
+    status_code, payload = await _github_import_repo_metadata(
+        "token",
+        "octo",
+        "checkout-service",
+        get_async_http_client=lambda: _get_fake_lookup_client(client),
+    )
+
+    assert status_code == 200
+    assert payload == {
+        "ok": True,
+        "owner": "octo",
+        "repo": "checkout-service",
+        "full_name": "octo/checkout-service",
+        "repo_url": "https://github.com/octo/checkout-service",
+        "name": "checkout-service",
+        "slug": "checkout-service",
+        "default_branch": "main",
+        "visibility": "private",
+        "description": "Checkout API",
+    }
+
+
+async def test_github_import_repo_metadata_handles_non_200_and_bad_payload():
+    not_found_url = "https://api.github.com/repos/octo/missing"
+    bad_payload_url = "https://api.github.com/repos/octo/weird"
+    client = _FakeGithubLookupClient(
+        {
+            not_found_url: _FakeGithubResponse(404, {"message": "Not Found"}),
+            bad_payload_url: _FakeGithubResponse(200, ["unexpected"]),
+        }
+    )
+
+    not_found_status, not_found_payload = await _github_import_repo_metadata(
+        "",
+        "octo",
+        "missing",
+        get_async_http_client=lambda: _get_fake_lookup_client(client),
+    )
+    bad_payload_status, bad_payload_payload = await _github_import_repo_metadata(
+        "",
+        "octo",
+        "weird",
+        get_async_http_client=lambda: _get_fake_lookup_client(client),
+    )
+
+    assert not_found_status == 400
+    assert not_found_payload == {"ok": False, "error": "Not Found"}
+    assert bad_payload_status == 502
+    assert bad_payload_payload == {"ok": False, "error": "Unexpected GitHub response payload"}
+
+
+async def test_github_import_repo_metadata_handles_request_failure():
+    url = "https://api.github.com/repos/octo/fail"
+    client = _FakeGithubLookupClient({}, errors={url: RuntimeError("boom")})
+
+    status_code, payload = await _github_import_repo_metadata(
+        "",
+        "octo",
+        "fail",
+        get_async_http_client=lambda: _get_fake_lookup_client(client),
+    )
+
+    assert status_code == 502
+    assert payload == {"ok": False, "error": "GitHub lookup failed: boom"}
+
+
+async def test_github_list_repositories_for_owner_sorts_results_and_falls_back_to_org_endpoint():
+    user_url = "https://api.github.com/users/octo/repos?per_page=100&type=all&sort=full_name"
+    org_url = "https://api.github.com/orgs/octo/repos?per_page=100&type=all&sort=full_name"
+    client = _FakeGithubLookupClient(
+        {
+            user_url: _FakeGithubResponse(404, {"message": "Not Found"}),
+            org_url: _FakeGithubResponse(
+                200,
+                [
+                    {
+                        "name": "z-service",
+                        "full_name": "octo/z-service",
+                        "private": True,
+                        "owner": {"login": "octo"},
+                    },
+                    {
+                        "name": "a-service",
+                        "full_name": "octo/a-service",
+                        "html_url": "https://github.com/octo/a-service",
+                        "private": False,
+                        "owner": {"login": "octo"},
+                    },
+                    {"not": "a repo"},
+                ],
+            ),
+        }
+    )
+
+    status_code, payload = await _github_list_repositories_for_owner(
+        "token",
+        "octo",
+        get_async_http_client=lambda: _get_fake_lookup_client(client),
+    )
+
+    assert status_code == 200
+    assert payload == {
+        "ok": True,
+        "owner": "octo",
+        "repos": [
+            {
+                "name": "a-service",
+                "full_name": "octo/a-service",
+                "repo_url": "https://github.com/octo/a-service",
+                "private": False,
+            },
+            {
+                "name": "z-service",
+                "full_name": "octo/z-service",
+                "repo_url": "https://github.com/octo/z-service",
+                "private": True,
+            },
+        ],
+        "token_used": True,
+        "visibility_note": "",
+    }
+
+
+async def test_github_list_repositories_for_owner_handles_error_and_request_failure():
+    public_user_url = "https://api.github.com/users/octo/repos?per_page=100&type=public&sort=full_name"
+    public_org_url = "https://api.github.com/orgs/octo/repos?per_page=100&type=public&sort=full_name"
+    error_client = _FakeGithubLookupClient(
+        {
+            public_user_url: _FakeGithubResponse(403, {"message": "Forbidden"}),
+            public_org_url: _FakeGithubResponse(403, {"message": "Forbidden"}),
+        }
+    )
+    failure_client = _FakeGithubLookupClient({}, errors={public_user_url: RuntimeError("boom")})
+
+    error_status, error_payload = await _github_list_repositories_for_owner(
+        "",
+        "octo",
+        get_async_http_client=lambda: _get_fake_lookup_client(error_client),
+    )
+    failure_status, failure_payload = await _github_list_repositories_for_owner(
+        "",
+        "octo",
+        get_async_http_client=lambda: _get_fake_lookup_client(failure_client),
+    )
+
+    assert error_status == 400
+    assert error_payload == {"ok": False, "error": "Forbidden"}
+    assert failure_status == 502
+    assert failure_payload == {"ok": False, "error": "GitHub lookup failed: boom"}
 
 
 def test_parse_go_sum_dependencies_dedupes_and_strips_go_mod_suffix():
