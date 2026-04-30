@@ -205,6 +205,11 @@ from shared.github_issues import _github_get_issue_detail as _shared_github_get_
 from shared.github_issues import _github_issue_is_new_state as _shared_github_issue_is_new_state
 from shared.github_issues import _search_open_pr_for_issue as _shared_search_open_pr_for_issue
 from shared.github_issues import _update_github_issue_record as _shared_update_github_issue_record
+from shared.log_attr_keys import _extract_attr_maps as _shared_extract_attr_maps
+from shared.log_attr_keys import _get_cached_attr_keys as _shared_get_cached_attr_keys
+from shared.log_attr_keys import _load_log_attr_keys_from_db as _shared_load_log_attr_keys_from_db
+from shared.log_attr_keys import _prime_log_attr_key_cache as _shared_prime_log_attr_key_cache
+from shared.log_attr_keys import _remember_attr_keys as _shared_remember_attr_keys
 from shared.notifications import _load_notification_channels as _shared_load_notification_channels
 from shared.notifications import _load_notification_log as _shared_load_notification_log
 from shared.notifications import _load_notification_rules as _shared_load_notification_rules
@@ -2229,27 +2234,43 @@ def _ensure_post_schema_state(db: ChDbConnection) -> None:
 
 
 def _load_log_attr_keys_from_db(db: ChDbConnection, record_type: str) -> set[str]:
-    rows = db.execute(
-        "SELECT DISTINCT AttrKey FROM sobs_log_attr_keys FINAL " "WHERE RecordType=? AND IsDeleted=0 ORDER BY AttrKey",
-        [record_type],
-    ).fetchall()
-    return {str(r[0]) for r in rows if str(r[0]).strip()}
+    return _shared_load_log_attr_keys_from_db(db, record_type)
+
+
+def _log_attr_key_cache_state() -> dict[str, Any]:
+    return {
+        "lock": _log_attr_keys_lock,
+        "loaded": _log_attr_keys_cache_loaded,
+        "by_record_type": _log_attr_keys_by_record_type,
+    }
+
+
+def _sync_log_attr_key_cache_state(cache_state: dict[str, Any]) -> None:
+    global _log_attr_keys_cache_loaded
+    _log_attr_keys_cache_loaded = bool(cache_state.get("loaded"))
 
 
 def _prime_log_attr_key_cache(db: ChDbConnection) -> None:
-    global _log_attr_keys_cache_loaded
-    with _log_attr_keys_lock:
-        if _log_attr_keys_cache_loaded:
-            return
-        for record_type in _ATTR_KEY_RECORD_TYPES:
-            _log_attr_keys_by_record_type[record_type] = _load_log_attr_keys_from_db(db, record_type)
-        _log_attr_keys_cache_loaded = True
+    cache_state = _log_attr_key_cache_state()
+    _shared_prime_log_attr_key_cache(
+        db,
+        attr_key_record_types=_ATTR_KEY_RECORD_TYPES,
+        cache_state=cache_state,
+        load_log_attr_keys_from_db=_load_log_attr_keys_from_db,
+    )
+    _sync_log_attr_key_cache_state(cache_state)
 
 
 def _get_cached_attr_keys(db: ChDbConnection, record_type: str) -> list[str]:
-    _prime_log_attr_key_cache(db)
-    with _log_attr_keys_lock:
-        keys = sorted(_log_attr_keys_by_record_type.get(record_type, set()))
+    cache_state = _log_attr_key_cache_state()
+    keys = _shared_get_cached_attr_keys(
+        db,
+        record_type,
+        attr_key_record_types=_ATTR_KEY_RECORD_TYPES,
+        cache_state=cache_state,
+        prime_log_attr_key_cache=_shared_prime_log_attr_key_cache,
+    )
+    _sync_log_attr_key_cache_state(cache_state)
     return keys
 
 
@@ -2258,45 +2279,20 @@ def _get_cached_log_attr_keys(db: ChDbConnection, record_type: str = "log") -> l
 
 
 def _remember_attr_keys(db: ChDbConnection, attrs_maps: list[dict], record_type: str) -> None:
-    if not attrs_maps:
-        return
-    _prime_log_attr_key_cache(db)
-
-    with _log_attr_keys_lock:
-        existing = _log_attr_keys_by_record_type.setdefault(record_type, set())
-        if len(existing) >= LOG_ATTR_KEYS_MAX:
-            return
-
-        candidates: set[str] = set()
-        for attrs in attrs_maps:
-            if not isinstance(attrs, dict):
-                continue
-            for raw_key in attrs.keys():
-                key = str(raw_key).strip()
-                if not key or key in existing or key in candidates:
-                    continue
-                if len(existing) + len(candidates) >= LOG_ATTR_KEYS_MAX:
-                    break
-                candidates.add(key)
-
-        if not candidates:
-            return
-
-        version = int(time.time() * 1000)
-        rows = [
-            {
-                "RecordType": record_type,
-                "AttrKey": key,
-                "IsDeleted": 0,
-                "Version": version + idx,
-            }
-            for idx, key in enumerate(sorted(candidates))
-        ]
-        try:
-            _insert_rows_json_each_row(db, "sobs_log_attr_keys", rows)
-            existing.update(candidates)
-        except Exception:
-            app.logger.exception("failed to persist discovered log attribute keys")
+    cache_state = _log_attr_key_cache_state()
+    _shared_remember_attr_keys(
+        db,
+        attrs_maps,
+        record_type,
+        attr_key_record_types=_ATTR_KEY_RECORD_TYPES,
+        cache_state=cache_state,
+        log_attr_keys_max=LOG_ATTR_KEYS_MAX,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        now_ms=int(time.time() * 1000),
+        logger=app.logger,
+        prime_log_attr_key_cache=_shared_prime_log_attr_key_cache,
+    )
+    _sync_log_attr_key_cache_state(cache_state)
 
 
 def _remember_log_attr_keys(db: ChDbConnection, attrs_maps: list[dict], record_type: str = "log") -> None:
@@ -2304,12 +2300,7 @@ def _remember_log_attr_keys(db: ChDbConnection, attrs_maps: list[dict], record_t
 
 
 def _extract_attr_maps(rows: list[dict], attr_field: str) -> list[dict]:
-    maps: list[dict] = []
-    for row in rows:
-        raw_attrs = row.get(attr_field, {})
-        if isinstance(raw_attrs, dict):
-            maps.append(raw_attrs)
-    return maps
+    return _shared_extract_attr_maps(rows, attr_field)
 
 
 def _extract_log_attr_maps(rows: list[dict]) -> list[dict]:

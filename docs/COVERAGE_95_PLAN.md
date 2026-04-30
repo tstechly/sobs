@@ -19,6 +19,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run after extracting the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers in Milestone 5.
 - `shared/ai_actions.py` now measures `97%` line coverage in its dedicated direct test run after extracting AI helper action-token secret/encode/decode/issue helpers, generic client-action payload sanitization, generic UI action normalization, and the chart-to-dashboard pivot suggestion helper from `app.py`.
+- `shared/log_attr_keys.py` now measures `98%` line coverage in its dedicated direct test run after extracting log attribute-key loading, cache priming, cached-key reads, discovered-key persistence, and attribute-map extraction helpers from `app.py`.
 - `shared/otlp_security.py` now measures `99%` line coverage in its dedicated direct test run after extracting secure-context detection, OTLP/RUM origin allowlist matching, ingest-path CORS gating, allowed-method selection, Vary-header deduplication, and shared security/CORS header application from `app.py`.
 - `shared/raw_metrics_window.py` now measures `100%` line coverage in its dedicated direct test run after extracting raw-metric retention TTL application, deterministic raw-window registration, copied-table counting, overlapping-window listing, and the raw-window copy worker core from `app.py`.
 - `shared/rum_assets.py` now measures `100%` line coverage in its dedicated direct test run after extracting RUM asset name/type sanitization, extension inference, signature payload assembly, HMAC signature generation, and signed-upload verification helpers from `app.py`.
@@ -152,6 +153,7 @@ Measured result so far:
 
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run.
 - `shared/ai_actions.py` now measures `97%` line coverage in its dedicated direct test run.
+- `shared/log_attr_keys.py` now measures `98%` line coverage in its dedicated direct test run.
 - `shared/otlp_security.py` now measures `99%` line coverage in its dedicated direct test run.
 - `shared/raw_metrics_window.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/rum_assets.py` now measures `100%` line coverage in its dedicated direct test run.
@@ -167,6 +169,7 @@ Measured result so far:
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
 - `app.py` now delegates AI helper action-token secret/encode/decode/issue helpers, generic client-action payload sanitization, generic UI action normalization, and chart-to-dashboard pivot suggestion logic to `shared/ai_actions.py` while preserving the app-level wrappers exercised by AI helper execution and normalization tests.
+- `app.py` now delegates log attribute-key loading, cache priming, cached-key reads, discovered-key persistence, and attribute-map extraction to `shared/log_attr_keys.py` while preserving the app-level cache globals and wrappers exercised by log field-hint and trace/resource attribute-key persistence tests.
 - `app.py` now delegates secure-context detection, OTLP/RUM origin allowlist matching, ingest-path CORS gating, allowed-method selection, Vary-header deduplication, and shared security/CORS header application to `shared/otlp_security.py` while preserving the app-level helpers and after-request hook exercised by the OTLP CORS regression tests.
 - `app.py` now delegates raw-metric retention TTL application, deterministic raw-window registration, copied-table counting, overlapping-window listing, and the raw-window copy worker core to `shared/raw_metrics_window.py` while preserving the app-level wrappers and scheduler loop exercised by raw-window, trace-detail, and incident regressions.
 - `app.py` now delegates RUM asset name/type sanitization, extension inference, signature payload assembly, HMAC signature generation, and signed-upload verification to `shared/rum_assets.py` while preserving the app-level wrappers exercised by RUM asset upload and download route tests.
