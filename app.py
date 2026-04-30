@@ -187,6 +187,15 @@ from shared.github_issues import _github_get_issue_detail as _shared_github_get_
 from shared.github_issues import _github_issue_is_new_state as _shared_github_issue_is_new_state
 from shared.github_issues import _search_open_pr_for_issue as _shared_search_open_pr_for_issue
 from shared.github_issues import _update_github_issue_record as _shared_update_github_issue_record
+from shared.notifications import _load_notification_channels as _shared_load_notification_channels
+from shared.notifications import _load_notification_log as _shared_load_notification_log
+from shared.notifications import _load_notification_rules as _shared_load_notification_rules
+from shared.notifications import _mask_channel_config as _shared_mask_channel_config
+from shared.notifications import _normalize_notification_condition as _shared_normalize_notification_condition
+from shared.notifications import (
+    _notification_channel_mask_output_enabled as _shared_notification_channel_mask_output_enabled,
+)
+from shared.notifications import _parse_notification_conditions_json as _shared_parse_notification_conditions_json
 from shared.onboarding import _build_ci_metadata_issue_body as _shared_build_ci_metadata_issue_body
 from shared.onboarding import (
     _build_onboarding_realtime_support_result as _shared_build_onboarding_realtime_support_result,
@@ -19944,161 +19953,45 @@ def _decrypt_notification_config(config: dict) -> dict:
 
 def _load_notification_channels(db: ChDbConnection) -> list[dict]:
     """Return all active notification channels."""
-    rows = db.execute(
-        "SELECT Id, Name, ChannelType, ConfigJson, Enabled "
-        "FROM sobs_notification_channels FINAL WHERE IsDeleted = 0 ORDER BY Name"
-    ).fetchall()
-    return [
-        {
-            "id": str(row["Id"]),
-            "name": str(row["Name"]),
-            "channel_type": str(row["ChannelType"]),
-            "config": _decrypt_notification_config(json.loads(str(row["ConfigJson"]) or "{}")),
-            "enabled": bool(int(row["Enabled"])),
-        }
-        for row in rows
-    ]
+    return _shared_load_notification_channels(db, decrypt_notification_config=_decrypt_notification_config)
 
 
 def _normalize_notification_condition(raw: Any) -> dict[str, Any] | None:
-    if not isinstance(raw, dict):
-        return None
-
-    condition_type = str(raw.get("type") or "signal").strip().lower()
-    if condition_type == "tag":
-        record_type = str(raw.get("record_type") or "all").strip().lower()
-        if record_type not in _NOTIFICATION_TAG_RECORD_TYPES:
-            record_type = "all"
-        tag_match_operator = str(raw.get("tag_match_operator") or "eq").strip().lower()
-        if tag_match_operator not in _NOTIFICATION_TAG_MATCH_OPERATORS:
-            tag_match_operator = "eq"
-        comparator = str(raw.get("comparator") or "gt").strip().lower()
-        if comparator not in _NOTIFICATION_COMPARATORS:
-            comparator = "gt"
-        try:
-            threshold = float(raw.get("threshold") or 0)
-        except (TypeError, ValueError):
-            threshold = 0.0
-        try:
-            window_minutes = max(1, min(60, int(raw.get("window_minutes") or 5)))
-        except (TypeError, ValueError):
-            window_minutes = 5
-        return {
-            "type": "tag",
-            "record_type": record_type,
-            "tag_key": str(raw.get("tag_key") or "").strip(),
-            "tag_match_operator": tag_match_operator,
-            "tag_value": str(raw.get("tag_value") or "").strip(),
-            "comparator": comparator,
-            "threshold": threshold,
-            "window_minutes": window_minutes,
-        }
-
-    comparator = str(raw.get("comparator") or "gt").strip().lower()
-    if comparator not in _NOTIFICATION_COMPARATORS:
-        comparator = "gt"
-    try:
-        threshold = float(raw.get("threshold") or 0)
-    except (TypeError, ValueError):
-        threshold = 0.0
-    try:
-        window_minutes = max(1, min(60, int(raw.get("window_minutes") or 5)))
-    except (TypeError, ValueError):
-        window_minutes = 5
-    return {
-        "type": "signal",
-        "source": str(raw.get("source") or "").strip(),
-        "signal": str(raw.get("signal") or "").strip(),
-        "service": str(raw.get("service") or "").strip(),
-        "comparator": comparator,
-        "threshold": threshold,
-        "window_minutes": window_minutes,
-    }
+    return _shared_normalize_notification_condition(
+        raw,
+        comparators=_NOTIFICATION_COMPARATORS,
+        tag_match_operators=_NOTIFICATION_TAG_MATCH_OPERATORS,
+        tag_record_types=_NOTIFICATION_TAG_RECORD_TYPES,
+    )
 
 
 def _parse_notification_conditions_json(raw: Any) -> list[dict[str, Any]]:
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-
-    normalized: list[dict[str, Any]] = []
-    for item in parsed:
-        condition = _normalize_notification_condition(item)
-        if condition is not None:
-            normalized.append(condition)
-    return normalized
+    return _shared_parse_notification_conditions_json(
+        raw,
+        normalize_notification_condition=_normalize_notification_condition,
+    )
 
 
 def _load_notification_rules(db: ChDbConnection) -> list[dict]:
     """Return all active notification rules."""
-    rows = db.execute(
-        "SELECT Id, Name, Enabled, LogicOperator, ConditionsJson, ChannelIds, "
-        "Severity, CooldownSeconds, LastFiredAt "
-        "FROM sobs_notification_rules FINAL WHERE IsDeleted = 0 ORDER BY Name"
-    ).fetchall()
-    return [
-        {
-            "id": str(row["Id"]),
-            "name": str(row["Name"]),
-            "enabled": bool(int(row["Enabled"])),
-            "logic_operator": str(row["LogicOperator"] or "any"),
-            "conditions": _parse_notification_conditions_json(row["ConditionsJson"]),
-            "channel_ids": [c.strip() for c in str(row["ChannelIds"]).split(",") if c.strip()],
-            "severity": str(row["Severity"] or "warning"),
-            "cooldown_seconds": int(row["CooldownSeconds"]),
-            "last_fired_at": str(row["LastFiredAt"]),
-        }
-        for row in rows
-    ]
+    return _shared_load_notification_rules(
+        db,
+        parse_notification_conditions_json=_parse_notification_conditions_json,
+    )
 
 
 def _load_notification_log(db: ChDbConnection, limit: int = 50) -> list[dict]:
     """Return recent notification delivery log entries."""
-    rows = db.execute(
-        "SELECT Id, RuleId, RuleName, ChannelId, ChannelName, FiredAt, Status, ErrorMessage, Summary "
-        "FROM sobs_notification_log ORDER BY FiredAt DESC LIMIT ?",
-        [limit],
-    ).fetchall()
-    return [
-        {
-            "id": str(row["Id"]),
-            "rule_id": str(row["RuleId"]),
-            "rule_name": str(row["RuleName"]),
-            "channel_id": str(row["ChannelId"]),
-            "channel_name": str(row["ChannelName"]),
-            "fired_at": str(row["FiredAt"]),
-            "status": str(row["Status"]),
-            "error_message": str(row["ErrorMessage"]),
-            "summary": str(row["Summary"]),
-        }
-        for row in rows
-    ]
+    return _shared_load_notification_log(db, limit)
 
 
 def _mask_channel_config(channel_type: str, config: dict) -> dict:
     """Return config with sensitive fields masked for display in the UI."""
-    masked = dict(config)
-    sensitive_keys = {"smtp_password", "auth_token", "api_key"}
-    for key in sensitive_keys:
-        if key in masked and masked[key]:
-            masked[key] = "••••••••"
-    return masked
+    return _shared_mask_channel_config(channel_type, config)
 
 
 def _notification_channel_mask_output_enabled(channel: dict[str, Any]) -> bool:
-    config = channel.get("config") if isinstance(channel, dict) else {}
-    if not isinstance(config, dict):
-        return True
-    raw = config.get("mask_output_enabled")
-    if raw is None or str(raw).strip() == "":
-        return True
-    return _is_truthy_setting(str(raw), default=True)
+    return _shared_notification_channel_mask_output_enabled(channel, is_truthy_setting=_is_truthy_setting)
 
 
 def _build_notification_payload(
