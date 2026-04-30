@@ -18,7 +18,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
 - `shared/github.py` measures `97.06%` line coverage, which validates Milestone 1 as a successful high-confidence extraction.
 - `shared/github_issues.py` now measures `96.4%` line coverage after the dedicated branch tests added in this phase.
-- `shared/onboarding.py` now measures `98%` line coverage in its dedicated direct test run after extracting dependency parsers and repository inspection helpers in Milestone 4.
+- `shared/onboarding.py` now measures `98%` line coverage in its dedicated direct test run after extracting dependency parsers, repository inspection helpers, onboarding issue-body builders, onboarding work-item persistence helpers, and the shared onboarding issue-result orchestration helper in Milestone 4.
 - The latest sequential full-suite validation passed at `1359 passed, 4 skipped`.
 
 ## Working Rules
@@ -96,12 +96,13 @@ Deliverables:
 
 ### Milestone 4: Onboarding and repository inspection subsystem
 
-Status: In progress, with dependency parsing, GitHub contents inspection, and onboarding repository-readiness checks extracted in this phase.
+Status: In progress, with dependency parsing, GitHub contents inspection, onboarding repository-readiness checks, onboarding issue-body builders, onboarding work-item persistence, and shared onboarding issue-result orchestration extracted in this phase.
 
 Measured result so far:
 
 - `shared/onboarding.py` now measures `98%` line coverage in its dedicated direct test run.
 - Existing onboarding app tests remained green alongside the new direct module tests.
+- `app.py` now delegates the onboarding issue-body formatting, work-item persistence, and repeated onboarding issue result handling paths to `shared/onboarding.py`, leaving a smaller route/orchestration surface behind.
 
 Scope:
 

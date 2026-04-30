@@ -5,6 +5,7 @@ from typing import Any
 from shared.onboarding import (
     _build_ci_metadata_issue_body,
     _build_otel_audit_issue_body,
+    _create_onboarding_issue_result,
     _decode_github_contents_payload,
     _github_file_text,
     _github_list_directory,
@@ -13,6 +14,7 @@ from shared.onboarding import (
     _parse_go_sum_dependencies,
     _parse_package_lock_dependencies,
     _parse_requirements_dependencies,
+    _persist_onboarding_work_item,
 )
 
 
@@ -469,3 +471,231 @@ def test_build_otel_audit_issue_body_contains_expected_sections():
 
 async def _return_bool(value: bool) -> bool:
     return value
+
+
+class _FakeLogger:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def warning(self, message: str, *args: Any):
+        self.messages.append(message % args if args else message)
+
+
+def test_persist_onboarding_work_item_returns_early_without_issue_url():
+    inserted_rows: list[dict[str, Any]] = []
+
+    _persist_onboarding_work_item(
+        db=object(),
+        github_repo="owner/repo",
+        issue_url="",
+        issue_number=1,
+        issue_title="ignored",
+        issue_state="open",
+        dedup_decision="created",
+        note="ignored",
+        copilot_assignment_status="not_requested",
+        copilot_assignment_reason="",
+        copilot_assignment_requested_at=0,
+        issue_type="ci",
+        normalize_ch_timestamp=lambda _dt: "2026-04-30 12:00:00.000000",
+        parse_github_repo_owner_name=lambda _repo: ("owner", "repo"),
+        parse_issue_ref_from_url=lambda _url: ("owner", "repo", 1),
+        insert_rows_json_each_row=lambda _db, _table, rows: inserted_rows.extend(rows),
+        invalidate_work_items_cache=lambda: inserted_rows.append({"cache": True}),
+    )
+
+    assert inserted_rows == []
+
+
+def test_persist_onboarding_work_item_builds_expected_row_and_falls_back_to_issue_url_repo():
+    inserted_rows: list[dict[str, Any]] = []
+    cache_invalidations = {"count": 0}
+
+    _persist_onboarding_work_item(
+        db=object(),
+        github_repo="",
+        issue_url="https://github.com/acme/widget/issues/777",
+        issue_number=777,
+        issue_title="[Sobs] Set up CI metadata scripts for widget",
+        issue_state="",
+        dedup_decision="reused",
+        note="Reused existing onboarding issue.",
+        copilot_assignment_status="requested",
+        copilot_assignment_reason="copilot available",
+        copilot_assignment_requested_at=42,
+        issue_type="ci",
+        normalize_ch_timestamp=lambda _dt: "2026-04-30 12:00:00.000000",
+        parse_github_repo_owner_name=lambda _repo: ("", ""),
+        parse_issue_ref_from_url=lambda _url: ("acme", "widget", 777),
+        insert_rows_json_each_row=lambda _db, _table, rows: inserted_rows.extend(rows),
+        invalidate_work_items_cache=lambda: cache_invalidations.__setitem__("count", 1),
+    )
+
+    assert cache_invalidations["count"] == 1
+    assert len(inserted_rows) == 1
+    row = inserted_rows[0]
+    assert row["GithubRepo"] == "acme/widget"
+    assert row["ServiceName"] == "widget"
+    assert row["AgentAction"] == "onboarding_ci"
+    assert row["DedupDecision"] == "reused"
+    assert row["DedupConfidence"] == 1.0
+    assert row["IssueState"] == "open"
+    assert row["SuggestionSummary"] == "Reused existing onboarding issue."
+    assert row["CopilotAssignmentStatus"] == "requested"
+    assert row["CopilotAssignmentReason"] == "copilot available"
+    assert row["CopilotAssignmentRequestedAt"] == 42
+    assert row["CreatedAt"] == "2026-04-30 12:00:00.000000"
+    assert row["CompletedAt"] == "2026-04-30 12:00:00.000000"
+
+
+def test_persist_onboarding_work_item_logs_and_swallows_insert_failures():
+    logger = _FakeLogger()
+
+    def _raise_insert(_db: Any, _table_name: str, _rows: list[dict[str, Any]]):
+        raise RuntimeError("boom")
+
+    _persist_onboarding_work_item(
+        db=object(),
+        github_repo="owner/repo",
+        issue_url="https://github.com/owner/repo/issues/1",
+        issue_number=1,
+        issue_title="Issue",
+        issue_state="open",
+        dedup_decision="created",
+        note="Created",
+        copilot_assignment_status="not_requested",
+        copilot_assignment_reason="",
+        copilot_assignment_requested_at=0,
+        issue_type="observability",
+        normalize_ch_timestamp=lambda _dt: "2026-04-30 12:00:00.000000",
+        parse_github_repo_owner_name=lambda _repo: ("owner", "repo"),
+        parse_issue_ref_from_url=lambda _url: ("owner", "repo", 1),
+        insert_rows_json_each_row=_raise_insert,
+        invalidate_work_items_cache=lambda: None,
+        logger=logger,
+    )
+
+    assert logger.messages == ["Failed to persist onboarding work item: boom"]
+
+
+async def test_create_onboarding_issue_result_returns_error_without_assignment_or_persistence():
+    assignment_calls = {"count": 0}
+    persisted: list[dict[str, Any]] = []
+
+    async def _fake_upsert(_token: str, _repo: str, _title: str, _body_md: str, _labels: list[str]) -> dict[str, Any]:
+        return {"error": "GitHub failed"}
+
+    async def _fake_assign(_token: str, _repo: str, _issue_number: int) -> tuple[str, str, int]:
+        assignment_calls["count"] += 1
+        return "requested", "should not run", 1
+
+    result = await _create_onboarding_issue_result(
+        github_token="token",
+        github_repo="owner/repo",
+        title="Issue title",
+        body_md="Issue body",
+        labels=["sobs-onboarding"],
+        assign_copilot=True,
+        issue_type="ci",
+        issue_title_fallback="fallback",
+        create_or_update_onboarding_issue=_fake_upsert,
+        assign_issue_to_copilot=_fake_assign,
+        persist_onboarding_work_item=lambda **kwargs: persisted.append(kwargs),
+    )
+
+    assert result == {"error": "GitHub failed"}
+    assert assignment_calls["count"] == 0
+    assert persisted == []
+
+
+async def test_create_onboarding_issue_result_assigns_and_persists_created_issue():
+    persisted: list[dict[str, Any]] = []
+
+    async def _fake_upsert(_token: str, _repo: str, _title: str, _body_md: str, _labels: list[str]) -> dict[str, Any]:
+        return {
+            "issue_url": "https://github.com/owner/repo/issues/77",
+            "issue_number": 77,
+            "status": "created",
+            "note": "Created a new onboarding issue.",
+            "issue_state": "open",
+        }
+
+    async def _fake_assign(_token: str, _repo: str, _issue_number: int) -> tuple[str, str, int]:
+        return "requested", "copilot available", 12345
+
+    result = await _create_onboarding_issue_result(
+        github_token="token",
+        github_repo="owner/repo",
+        title="Issue title",
+        body_md="Issue body",
+        labels=["sobs-onboarding"],
+        assign_copilot=True,
+        issue_type="observability",
+        issue_title_fallback="Fallback title",
+        create_or_update_onboarding_issue=_fake_upsert,
+        assign_issue_to_copilot=_fake_assign,
+        persist_onboarding_work_item=lambda **kwargs: persisted.append(kwargs),
+    )
+
+    assert result == {
+        "url": "https://github.com/owner/repo/issues/77",
+        "number": 77,
+        "status": "created",
+        "note": "Created a new onboarding issue.",
+        "copilot_status": "requested",
+        "copilot_assignment_status": "requested",
+        "copilot_assignment_reason": "copilot available",
+        "copilot_assignment_requested_at": 12345,
+    }
+    assert persisted == [
+        {
+            "github_repo": "owner/repo",
+            "issue_url": "https://github.com/owner/repo/issues/77",
+            "issue_number": 77,
+            "issue_title": "Fallback title",
+            "issue_state": "open",
+            "dedup_decision": "created",
+            "note": "Created a new onboarding issue.",
+            "copilot_assignment_status": "requested",
+            "copilot_assignment_reason": "copilot available",
+            "copilot_assignment_requested_at": 12345,
+            "issue_type": "observability",
+        }
+    ]
+
+
+async def test_create_onboarding_issue_result_skips_persistence_for_reused_issue():
+    assignment_calls = {"count": 0}
+    persisted: list[dict[str, Any]] = []
+
+    async def _fake_upsert(_token: str, _repo: str, _title: str, _body_md: str, _labels: list[str]) -> dict[str, Any]:
+        return {
+            "issue_url": "https://github.com/owner/repo/issues/88",
+            "issue_number": 88,
+            "status": "reused",
+            "note": "Existing issue reused.",
+            "issue_title": "Existing title",
+        }
+
+    async def _fake_assign(_token: str, _repo: str, _issue_number: int) -> tuple[str, str, int]:
+        assignment_calls["count"] += 1
+        return "requested", "unused", 1
+
+    result = await _create_onboarding_issue_result(
+        github_token="token",
+        github_repo="owner/repo",
+        title="Issue title",
+        body_md="Issue body",
+        labels=["sobs-onboarding"],
+        assign_copilot=False,
+        issue_type="ci",
+        issue_title_fallback="Fallback title",
+        create_or_update_onboarding_issue=_fake_upsert,
+        assign_issue_to_copilot=_fake_assign,
+        persist_onboarding_work_item=lambda **kwargs: persisted.append(kwargs),
+    )
+
+    assert result["status"] == "reused"
+    assert result["copilot_assignment_status"] == "not_requested"
+    assert assignment_calls["count"] == 0
+    assert persisted == []

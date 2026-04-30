@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import urllib.parse
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from shared.github_issues import _github_api_headers, _safe_json_loads
@@ -654,3 +657,143 @@ After implementing the above:
 *This issue was created automatically by the Sobs Onboarding Wizard for repository \
 `{owner}/{repo}`.*
 """
+
+
+def _persist_onboarding_work_item(
+    *,
+    db: Any,
+    github_repo: str,
+    issue_url: str,
+    issue_number: int,
+    issue_title: str,
+    issue_state: str,
+    dedup_decision: str,
+    note: str,
+    copilot_assignment_status: str,
+    copilot_assignment_reason: str,
+    copilot_assignment_requested_at: int,
+    issue_type: str,
+    normalize_ch_timestamp: Callable[[datetime], str],
+    parse_github_repo_owner_name: Callable[[str], tuple[str, str]],
+    parse_issue_ref_from_url: Callable[[str], tuple[str, str, int]],
+    insert_rows_json_each_row: Callable[[Any, str, list[dict[str, Any]]], Any],
+    invalidate_work_items_cache: Callable[[], None],
+    logger: logging.Logger | None = None,
+) -> None:
+    if not issue_url:
+        return
+
+    try:
+        now_ts = normalize_ch_timestamp(datetime.now(timezone.utc))
+        owner, repo = parse_github_repo_owner_name(github_repo)
+        if not owner or not repo:
+            owner, repo, _issue_number_from_url = parse_issue_ref_from_url(issue_url)
+        github_repo_value = f"{owner}/{repo}" if owner and repo else str(github_repo or "")
+
+        work_item = {
+            "Id": uuid.uuid4().hex,
+            "CreatedAt": now_ts,
+            "CompletedAt": now_ts,
+            "AgentRunId": "",
+            "AgentRuleId": "",
+            "AgentRuleName": "Onboarding Wizard",
+            "AgentAction": f"onboarding_{issue_type}",
+            "ServiceName": repo,
+            "AnomalyRuleId": "",
+            "AnomalyState": "",
+            "SignalSource": "",
+            "SignalName": "",
+            "SignalValue": 0.0,
+            "GithubRepo": github_repo_value,
+            "DedupKey": "",
+            "DedupDecision": dedup_decision or "new_issue",
+            "DedupConfidence": 1.0 if dedup_decision == "reused" else 0.0,
+            "IssueNumber": int(issue_number or 0),
+            "IssueUrl": issue_url,
+            "CanonicalIssueNumber": int(issue_number or 0),
+            "CanonicalIssueUrl": issue_url,
+            "RelatedIssueUrls": "[]",
+            "OccurrenceCount": 1,
+            "IssueState": issue_state or "open",
+            "IssueTitle": issue_title,
+            "AnalysisSummary": "Sobs onboarding wizard issue.",
+            "SuggestionSummary": note,
+            "CopilotAssignmentRequestedAt": int(copilot_assignment_requested_at or 0),
+            "CopilotAssignmentStatus": copilot_assignment_status or "not_requested",
+            "CopilotAssignmentReason": copilot_assignment_reason or "",
+            "PrLinked": 0,
+            "PrNumber": 0,
+            "PrUrl": "",
+            "IsDeleted": 0,
+            "Version": int(datetime.now(timezone.utc).timestamp() * 1000),
+        }
+        insert_rows_json_each_row(db, "sobs_github_work_items", [work_item])
+        invalidate_work_items_cache()
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to persist onboarding work item: %s", exc)
+
+
+async def _create_onboarding_issue_result(
+    *,
+    github_token: str,
+    github_repo: str,
+    title: str,
+    body_md: str,
+    labels: list[str],
+    assign_copilot: bool,
+    issue_type: str,
+    issue_title_fallback: str,
+    create_or_update_onboarding_issue: Callable[[str, str, str, str, list[str]], Awaitable[dict[str, Any]]],
+    assign_issue_to_copilot: Callable[[str, str, int], Awaitable[tuple[str, str, int]]],
+    persist_onboarding_work_item: Callable[..., None],
+) -> dict[str, Any]:
+    issue_result = await create_or_update_onboarding_issue(
+        github_token,
+        github_repo,
+        title,
+        body_md,
+        labels,
+    )
+    if "error" in issue_result:
+        return {"error": issue_result["error"]}
+
+    issue_url = str(issue_result.get("issue_url", ""))
+    issue_number = int(issue_result.get("issue_number", 0) or 0)
+    issue_status = str(issue_result.get("status") or "")
+    issue_note = str(issue_result.get("note") or "")
+    copilot_assignment_status = "not_requested"
+    copilot_assignment_reason = ""
+    copilot_assignment_requested_at = 0
+    if assign_copilot and issue_number:
+        (
+            copilot_assignment_status,
+            copilot_assignment_reason,
+            copilot_assignment_requested_at,
+        ) = await assign_issue_to_copilot(github_token, github_repo, issue_number)
+
+    if issue_status in ("created", "updated"):
+        persist_onboarding_work_item(
+            github_repo=github_repo,
+            issue_url=issue_url,
+            issue_number=issue_number,
+            issue_title=str(issue_result.get("issue_title") or issue_title_fallback),
+            issue_state=str(issue_result.get("issue_state") or "open"),
+            dedup_decision=issue_status,
+            note=issue_note,
+            copilot_assignment_status=copilot_assignment_status,
+            copilot_assignment_reason=copilot_assignment_reason,
+            copilot_assignment_requested_at=copilot_assignment_requested_at,
+            issue_type=issue_type,
+        )
+
+    return {
+        "url": issue_url,
+        "number": issue_number,
+        "status": issue_status,
+        "note": issue_note,
+        "copilot_status": copilot_assignment_status,
+        "copilot_assignment_status": copilot_assignment_status,
+        "copilot_assignment_reason": copilot_assignment_reason,
+        "copilot_assignment_requested_at": copilot_assignment_requested_at,
+    }
