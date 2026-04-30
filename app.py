@@ -228,6 +228,13 @@ from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_
 from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 from shared.onboarding import _persist_onboarding_work_item as _shared_persist_onboarding_work_item
 from shared.onboarding import _resolve_onboarding_issue_request as _shared_resolve_onboarding_issue_request
+from shared.sql_where import _append_regex_expression_clauses as _shared_append_regex_expression_clauses
+from shared.sql_where import _append_time_window_filter as _shared_append_time_window_filter
+from shared.sql_where import _normalize_ai_sql_where as _shared_normalize_ai_sql_where
+from shared.sql_where import _replace_sql_outside_single_quotes as _shared_replace_sql_outside_single_quotes
+from shared.sql_where import _time_window_conditions as _shared_time_window_conditions
+from shared.sql_where import _validate_user_sql_where as _shared_validate_user_sql_where
+from shared.sql_where import _where_clause as _shared_where_clause
 from shared.write_queue import _WRITE_STOP as _SHARED_WRITE_STOP
 from shared.write_queue import _ensure_write_worker as _shared_ensure_write_worker
 from shared.write_queue import _queue_write as _shared_queue_write
@@ -6470,15 +6477,7 @@ def _parse_time_window_args() -> tuple[str, str, str]:
 
 def _time_window_conditions(column: str, from_ts: str, to_ts: str) -> tuple[list[str], list[str]]:
     """Build time-window WHERE fragments for ClickHouse DateTime64 columns."""
-    conditions: list[str] = []
-    params: list[str] = []
-    if from_ts:
-        conditions.append(f"{column} >= parseDateTime64BestEffort(?, 9)")
-        params.append(from_ts)
-    if to_ts:
-        conditions.append(f"{column} < parseDateTime64BestEffort(?, 9)")
-        params.append(to_ts)
-    return conditions, params
+    return _shared_time_window_conditions(column, from_ts, to_ts)
 
 
 _RUM_SESSION_KEY_SQL = (
@@ -8607,13 +8606,18 @@ def _prepare_re2_filter_patterns(db: "ChDbConnection", raw: str) -> tuple[list[s
 
 
 def _append_time_window_filter(conditions: list[str], params: list[Any], column: str, from_ts: str, to_ts: str) -> None:
-    time_conditions, time_params = _time_window_conditions(column, from_ts, to_ts)
-    conditions.extend(time_conditions)
-    params.extend(time_params)
+    _shared_append_time_window_filter(
+        conditions,
+        params,
+        column,
+        from_ts,
+        to_ts,
+        time_window_conditions=_time_window_conditions,
+    )
 
 
 def _where_clause(conditions: list[str]) -> str:
-    return ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    return _shared_where_clause(conditions)
 
 
 def _append_regex_expression_clauses(
@@ -8624,12 +8628,13 @@ def _append_regex_expression_clauses(
     include_patterns: list[str],
     exclude_patterns: list[str],
 ) -> None:
-    for pattern in include_patterns:
-        conditions.append(f"match({column}, ?)")
-        params.append(pattern)
-    for pattern in exclude_patterns:
-        conditions.append(f"NOT match({column}, ?)")
-        params.append(pattern)
+    _shared_append_regex_expression_clauses(
+        conditions=conditions,
+        params=params,
+        column=column,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -8656,66 +8661,17 @@ _AI_SPAN_CONDITION = (
 
 
 def _replace_sql_outside_single_quotes(sql: str, replacements: list[tuple[str, str]]) -> str:
-    placeholders: list[str] = []
-    masked_parts: list[str] = []
-    i = 0
-    while i < len(sql):
-        ch = sql[i]
-        if ch != "'":
-            masked_parts.append(ch)
-            i += 1
-            continue
-
-        start = i
-        i += 1
-        while i < len(sql):
-            if sql[i] == "'":
-                if i + 1 < len(sql) and sql[i + 1] == "'":
-                    i += 2
-                    continue
-                i += 1
-                break
-            i += 1
-
-        literal = sql[start:i]
-        token = f"__SQL_LITERAL_{len(placeholders)}__"
-        placeholders.append(literal)
-        masked_parts.append(token)
-
-    masked = "".join(masked_parts)
-    for pattern, replacement in replacements:
-        masked = re.sub(pattern, replacement, masked, flags=re.IGNORECASE)
-    for idx, literal in enumerate(placeholders):
-        masked = masked.replace(f"__SQL_LITERAL_{idx}__", literal)
-    return masked
+    return _shared_replace_sql_outside_single_quotes(sql, replacements)
 
 
 def _normalize_ai_sql_where(sql_where: str) -> str:
-    _validate_user_sql_where(sql_where)
-    safe_sql = str(sql_where or "").replace(";", "")
-    replacements = [
-        (r"\bLogAttributes\s*\[", "SpanAttributes["),
-        (r"SpanAttributes\s*\[\s*'prompt'\s*\]", _AI_TRACE_PROMPT_SQL),
-        (r"SpanAttributes\s*\[\s*'response'\s*\]", _AI_TRACE_RESPONSE_SQL),
-        (r"\bservice\b", "ServiceName"),
-        (r"\bmodel\b", "SpanAttributes['gen_ai.request.model']"),
-        (r"\bprovider\b", "SpanAttributes['gen_ai.provider.name']"),
-        (r"\boperation\b", "SpanAttributes['gen_ai.operation.name']"),
-        (r"\bprompt\b", _AI_TRACE_PROMPT_SQL),
-        (r"\bresponse\b", _AI_TRACE_RESPONSE_SQL),
-        (r"\btrace_id\b", "TraceId"),
-        (r"\bspan_id\b", "SpanId"),
-        (r"\bspan_name\b", "SpanName"),
-        (r"\brow_type\b", "if(SpanAttributes['gen_ai.request.model'] != '', 'llm', 'system')"),
-        (r"\bts\b", "Timestamp"),
-        (r"\bstatus\b", "StatusCode"),
-        (r"\berror_type\b", "SpanAttributes['error.type']"),
-        (r"\btokens_in\b", "toUInt64OrZero(SpanAttributes['gen_ai.usage.input_tokens'])"),
-        (r"\btokens_out\b", "toUInt64OrZero(SpanAttributes['gen_ai.usage.output_tokens'])"),
-        (r"\bthinking_tokens\b", "toUInt64OrZero(SpanAttributes['gen_ai.usage.thinking_tokens'])"),
-        (r"\bduration_ms\b", "(Duration / 1000000.0)"),
-    ]
-    return _replace_sql_outside_single_quotes(safe_sql, replacements)
+    return _shared_normalize_ai_sql_where(
+        sql_where,
+        validate_user_sql_where=_validate_user_sql_where,
+        ai_trace_prompt_sql=_AI_TRACE_PROMPT_SQL,
+        ai_trace_response_sql=_AI_TRACE_RESPONSE_SQL,
+        replace_sql_outside_single_quotes=_replace_sql_outside_single_quotes,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -8755,11 +8711,7 @@ def _validate_user_sql_where(sql_where: str) -> None:
     Raises:
         ValueError: with a user-readable message when a disallowed pattern is found.
     """
-    if _UNSAFE_WHERE_PATTERNS.search(sql_where):
-        raise ValueError(
-            "SQL filter contains a disallowed keyword. "
-            "Only comparison and logical expressions are permitted in filter fields."
-        )
+    _shared_validate_user_sql_where(sql_where, unsafe_where_patterns=_UNSAFE_WHERE_PATTERNS)
 
 
 def _list_derived_signal_dimensions(db: ChDbConnection) -> tuple[list[str], list[str], list[str]]:
