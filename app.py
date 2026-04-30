@@ -154,6 +154,18 @@ from shared.ai_sql import _repair_truncated_in_clause_literals as _shared_repair
 from shared.ai_sql import _vanna_generate_named_queries as _shared_vanna_generate_named_queries
 from shared.ai_sql import _vanna_generate_sql as _shared_vanna_generate_sql
 from shared.ai_sql import _vanna_repair_sql as _shared_vanna_repair_sql
+from shared.app_settings import _del_app_setting as _shared_del_app_setting
+from shared.app_settings import _get_app_setting as _shared_get_app_setting
+from shared.app_settings import _load_json_string_list_setting as _shared_load_json_string_list_setting
+from shared.app_settings import _load_masking_custom_keys as _shared_load_masking_custom_keys
+from shared.app_settings import _load_masking_custom_patterns as _shared_load_masking_custom_patterns
+from shared.app_settings import _load_masking_settings as _shared_load_masking_settings
+from shared.app_settings import _next_app_setting_updated_at as _shared_next_app_setting_updated_at
+from shared.app_settings import _refresh_masking_runtime_rules as _shared_refresh_masking_runtime_rules
+from shared.app_settings import _save_json_string_list_setting as _shared_save_json_string_list_setting
+from shared.app_settings import _save_masking_custom_keys as _shared_save_masking_custom_keys
+from shared.app_settings import _save_masking_custom_patterns as _shared_save_masking_custom_patterns
+from shared.app_settings import _set_app_setting as _shared_set_app_setting
 from shared.ci_push import _ci_push_api_key_status as _shared_ci_push_api_key_status
 from shared.ci_push import _ci_push_expiry_iso_from_days as _shared_ci_push_expiry_iso_from_days
 from shared.ci_push import _ci_push_hash_key as _shared_ci_push_hash_key
@@ -20740,14 +20752,12 @@ def _generate_vapid_keys() -> tuple[str, str]:
 
 def _get_app_setting(db: "ChDbConnection", key: str) -> str | None:
     """Return a value from sobs_app_settings, or None if the key is absent/empty."""
-    row = db.execute(
-        "SELECT Value FROM sobs_app_settings FINAL WHERE Key = ? LIMIT 1",
-        (key,),
-    ).fetchone()
-    value = str(row[0]).strip() if row else ""
-    if key in {"vapid_private_key"}:
-        value = _decrypt_secret_value(value)
-    return value if value else None
+    return _shared_get_app_setting(
+        db,
+        key,
+        decrypt_secret_value=_decrypt_secret_value,
+        secret_setting_keys={"vapid_private_key"},
+    )
 
 
 _APP_SETTINGS_LAST_UPDATED_AT_MS = 0
@@ -20756,134 +20766,120 @@ _APP_SETTINGS_LAST_UPDATED_AT_MS = 0
 def _next_app_setting_updated_at() -> str:
     """Return a monotonic UTC timestamp string for sobs_app_settings writes."""
     global _APP_SETTINGS_LAST_UPDATED_AT_MS
-    now_ms = int(time.time() * 1000)
-    if now_ms <= _APP_SETTINGS_LAST_UPDATED_AT_MS:
-        now_ms = _APP_SETTINGS_LAST_UPDATED_AT_MS + 1
-    _APP_SETTINGS_LAST_UPDATED_AT_MS = now_ms
-    dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+    timestamp, _APP_SETTINGS_LAST_UPDATED_AT_MS = _shared_next_app_setting_updated_at(
+        _APP_SETTINGS_LAST_UPDATED_AT_MS,
+        time_module=time,
+        datetime_cls=datetime,
+        timezone_obj=timezone.utc,
+    )
+    return timestamp
 
 
 def _set_app_setting(db: "ChDbConnection", key: str, value: str) -> None:
     """Upsert a value in sobs_app_settings."""
-    stored = _encrypt_secret_value(value) if key in {"vapid_private_key"} else value
-    updated_at_value = _next_app_setting_updated_at()
-    _insert_rows_json_each_row(
+    _shared_set_app_setting(
         db,
-        "sobs_app_settings",
-        [{"Key": key, "Value": stored, "UpdatedAt": updated_at_value}],
+        key,
+        value,
+        encrypt_secret_value=_encrypt_secret_value,
+        secret_setting_keys={"vapid_private_key"},
+        next_updated_at=_next_app_setting_updated_at,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        masking_output_enabled_setting=_MASKING_OUTPUT_ENABLED_SETTING,
+        masking_sql_output_enabled_setting=_MASKING_SQL_OUTPUT_ENABLED_SETTING,
+        set_masking_settings_cache=_set_masking_settings_cache,
+        is_truthy_setting=_is_truthy_setting,
     )
-    if key == _MASKING_OUTPUT_ENABLED_SETTING:
-        _set_masking_settings_cache(output_enabled=_is_truthy_setting(value, default=True))
-    elif key == _MASKING_SQL_OUTPUT_ENABLED_SETTING:
-        _set_masking_settings_cache(sql_output_enabled=_is_truthy_setting(value, default=True))
 
 
 def _del_app_setting(db: "ChDbConnection", key: str) -> None:
     """Clear a setting from sobs_app_settings by writing an empty value (tombstone)."""
-    updated_at_value = _next_app_setting_updated_at()
-    _insert_rows_json_each_row(
+    _shared_del_app_setting(
         db,
-        "sobs_app_settings",
-        [{"Key": key, "Value": "", "UpdatedAt": updated_at_value}],
+        key,
+        next_updated_at=_next_app_setting_updated_at,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        masking_output_enabled_setting=_MASKING_OUTPUT_ENABLED_SETTING,
+        masking_sql_output_enabled_setting=_MASKING_SQL_OUTPUT_ENABLED_SETTING,
+        set_masking_settings_cache=_set_masking_settings_cache,
     )
-    if key == _MASKING_OUTPUT_ENABLED_SETTING:
-        _set_masking_settings_cache(output_enabled=True)
-    elif key == _MASKING_SQL_OUTPUT_ENABLED_SETTING:
-        _set_masking_settings_cache(sql_output_enabled=True)
 
 
 def _load_json_string_list_setting(db: "ChDbConnection", key: str) -> list[str]:
-    raw = _get_app_setting(db, key) or ""
-    if not raw:
-        return []
-    try:
-        values = json.loads(raw)
-    except json.JSONDecodeError:
-        app.logger.warning("Invalid JSON list in app setting %s", key)
-        return []
-    if not isinstance(values, list):
-        return []
-    result: list[str] = []
-    for item in values:
-        text = str(item or "").strip()
-        if text:
-            result.append(text)
-    return result
+    return _shared_load_json_string_list_setting(db, key, get_app_setting=_get_app_setting, logger=app.logger)
 
 
 def _save_json_string_list_setting(db: "ChDbConnection", key: str, values: list[str]) -> None:
-    if not values:
-        _del_app_setting(db, key)
-        return
-    _set_app_setting(db, key, json.dumps(values, ensure_ascii=False))
+    _shared_save_json_string_list_setting(
+        db,
+        key,
+        values,
+        del_app_setting=_del_app_setting,
+        set_app_setting=_set_app_setting,
+    )
 
 
 def _load_masking_custom_keys(db: "ChDbConnection") -> list[str]:
-    keys = [
-        _masking.normalize_sensitive_key(value)
-        for value in _load_json_string_list_setting(db, _MASKING_CUSTOM_KEYS_SETTING)
-    ]
-    return sorted({key_name for key_name in keys if key_name})
+    return _shared_load_masking_custom_keys(
+        db,
+        load_json_string_list_setting=_load_json_string_list_setting,
+        normalize_sensitive_key=_masking.normalize_sensitive_key,
+        masking_custom_keys_setting=_MASKING_CUSTOM_KEYS_SETTING,
+    )
 
 
 def _save_masking_custom_keys(db: "ChDbConnection", keys: list[str]) -> None:
-    normalized = sorted(
-        {
-            normalized_key
-            for normalized_key in (_masking.normalize_sensitive_key(value) for value in keys)
-            if normalized_key
-        }
+    _shared_save_masking_custom_keys(
+        db,
+        keys,
+        normalize_sensitive_key=_masking.normalize_sensitive_key,
+        save_json_string_list_setting=_save_json_string_list_setting,
+        masking_custom_keys_setting=_MASKING_CUSTOM_KEYS_SETTING,
     )
-    _save_json_string_list_setting(db, _MASKING_CUSTOM_KEYS_SETTING, normalized)
 
 
 def _load_masking_custom_patterns(db: "ChDbConnection") -> list[str]:
-    patterns: list[str] = []
-    for value in _load_json_string_list_setting(db, _MASKING_CUSTOM_PATTERNS_SETTING):
-        try:
-            patterns.append(_validate_custom_masking_pattern_for_storage(value))
-        except (ValueError, re.error):
-            app.logger.warning("Ignoring invalid custom masking pattern from settings")
-    return list(dict.fromkeys(patterns))
+    return _shared_load_masking_custom_patterns(
+        db,
+        load_json_string_list_setting=_load_json_string_list_setting,
+        validate_custom_masking_pattern_for_storage=_validate_custom_masking_pattern_for_storage,
+        logger=app.logger,
+        masking_custom_patterns_setting=_MASKING_CUSTOM_PATTERNS_SETTING,
+    )
 
 
 def _save_masking_custom_patterns(db: "ChDbConnection", patterns: list[str]) -> None:
-    normalized = list(dict.fromkeys([_validate_custom_masking_pattern_for_storage(value) for value in patterns]))
-    _save_json_string_list_setting(db, _MASKING_CUSTOM_PATTERNS_SETTING, normalized)
+    _shared_save_masking_custom_patterns(
+        db,
+        patterns,
+        validate_custom_masking_pattern_for_storage=_validate_custom_masking_pattern_for_storage,
+        save_json_string_list_setting=_save_json_string_list_setting,
+        masking_custom_patterns_setting=_MASKING_CUSTOM_PATTERNS_SETTING,
+    )
 
 
 def _load_masking_settings(db: "ChDbConnection") -> dict[str, Any]:
-    custom_keys = _load_masking_custom_keys(db)
-    custom_patterns = _load_masking_custom_patterns(db)
-    effective_keys = sorted({*_masking.DEFAULT_SENSITIVE_KEYS, *custom_keys})
-    effective_patterns = [*_masking.DEFAULT_SENSITIVE_PATTERNS, *custom_patterns]
-    return {
-        "custom_keys": custom_keys,
-        "custom_patterns": custom_patterns,
-        "default_keys": sorted(_masking.DEFAULT_SENSITIVE_KEYS),
-        "default_patterns": list(_masking.DEFAULT_SENSITIVE_PATTERNS),
-        "effective_keys": effective_keys,
-        "effective_patterns": effective_patterns,
-        "output_masking_enabled": _is_output_masking_enabled(db),
-        "sql_output_masking_enabled": _is_sql_output_masking_enabled(db),
-    }
+    return _shared_load_masking_settings(
+        db,
+        load_masking_custom_keys=_load_masking_custom_keys,
+        load_masking_custom_patterns=_load_masking_custom_patterns,
+        default_sensitive_keys=_masking.DEFAULT_SENSITIVE_KEYS,
+        default_sensitive_patterns=_masking.DEFAULT_SENSITIVE_PATTERNS,
+        is_output_masking_enabled=_is_output_masking_enabled,
+        is_sql_output_masking_enabled=_is_sql_output_masking_enabled,
+    )
 
 
 def _refresh_masking_runtime_rules(db: "ChDbConnection") -> None:
     global _MASKING_LAST_RULES_SIGNATURE
-    custom_keys = _load_masking_custom_keys(db)
-    custom_patterns = _load_masking_custom_patterns(db)
-    signature = (tuple(custom_keys), tuple(custom_patterns))
-
-    with _MASKING_RULES_REFRESH_LOCK:
-        if _MASKING_LAST_RULES_SIGNATURE == signature:
-            return
-        _masking.configure_runtime_rules(
-            custom_keys=custom_keys,
-            custom_patterns=custom_patterns,
-        )
-        _MASKING_LAST_RULES_SIGNATURE = signature
+    _MASKING_LAST_RULES_SIGNATURE = _shared_refresh_masking_runtime_rules(
+        db,
+        load_masking_custom_keys=_load_masking_custom_keys,
+        load_masking_custom_patterns=_load_masking_custom_patterns,
+        last_rules_signature=_MASKING_LAST_RULES_SIGNATURE,
+        lock=_MASKING_RULES_REFRESH_LOCK,
+        configure_runtime_rules=_masking.configure_runtime_rules,
+    )
 
 
 @app.before_request

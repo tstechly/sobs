@@ -22,6 +22,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/agent_work_items.py` now measures `100%` line coverage in its dedicated direct test run after extracting bounded integer parsing, recent-candidate loading, agent-trigger field extraction, issue-match normalization, GitHub work-item dedup key/title helpers, work-item row serialization, work-item persistence, issue URL parsing, context-summary assembly, and Copilot assignment status helpers from `app.py`.
 - `shared/ai_pricing.py` now measures `100%` line coverage in its dedicated direct test run after extracting AI model-name normalization, pricing-entry coercion, saved/confirmed pricing loaders, observed-model pricing inference/merge helpers, sensitive-setting detection, and repo-scoped GitHub token helpers from `app.py`.
 - `shared/ai_settings.py` now measures `100%` line coverage in its dedicated direct test run after extracting AI setting load/save/all-settings helpers from `app.py` while preserving the app-level compatibility wrappers.
+- `shared/app_settings.py` now measures `98%` line coverage in its dedicated direct test run after extracting generic app-setting load/save/delete helpers, monotonic app-setting timestamp generation, JSON string-list setting helpers, masking custom key/pattern loaders and savers, masking settings aggregation, and masking runtime-rule refresh handling from `app.py`.
 - `shared/notifications.py` now measures `100%` line coverage in its dedicated direct test run after extracting notification channel loading, condition normalization/parsing, notification rule loading, notification log loading, channel config masking, and per-channel mask-output resolution from `app.py`.
 - `shared/github.py` measures `97.06%` line coverage, which validates Milestone 1 as a successful high-confidence extraction.
 - `shared/github_issues.py` now measures `96.4%` line coverage after the dedicated branch tests added in this phase.
@@ -148,12 +149,14 @@ Measured result so far:
 - `shared/agent_work_items.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/ai_settings.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/ai_pricing.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/app_settings.py` now measures `98%` line coverage in its dedicated direct test run.
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/notifications.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
 - `app.py` now delegates agent rule loading, single-rule loading, agent run loading, agent-run counter helpers, trigger service-name extraction, and agent GitHub target resolution to `shared/agent_state.py`.
 - `app.py` now delegates bounded integer parsing, recent work-item candidate loading, agent-trigger field extraction, GitHub work-item dedup/title helpers, work-item row serialization, work-item persistence, issue URL parsing, context-summary assembly, and Copilot assignment status helpers to `shared/agent_work_items.py`.
+- `app.py` now delegates generic app-setting load/save/delete helpers, monotonic app-setting timestamp generation, JSON string-list setting helpers, masking custom key/pattern loaders and savers, masking settings aggregation, and masking runtime-rule refresh handling to `shared/app_settings.py` while preserving the app-level globals and wrapper signatures used by the existing tests.
 - `app.py` now delegates AI setting load/save/all-settings helpers to `shared/ai_settings.py`.
 - `app.py` now delegates AI model-name normalization, pricing-entry coercion, saved/confirmed pricing loading, observed-model pricing inference/merge logic, sensitive-setting detection, and repo-scoped GitHub token load/save helpers to `shared/ai_pricing.py`.
 - `app.py` now delegates the managed CI push API-key TTL, expiry, hashing, status, validation, rotation, revocation, and realtime-flag helpers to `shared/ci_push.py`.
