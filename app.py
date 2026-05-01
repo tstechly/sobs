@@ -203,6 +203,8 @@ from shared.ci_push import _normalize_ttl_days as _shared_normalize_ttl_days
 from shared.ci_push import _revoke_ci_push_api_key as _shared_revoke_ci_push_api_key
 from shared.ci_push import _rotate_ci_push_api_key as _shared_rotate_ci_push_api_key
 from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_realtime_enabled
+from shared.cve_scan import _build_cve_scan_summary as _shared_build_cve_scan_summary
+from shared.cve_scan import _build_osv_cve_findings as _shared_build_osv_cve_findings
 from shared.dashboard_api import _apply_query_limit as _shared_apply_query_limit
 from shared.dashboard_api import _build_ai_chart_datasets as _shared_build_ai_chart_datasets
 from shared.dashboard_api import _build_ai_chart_spec_response as _shared_build_ai_chart_spec_response
@@ -11841,16 +11843,12 @@ async def _run_cve_scan(db: "ChDbConnection | None" = None) -> dict:
     libraries = _collect_library_inventory(resolved_db)
     if not libraries:
         _set_app_setting(resolved_db, _CVE_LAST_SCAN_SETTING, _now_iso())
-        return {
-            "ok": True,
-            "libraries_found": 0,
-            "vulns_found": 0,
-            "github_backfill_attempted": github_backfill.get("attempted", 0),
-            "github_backfill_inserted": github_backfill.get("inserted", 0),
-            "github_backfill_max_releases": github_backfill.get(
-                "max_releases", _github_backfill_max_releases(resolved_db)
-            ),
-        }
+        return _shared_build_cve_scan_summary(
+            github_backfill,
+            libraries_found=0,
+            vulns_found=0,
+            max_releases_default=_github_backfill_max_releases(resolved_db),
+        )
 
     client = await _get_async_http_client()
     scan_ts = _now_iso()
@@ -11869,31 +11867,17 @@ async def _run_cve_scan(db: "ChDbConnection | None" = None) -> dict:
             if resp.status_code != 200:
                 continue
             data = resp.json()
-            for v in data.get("vulns", [])[:_CVE_MAX_VULNS_PER_PKG]:
-                aliases = v.get("aliases", [])
-                cve_ids = [a for a in aliases if a.startswith("CVE-")]
-                sev_list = v.get("severity", [])
-                severity = ""
-                if sev_list:
-                    severity = sev_list[0].get("score", "") or sev_list[0].get("type", "")
-                db_specific = v.get("database_specific", {})
-                if not severity and db_specific.get("severity"):
-                    severity = str(db_specific["severity"])
-                all_findings.append(
-                    {
-                        "Package": pkg,
-                        "Ecosystem": eco,
-                        "Version": ver,
-                        "ServiceName": lib.get("service", ""),
-                        "OsvId": str(v.get("id", "")),
-                        "CveIds": ",".join(cve_ids),
-                        "Summary": (v.get("summary", "") or "")[:500],
-                        "Severity": severity,
-                        "Published": (v.get("published", "") or "")[:10],
-                        "ScannedAt": scan_ts,
-                    }
-                )
-                new_count += 1
+            vulnerabilities = data.get("vulns", []) if isinstance(data, dict) else []
+            if not isinstance(vulnerabilities, list):
+                continue
+            findings = _shared_build_osv_cve_findings(
+                lib,
+                vulnerabilities,
+                scan_ts=scan_ts,
+                max_vulns_per_pkg=_CVE_MAX_VULNS_PER_PKG,
+            )
+            all_findings.extend(findings)
+            new_count += len(findings)
         except Exception:
             app.logger.debug("CVE scan failed for %s/%s@%s", eco, pkg, ver, exc_info=True)
 
@@ -11904,15 +11888,13 @@ async def _run_cve_scan(db: "ChDbConnection | None" = None) -> dict:
             app.logger.warning("Failed to store CVE findings", exc_info=True)
 
     _set_app_setting(resolved_db, _CVE_LAST_SCAN_SETTING, scan_ts)
-    return {
-        "ok": True,
-        "libraries_found": len(libraries),
-        "vulns_found": new_count,
-        "scanned_at": scan_ts,
-        "github_backfill_attempted": github_backfill.get("attempted", 0),
-        "github_backfill_inserted": github_backfill.get("inserted", 0),
-        "github_backfill_max_releases": github_backfill.get("max_releases", _github_backfill_max_releases(resolved_db)),
-    }
+    return _shared_build_cve_scan_summary(
+        github_backfill,
+        libraries_found=len(libraries),
+        vulns_found=new_count,
+        max_releases_default=_github_backfill_max_releases(resolved_db),
+        scan_ts=scan_ts,
+    )
 
 
 async def _cve_scanner_loop() -> None:

@@ -47,7 +47,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/library_inventory.py` now measures `100%` line coverage in its dedicated direct test run after extracting GitHub Actions snapshot-name parsing, GitHub Actions dependency artifact row shaping, release-registry dependency inventory shaping, telemetry SDK/scope inventory shaping, merged inventory deduplication, and derived inventory version helpers from `app.py`.
 - `shared/repo_health.py` now measures `100%` line coverage in its dedicated direct test run after extracting release-version targeting, repo-target shaping, version-token collection, GitHub issue/PR/security summarization, and final repo-health summary assembly from `app.py`.
 - `shared/release_backfill.py` now measures `100%` line coverage in its dedicated direct test run after extracting GitHub contents lockfile candidate definitions, release backfill target selection, and GitHub contents dependency artifact row shaping from `app.py`.
-- The latest sequential full-suite validation passed at `1613 passed, 4 skipped`.
+- `shared/cve_scan.py` now measures `100%` line coverage in its dedicated direct test run after extracting OSV severity normalization, CVE finding row shaping, and CVE scan summary shaping from `app.py`.
+- The latest sequential full-suite validation passed at `1616 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -187,6 +188,7 @@ Measured result so far:
 - `shared/library_inventory.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/repo_health.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/release_backfill.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/cve_scan.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -216,6 +218,7 @@ Measured result so far:
 - `app.py` now delegates GitHub Actions snapshot-name parsing, GitHub Actions dependency artifact row shaping, release-registry dependency inventory shaping, telemetry SDK/scope inventory shaping, merged inventory deduplication, and derived inventory version helpers to `shared/library_inventory.py` while preserving the existing app-level wrappers and enrichment tests for dependency backfill, CVE inventory collection, and GitHub Actions snapshot ingestion.
 - `app.py` now delegates release-version targeting, repo-target shaping, version-token collection, GitHub issue/PR/security summarization, and final repo-health summary assembly to `shared/repo_health.py` while preserving the existing repo-health endpoint and sync-flow behavior exercised by the app repo-health tests.
 - `app.py` now delegates GitHub contents lockfile candidate definitions, release backfill target selection, and GitHub contents dependency artifact row shaping to `shared/release_backfill.py` while preserving the existing GitHub dependency backfill, CVE scan, and GitHub Actions artifact fallback behavior exercised by the app enrichment tests.
+- `app.py` now delegates OSV severity normalization, CVE finding row shaping, and CVE scan summary shaping to `shared/cve_scan.py` while preserving the existing CVE scan and findings endpoint behavior exercised by the app enrichment tests.
 
 Why these slices were taken early:
 
