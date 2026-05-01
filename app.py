@@ -247,6 +247,20 @@ from shared.github_issues import _github_get_issue_detail as _shared_github_get_
 from shared.github_issues import _github_issue_is_new_state as _shared_github_issue_is_new_state
 from shared.github_issues import _search_open_pr_for_issue as _shared_search_open_pr_for_issue
 from shared.github_issues import _update_github_issue_record as _shared_update_github_issue_record
+from shared.library_inventory import _build_github_actions_dependency_row as _shared_build_github_actions_dependency_row
+from shared.library_inventory import (
+    _build_release_registry_inventory_items as _shared_build_release_registry_inventory_items,
+)
+from shared.library_inventory import _build_scope_inventory_items as _shared_build_scope_inventory_items
+from shared.library_inventory import _build_sdk_inventory_items as _shared_build_sdk_inventory_items
+from shared.library_inventory import (
+    _extract_library_versions_from_inventory as _shared_extract_library_versions_from_inventory,
+)
+from shared.library_inventory import _github_actions_snapshot_name as _shared_github_actions_snapshot_name
+from shared.library_inventory import (
+    _inventory_versions_by_package_from_inventory as _shared_inventory_versions_by_package_from_inventory,
+)
+from shared.library_inventory import _merge_library_inventory as _shared_merge_library_inventory
 from shared.log_attr_keys import _extract_attr_maps as _shared_extract_attr_maps
 from shared.log_attr_keys import _get_cached_attr_keys as _shared_get_cached_attr_keys
 from shared.log_attr_keys import _load_log_attr_keys_from_db as _shared_load_log_attr_keys_from_db
@@ -11351,15 +11365,7 @@ def _decode_github_contents_payload(payload: dict[str, Any]) -> bytes:
 
 
 def _github_actions_snapshot_name(filename: str) -> tuple[str, str, str] | None:
-    base = os.path.basename(str(filename or "").strip())
-    if not base:
-        return None
-    match = re.match(r"^pip-freeze-([a-z0-9_-]+)-([a-z0-9_-]+)\.txt$", base, re.IGNORECASE)
-    if not match:
-        return None
-    platform = match.group(1).lower()
-    architecture = match.group(2).lower()
-    return (f"pip-freeze-{platform}-{architecture}", platform, architecture)
+    return _shared_github_actions_snapshot_name(filename)
 
 
 async def _github_actions_dependency_rows(
@@ -11474,36 +11480,24 @@ async def _github_actions_dependency_rows(
                         continue
 
                     rows.append(
-                        {
-                            "Id": str(uuid.uuid4()),
-                            "ReleaseId": release_id,
-                            "ArtifactType": "dependencies-lockfile",
-                            "Name": dep_name,
-                            "ContentType": "text/plain",
-                            "Size": len(raw_bytes),
-                            "StorageRef": (
-                                f"github-actions://{owner}/{repo}/runs/{run_id}"
-                                f"/artifacts/{artifact_id}/{os.path.basename(info.filename)}"
-                            ),
-                            "ChecksumSha256": hashlib.sha256(raw_bytes).hexdigest(),
-                            "Platform": platform,
-                            "Architecture": architecture,
-                            "MetadataJson": json.dumps(
-                                {
-                                    "source": "github_actions_artifact",
-                                    "repo": f"{owner}/{repo}",
-                                    "run_id": run_id,
-                                    "run_head_sha": str(run.get("head_sha") or ""),
-                                    "release_version": release_version,
-                                    "artifact_name": str(snapshot_artifact.get("name") or ""),
-                                    "dependencies": deps,
-                                },
-                                separators=(",", ":"),
-                            ),
-                            "UploadedAt": _normalize_ch_timestamp(datetime.now(timezone.utc)),
-                            "IsDeleted": 0,
-                            "Version": int(time.time() * 1000),
-                        }
+                        _shared_build_github_actions_dependency_row(
+                            record_id=str(uuid.uuid4()),
+                            release_id=release_id,
+                            owner=owner,
+                            repo=repo,
+                            run_id=run_id,
+                            run_head_sha=str(run.get("head_sha") or ""),
+                            artifact_id=artifact_id,
+                            artifact_name=str(snapshot_artifact.get("name") or ""),
+                            filename=info.filename,
+                            release_version=release_version,
+                            platform=platform,
+                            architecture=architecture,
+                            raw_bytes=raw_bytes,
+                            dependencies=deps,
+                            uploaded_at=_normalize_ch_timestamp(datetime.now(timezone.utc)),
+                            version=int(time.time() * 1000),
+                        )
                     )
         except Exception:
             continue
@@ -11721,44 +11715,7 @@ def _collect_library_inventory(db: "ChDbConnection") -> list[dict[str, str]]:
     3. ScopeName / ScopeVersion from traces/logs
     """
 
-    inventory: dict[str, dict[str, str]] = {}
-    source_priority = {"release_registry": 0, "otel_sdk": 1, "otel_scope": 2}
-
-    def _service_label(item: dict[str, str]) -> str:
-        return str(item.get("service") or item.get("app_name") or "")
-
-    def _key(item: dict[str, str]) -> str:
-        return "::".join(
-            [
-                str(item.get("ecosystem") or ""),
-                str(item.get("package") or ""),
-                str(item.get("version") or ""),
-                _service_label(item),
-            ]
-        )
-
-    def _add(item: dict[str, str]) -> None:
-        package = str(item.get("package") or "").strip()
-        version = str(item.get("version") or "").strip()
-        if not package or not version:
-            return
-        normalized = {
-            "package": package,
-            "version": version,
-            "ecosystem": str(item.get("ecosystem") or "").strip(),
-            "service": str(item.get("service") or "").strip(),
-            "source": str(item.get("source") or "").strip(),
-            "app_name": str(item.get("app_name") or "").strip(),
-            "release_version": str(item.get("release_version") or "").strip(),
-            "environment": str(item.get("environment") or "").strip(),
-        }
-        item_key = _key(normalized)
-        current = inventory.get(item_key)
-        if not current:
-            inventory[item_key] = normalized
-            return
-        if source_priority.get(normalized["source"], 99) < source_priority.get(current.get("source", ""), 99):
-            inventory[item_key] = normalized
+    inventory_items: list[dict[str, str]] = []
 
     # Tier 1: dependencies-lockfile artifacts registered via CI/release metadata.
     try:
@@ -11772,40 +11729,7 @@ def _collect_library_inventory(db: "ChDbConnection") -> list[dict[str, str]]:
             "SELECT Id, AppId, ReleaseVersion, Environment " "FROM sobs_app_releases FINAL WHERE IsDeleted=0"
         ).fetchall()
         app_rows = db.execute("SELECT Id, Name, Slug FROM sobs_apps FINAL WHERE IsDeleted=0").fetchall()
-        releases_by_id = {
-            str(row["Id"]): {
-                "app_id": str(row["AppId"] or ""),
-                "release_version": str(row["ReleaseVersion"] or ""),
-                "environment": str(row["Environment"] or ""),
-            }
-            for row in release_rows
-        }
-        apps_by_id = {
-            str(row["Id"]): {"name": str(row["Name"] or ""), "slug": str(row["Slug"] or "")} for row in app_rows
-        }
-        for row in artifact_rows:
-            release_info = releases_by_id.get(str(row["ReleaseId"] or ""), {})
-            app_info = apps_by_id.get(str(release_info.get("app_id") or ""), {})
-            metadata = _safe_json_loads(row["MetadataJson"], {})
-            dependencies = metadata.get("dependencies", []) if isinstance(metadata, dict) else []
-            if not isinstance(dependencies, list):
-                continue
-            for dep in dependencies:
-                if not isinstance(dep, dict):
-                    continue
-                app_name = str(app_info.get("name") or app_info.get("slug") or "")
-                _add(
-                    {
-                        "package": str(dep.get("package", dep.get("name", "")) or ""),
-                        "version": str(dep.get("version", "") or ""),
-                        "ecosystem": str(dep.get("ecosystem", "") or ""),
-                        "service": app_name,
-                        "source": "release_registry",
-                        "app_name": app_name,
-                        "release_version": str(release_info.get("release_version") or ""),
-                        "environment": str(release_info.get("environment") or ""),
-                    }
-                )
+        inventory_items.extend(_shared_build_release_registry_inventory_items(artifact_rows, release_rows, app_rows))
     except Exception:
         app.logger.debug("release registry dependency inventory query failed", exc_info=True)
 
@@ -11822,16 +11746,7 @@ def _collect_library_inventory(db: "ChDbConnection") -> list[dict[str, str]]:
             "GROUP BY sdk_name, sdk_version, sdk_lang, ServiceName "
             "LIMIT 200"
         ).fetchall()
-        for row in rows:
-            _add(
-                {
-                    "package": str(row[0] or ""),
-                    "version": str(row[1] or ""),
-                    "ecosystem": _lang_to_osv_ecosystem(str(row[2] or "")),
-                    "service": str(row[3] or ""),
-                    "source": "otel_sdk",
-                }
-            )
+        inventory_items.extend(_shared_build_sdk_inventory_items(rows, lang_to_osv_ecosystem=_lang_to_osv_ecosystem))
     except Exception:
         app.logger.debug("otel trace sdk inventory query failed", exc_info=True)
 
@@ -11848,16 +11763,7 @@ def _collect_library_inventory(db: "ChDbConnection") -> list[dict[str, str]]:
             "GROUP BY sdk_name, sdk_version, sdk_lang, ServiceName "
             "LIMIT 200"
         ).fetchall()
-        for row in rows:
-            _add(
-                {
-                    "package": str(row[0] or ""),
-                    "version": str(row[1] or ""),
-                    "ecosystem": _lang_to_osv_ecosystem(str(row[2] or "")),
-                    "service": str(row[3] or ""),
-                    "source": "otel_sdk",
-                }
-            )
+        inventory_items.extend(_shared_build_sdk_inventory_items(rows, lang_to_osv_ecosystem=_lang_to_osv_ecosystem))
     except Exception:
         app.logger.debug("otel log sdk inventory query failed", exc_info=True)
 
@@ -11870,17 +11776,9 @@ def _collect_library_inventory(db: "ChDbConnection") -> list[dict[str, str]]:
             "GROUP BY ScopeName, ScopeVersion, ServiceName "
             "LIMIT 300"
         ).fetchall()
-        for row in rows:
-            scope_name = str(row[0] or "")
-            _add(
-                {
-                    "package": scope_name,
-                    "version": str(row[1] or ""),
-                    "ecosystem": _inventory_scope_ecosystem(scope_name),
-                    "service": str(row[2] or ""),
-                    "source": "otel_scope",
-                }
-            )
+        inventory_items.extend(
+            _shared_build_scope_inventory_items(rows, inventory_scope_ecosystem=_inventory_scope_ecosystem)
+        )
     except Exception:
         app.logger.debug("otel trace scope inventory query failed", exc_info=True)
 
@@ -11893,48 +11791,23 @@ def _collect_library_inventory(db: "ChDbConnection") -> list[dict[str, str]]:
             "GROUP BY ScopeName, ScopeVersion, ServiceName "
             "LIMIT 300"
         ).fetchall()
-        for row in rows:
-            scope_name = str(row[0] or "")
-            _add(
-                {
-                    "package": scope_name,
-                    "version": str(row[1] or ""),
-                    "ecosystem": _inventory_scope_ecosystem(scope_name),
-                    "service": str(row[2] or ""),
-                    "source": "otel_scope",
-                }
-            )
+        inventory_items.extend(
+            _shared_build_scope_inventory_items(rows, inventory_scope_ecosystem=_inventory_scope_ecosystem)
+        )
     except Exception:
         app.logger.debug("otel log scope inventory query failed", exc_info=True)
 
-    return list(inventory.values())
+    return _shared_merge_library_inventory(inventory_items)
 
 
 def _extract_library_versions_from_otel(db: "ChDbConnection") -> list[dict]:
     """Backward-compatible wrapper for existing OTEL/library inventory callers."""
-    inventory = _collect_library_inventory(db)
-    return [
-        {
-            "package": str(item.get("package") or ""),
-            "version": str(item.get("version") or ""),
-            "ecosystem": str(item.get("ecosystem") or ""),
-            "service": str(item.get("service") or item.get("app_name") or ""),
-        }
-        for item in inventory
-    ]
+    return _shared_extract_library_versions_from_inventory(_collect_library_inventory(db))
 
 
 def _inventory_versions_by_package(db: "ChDbConnection") -> dict[str, set[str]]:
     """Map ecosystem/package to currently observed versions in merged inventory."""
-    versions_by_package: dict[str, set[str]] = {}
-    for item in _collect_library_inventory(db):
-        package = str(item.get("package") or "").strip()
-        ecosystem = str(item.get("ecosystem") or "").strip()
-        version = str(item.get("version") or "").strip()
-        if not package or not ecosystem or not version:
-            continue
-        versions_by_package.setdefault(f"{ecosystem}::{package}", set()).add(version)
-    return versions_by_package
+    return _shared_inventory_versions_by_package_from_inventory(_collect_library_inventory(db))
 
 
 def _effective_cve_disposition(

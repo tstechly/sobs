@@ -44,7 +44,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/metrics_anomaly.py` now measures `100%` line coverage in its dedicated direct test run after extracting signal/source label metadata, derived-signal dimension loading, anomaly-hours clamping, metrics anomaly API SQL assembly, anomaly API row sanitization, anomaly detail SQL assembly, and anomaly detail row serialization from `app.py`.
 - `shared/release_registry.py` now measures `100%` line coverage in its dedicated direct test run after extracting release/artifact row serialization plus app-registry seed envelope parsing and seed row construction from `app.py`.
 - `shared/release_enrichment.py` now measures `100%` line coverage in its dedicated direct test run after extracting GitHub release ref-candidate generation, version-token matching, version-text boundary detection, and GitHub security-item classification helpers from `app.py`.
-- The latest sequential full-suite validation passed at `1600 passed, 4 skipped`.
+- `shared/library_inventory.py` now measures `100%` line coverage in its dedicated direct test run after extracting GitHub Actions snapshot-name parsing, GitHub Actions dependency artifact row shaping, release-registry dependency inventory shaping, telemetry SDK/scope inventory shaping, merged inventory deduplication, and derived inventory version helpers from `app.py`.
+- The latest sequential full-suite validation passed at `1605 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -181,6 +182,7 @@ Measured result so far:
 - `shared/metrics_anomaly.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/release_registry.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/release_enrichment.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/library_inventory.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -207,6 +209,7 @@ Measured result so far:
 - `app.py` now delegates signal/source label metadata, derived-signal dimension loading, anomaly-hours parsing, metrics anomaly API SQL assembly, anomaly API row sanitization, anomaly detail SQL assembly, and anomaly detail row serialization to `shared/metrics_anomaly.py` while preserving the existing app-level wrappers exercised by anomaly API, anomaly detail page, and signal label/source label tests.
 - `app.py` now delegates release/artifact row serialization plus app-registry seed envelope parsing and seed row construction to `shared/release_registry.py` while preserving the existing release registry routes and seed bootstrap flow exercised by the app release registry tests.
 - `app.py` now delegates GitHub release ref-candidate generation, version-token matching, version-text boundary detection, and GitHub security-item classification to `shared/release_enrichment.py` while preserving the existing GitHub dependency-backfill and repo-health filtering behavior exercised by the enrichment tests.
+- `app.py` now delegates GitHub Actions snapshot-name parsing, GitHub Actions dependency artifact row shaping, release-registry dependency inventory shaping, telemetry SDK/scope inventory shaping, merged inventory deduplication, and derived inventory version helpers to `shared/library_inventory.py` while preserving the existing app-level wrappers and enrichment tests for dependency backfill, CVE inventory collection, and GitHub Actions snapshot ingestion.
 
 Why these slices were taken early:
 
