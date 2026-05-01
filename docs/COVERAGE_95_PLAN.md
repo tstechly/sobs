@@ -20,6 +20,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run after extracting dashboard row serialization, chart row normalization, dashboard/chart row builders, dashboard template-list assembly, dashboard chart form parsing, query-page add-to-dashboard payload normalization, chart export payload/filename generation, and chart import payload normalization from `app.py`.
 - `shared/ai_runtime.py` now measures `99%` line coverage in its dedicated direct test run after extracting the shared LLM request assembly, streaming parsing, guard prompt/parsing logic, thinking/token/timeout resolution, and DLP endpoint helpers from `app.py`.
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
+- `shared/ai_trace_builder.py` now measures `100%` line coverage in its dedicated direct test run after extracting GenAI tool-call/message text rendering, message normalization, system-message dedupe, and AI trace turn-card aggregation from `app.py`.
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run after extracting the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers in Milestone 5.
 - `shared/ai_actions.py` now measures `97%` line coverage in its dedicated direct test run after extracting AI helper action-token secret/encode/decode/issue helpers, generic client-action payload sanitization, generic UI action normalization, and the chart-to-dashboard pivot suggestion helper from `app.py`.
 - `shared/log_attr_keys.py` now measures `98%` line coverage in its dedicated direct test run after extracting log attribute-key loading, cache priming, cached-key reads, discovered-key persistence, and attribute-map extraction helpers from `app.py`.
@@ -52,7 +53,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/rum_client_auth.py` now measures `100%` line coverage in its dedicated direct test run after extracting base64url helpers, origin normalization, request/same-origin checks, RUM client token signing and encode/decode, and RUM client-auth verification from `app.py`.
 - `shared/geo_lookup.py` now measures `100%` line coverage in its dedicated direct test run after extracting private-IP classification, geo dict shaping, and cached local geo lookup batching from `app.py`.
 - `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run after extracting repo-health persistence compaction/payload shaping and the GitHub repo-health scan orchestration from `app.py`.
-- The latest sequential full-suite validation passed at `1648 passed, 4 skipped`.
+- The latest sequential full-suite validation passed at `1655 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -169,6 +170,7 @@ Measured result so far:
 
 - `shared/ai_memory.py` now measures `95%` line coverage in its dedicated direct test run.
 - `shared/ai_actions.py` now measures `97%` line coverage in its dedicated direct test run.
+- `shared/ai_trace_builder.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/log_attr_keys.py` now measures `98%` line coverage in its dedicated direct test run.
 - `shared/output_masking.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/chart_specs.py` now measures `96%` line coverage in its dedicated direct test run and `96%` in the latest full-suite report.
@@ -200,6 +202,7 @@ Measured result so far:
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
+- `app.py` now delegates GenAI tool-call/message text rendering, message normalization, system-message dedupe, and AI trace turn-card aggregation to `shared/ai_trace_builder.py` while preserving the existing AI trace view, AI conversation partial, system-prompt dedupe, reasoning display, and helper chat-detail behavior exercised by the app tests.
 - `app.py` now delegates AI helper action-token secret/encode/decode/issue helpers, generic client-action payload sanitization, generic UI action normalization, and chart-to-dashboard pivot suggestion logic to `shared/ai_actions.py` while preserving the app-level wrappers exercised by AI helper execution and normalization tests.
 - `app.py` now delegates log attribute-key loading, cache priming, cached-key reads, discovered-key persistence, and attribute-map extraction to `shared/log_attr_keys.py` while preserving the app-level cache globals and wrappers exercised by log field-hint and trace/resource attribute-key persistence tests.
 - `app.py` now delegates masking settings cache writes/reads, output-masking flag resolution, JSON payload masking, value/string masking, SQL-output masking checks, and the optional SQL-output JSON response helper to `shared/output_masking.py` while preserving the app-level cache state and wrappers exercised by masking preview and toggle regressions.
