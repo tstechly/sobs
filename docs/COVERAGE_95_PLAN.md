@@ -6,13 +6,13 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 
 ## Current Baseline
 
-- Overall line coverage is now `85%` from the latest sequential full-suite run.
+- Overall line coverage is now `86%` from the latest sequential full-suite run.
 - `app.py` remains the dominant risk and coverage bottleneck at `79%` line coverage.
 - Route blueprints are a foundation step, but they do not by themselves create the module seams needed for high-confidence unit coverage.
 
 ## Measured Current State
 
-- Fresh sequential coverage run from `coverage-latest.xml` measured overall line coverage at `85%` versus the prior `78.06%` checkpoint baseline.
+- Fresh sequential coverage run from `coverage-latest.xml` measured overall line coverage at `86%` versus the prior `78.06%` checkpoint baseline.
 - `app.py` now measures `79%` line coverage while the extracted business-logic modules continue to climb above the direct-test target.
 - `shared/ai_chart.py` now measures `97.52%` line coverage in the full-suite report, and its dedicated direct test run measured `98%` coverage for the extracted chart-spec parsing/repair/generation helpers.
 - `shared/chart_specs.py` now measures `96%` line coverage in its dedicated direct test run and `96%` in the latest full-suite report after extracting chart-query validation, SQL literal/coercion helpers, default/raw spec assembly, chart-spec normalization, builder SQL compilation, compiled-spec validation, template role-map resolution, boolean parsing, visual override helpers, column-type inference, public dashboard DB-error sanitization, deep placeholder substitution, binding extraction, drilldown timestamp normalization, drilldown metadata attachment, custom ECharts JSON parsing, custom binding resolution, custom drilldown payload assembly, series-point ordering, derived-signal row preparation, and generic chart-template rendering orchestration from `app.py`, including real missing-`sql.mode` and blank-error fallback bug fixes uncovered by the new direct tests.
@@ -51,7 +51,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/cve_scan.py` now measures `100%` line coverage in its dedicated direct test run after extracting OSV severity normalization, CVE finding row shaping, and CVE scan summary shaping from `app.py`.
 - `shared/rum_client_auth.py` now measures `100%` line coverage in its dedicated direct test run after extracting base64url helpers, origin normalization, request/same-origin checks, RUM client token signing and encode/decode, and RUM client-auth verification from `app.py`.
 - `shared/geo_lookup.py` now measures `100%` line coverage in its dedicated direct test run after extracting private-IP classification, geo dict shaping, and cached local geo lookup batching from `app.py`.
-- The latest sequential full-suite validation passed at `1642 passed, 4 skipped`.
+- `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run after extracting repo-health persistence compaction/payload shaping and the GitHub repo-health scan orchestration from `app.py`.
+- The latest sequential full-suite validation passed at `1648 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -195,6 +196,7 @@ Measured result so far:
 - `shared/cve_scan.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/rum_client_auth.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/geo_lookup.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -228,6 +230,7 @@ Measured result so far:
 - `app.py` now delegates OSV severity normalization, CVE finding row shaping, and CVE scan summary shaping to `shared/cve_scan.py` while preserving the existing CVE scan and findings endpoint behavior exercised by the app enrichment tests.
 - `app.py` now delegates base64url helpers, origin normalization, request/same-origin checks, RUM client token signing and encode/decode, and RUM client-auth verification to `shared/rum_client_auth.py` while preserving the existing RUM client-token issuance, origin-bound token validation, ingest auth, and CSRF same-origin behavior exercised by the app and ingest route tests.
 - `app.py` now delegates private-IP classification, geo dict shaping, and cached local geo lookup batching to `shared/geo_lookup.py` while preserving the existing web-traffic geo API, geo-disabled setting, local public-IP lookup, and private-IP handling behavior exercised by the app and direct geo tests.
+- `app.py` now delegates repo-health summary persistence compaction/payload shaping and the GitHub repo-health scan orchestration to `shared/repo_health_sync.py` while preserving the existing repo-health sync persistence, sync no-op-on-unchanged summary behavior, repo-health endpoint failure handling, and release-version repo-health filtering exercised by the app tests.
 
 Why these slices were taken early:
 

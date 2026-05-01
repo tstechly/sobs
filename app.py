@@ -354,11 +354,8 @@ from shared.release_registry import _build_seed_registry_rows as _shared_build_s
 from shared.release_registry import _parse_app_registry_seed as _shared_parse_app_registry_seed
 from shared.release_registry import _serialize_artifact_row as _shared_serialize_artifact_row
 from shared.release_registry import _serialize_release_row as _shared_serialize_release_row
-from shared.repo_health import _build_repo_health_summary as _shared_build_repo_health_summary
-from shared.repo_health import _build_repo_health_targets as _shared_build_repo_health_targets
-from shared.repo_health import _collect_release_versions_by_app as _shared_collect_release_versions_by_app
-from shared.repo_health import _collect_repo_health_version_tokens as _shared_collect_repo_health_version_tokens
-from shared.repo_health import _summarize_repo_health_items as _shared_summarize_repo_health_items
+from shared.repo_health_sync import _build_repo_health_persist_payload as _shared_build_repo_health_persist_payload
+from shared.repo_health_sync import _collect_github_repo_health_summary as _shared_collect_github_repo_health_summary
 from shared.reports import REPORT_PAGE_TYPES as _SHARED_REPORT_PAGE_TYPES
 from shared.reports import REPORTS_EXPORT_VERSION as _SHARED_REPORTS_EXPORT_VERSION
 from shared.reports import _build_report_record as _shared_build_report_record
@@ -11809,36 +11806,24 @@ async def _sync_github_repo_health_once(db: "ChDbConnection | None" = None) -> d
     if not bool(summary.get("ok")):
         return summary
 
-    compact_values = {
-        "scanned_repos": int(summary.get("scanned_repos", 0) or 0),
-        "total_repos_considered": int(summary.get("total_repos_considered", 0) or 0),
-        "open_issues": int(summary.get("open_issues", 0) or 0),
-        "open_prs": int(summary.get("open_prs", 0) or 0),
-        "security_items": int(summary.get("security_items", 0) or 0),
-    }
+    persist_payload = _shared_build_repo_health_persist_payload(
+        summary,
+        _get_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) or "",
+        safe_json_loads=_safe_json_loads,
+    )
+    if not bool(persist_payload.get("should_persist")):
+        return summary
 
-    previous_raw = _get_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING) or ""
-    if previous_raw:
-        try:
-            previous = _safe_json_loads(previous_raw, {})
-            previous_values = {
-                "scanned_repos": int(previous.get("scanned_repos", 0) or 0),
-                "total_repos_considered": int(previous.get("total_repos_considered", 0) or 0),
-                "open_issues": int(previous.get("open_issues", 0) or 0),
-                "open_prs": int(previous.get("open_prs", 0) or 0),
-                "security_items": int(previous.get("security_items", 0) or 0),
-            }
-        except Exception:
-            previous_values = {}
-        if previous_values == compact_values:
-            return summary
-
-    _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SYNC_SETTING, str(summary.get("last_synced_at") or ""))
-    compact = {
-        **compact_values,
-        "last_synced_at": str(summary.get("last_synced_at") or ""),
-    }
-    _set_app_setting(resolved_db, _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING, json.dumps(compact, separators=(",", ":")))
+    _set_app_setting(
+        resolved_db,
+        _GITHUB_REPO_HEALTH_LAST_SYNC_SETTING,
+        str(persist_payload.get("last_synced_at") or ""),
+    )
+    _set_app_setting(
+        resolved_db,
+        _GITHUB_REPO_HEALTH_LAST_SUMMARY_SETTING,
+        str(persist_payload.get("compact_json") or "{}"),
+    )
     return summary
 
 
@@ -12114,73 +12099,20 @@ async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str,
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
-    versions_by_app = _shared_collect_release_versions_by_app(release_rows)
-    repo_targets = _shared_build_repo_health_targets(
+    return await _shared_collect_github_repo_health_summary(
         app_rows,
-        versions_by_app,
+        release_rows,
+        default_github_token=default_github_token,
+        client=await _get_async_http_client(),
+        max_repos=_GITHUB_REPO_HEALTH_MAX_REPOS,
+        max_items_per_repo=_GITHUB_REPO_HEALTH_MAX_ITEMS_PER_REPO,
+        load_repo_scoped_github_token=lambda owner, repo: _load_repo_scoped_github_token(db, owner, repo),
         parse_github_repo_owner_name=_parse_github_repo_owner_name,
-    )[:_GITHUB_REPO_HEALTH_MAX_REPOS]
-    client = await _get_async_http_client()
-
-    scanned_repos = 0
-    repos_summary: list[dict[str, Any]] = []
-
-    for target in repo_targets:
-        owner = str(target["owner"])
-        repo = str(target["repo"])
-        github_token = _load_repo_scoped_github_token(db, owner, repo) or default_github_token
-        if not github_token:
-            continue
-        versions = [str(v) for v in target.get("versions", []) if str(v).strip()]
-        version_tokens = _shared_collect_repo_health_version_tokens(
-            versions,
-            github_version_tokens=_github_version_tokens,
-        )
-        if not version_tokens:
-            continue
-
-        scanned_repos += 1
-        try:
-            resp = await client.get(
-                f"https://api.github.com/repos/{owner}/{repo}/issues",
-                params={"state": "open", "per_page": str(_GITHUB_REPO_HEALTH_MAX_ITEMS_PER_REPO)},
-                headers={
-                    "Authorization": f"Bearer {github_token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                continue
-            items = resp.json() if resp.content else []
-            if not isinstance(items, list):
-                continue
-        except Exception:
-            continue
-
-        repo_issues, repo_prs, repo_security = _shared_summarize_repo_health_items(
-            items,
-            version_tokens=version_tokens,
-            text_mentions_version_tokens=_text_mentions_version_tokens,
-            github_item_is_security_related=_github_item_is_security_related,
-        )
-        repos_summary.append(
-            {
-                "repo": f"{owner}/{repo}",
-                "app_name": str(target.get("app_name") or ""),
-                "versions": versions,
-                "open_issues": repo_issues,
-                "open_prs": repo_prs,
-                "security_items": repo_security,
-            }
-        )
-
-    return _shared_build_repo_health_summary(
-        repos_summary,
-        scanned_repos=scanned_repos,
-        total_repos_considered=len(repo_targets),
-        last_synced_at=_now_iso(),
+        github_version_tokens=_shared_github_version_tokens,
+        text_mentions_version_tokens=_shared_text_mentions_version_tokens,
+        github_item_is_security_related=_shared_github_item_is_security_related,
+        github_api_headers=_github_api_headers,
+        now_iso=_now_iso,
     )
 
 
