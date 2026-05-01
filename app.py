@@ -203,6 +203,10 @@ from shared.ci_push import _normalize_ttl_days as _shared_normalize_ttl_days
 from shared.ci_push import _revoke_ci_push_api_key as _shared_revoke_ci_push_api_key
 from shared.ci_push import _rotate_ci_push_api_key as _shared_rotate_ci_push_api_key
 from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_realtime_enabled
+from shared.dashboard_api import _apply_query_limit as _shared_apply_query_limit
+from shared.dashboard_api import _build_chart_spec_options as _shared_build_chart_spec_options
+from shared.dashboard_api import _build_chart_spec_template_api_payload as _shared_build_chart_spec_template_api_payload
+from shared.dashboard_api import _rows_to_columns_and_data as _shared_rows_to_columns_and_data
 from shared.dashboards import _build_chart_record as _shared_build_chart_record
 from shared.dashboards import _build_chart_tombstones as _shared_build_chart_tombstones
 from shared.dashboards import _build_dashboard_record as _shared_build_dashboard_record
@@ -14656,6 +14660,36 @@ def _build_dashboard_templates(chart_templates: Mapping[str, Mapping[str, object
     return _shared_build_dashboard_templates(chart_templates, default_chart_spec=_default_chart_spec)
 
 
+def _apply_query_limit(query: str, *, default_limit: int) -> str:
+    return _shared_apply_query_limit(query, default_limit=default_limit)
+
+
+def _rows_to_columns_and_data(rows: list[Mapping[str, object]]) -> tuple[list[str], list[list[object]]]:
+    return _shared_rows_to_columns_and_data(rows)
+
+
+def _build_chart_spec_template_api_payload(
+    chart_templates: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, object]]:
+    return _shared_build_chart_spec_template_api_payload(chart_templates, default_chart_spec=_default_chart_spec)
+
+
+def _build_chart_spec_options(
+    source_view: str,
+    signal_source: str,
+    limit: int,
+    *,
+    distinct_values,
+) -> dict[str, object]:
+    return _shared_build_chart_spec_options(
+        source_view,
+        signal_source,
+        limit,
+        distinct_values=distinct_values,
+        sql_literal=_sql_literal,
+    )
+
+
 @app.route("/api/dashboards/list", methods=["GET"])
 @require_basic_auth
 async def api_dashboards_list():
@@ -15012,15 +15046,12 @@ async def execute_chart_query():
     err = _validate_chart_query(query)
     if err:
         return jsonify({"error": err}), 400
-    # Inject a row limit to prevent runaway queries
-    if not re.search(r"\bLIMIT\b", query, re.IGNORECASE):
-        query = query.rstrip(";") + " LIMIT 1000"
+    query = _apply_query_limit(query, default_limit=1000)
     db = get_db()
     try:
         result = db.execute(query)
         rows = result.fetchall()
-        columns = list(rows[0].keys()) if rows else []
-        data = [[row[col] for col in columns] for row in rows]
+        columns, data = _rows_to_columns_and_data(rows)
         return jsonify({"columns": columns, "rows": data})
     except Exception as exc:
         app.logger.exception("Chart query execution failed: %s", query)
@@ -15030,20 +15061,7 @@ async def execute_chart_query():
 @app.route("/api/dashboards/spec/templates", methods=["GET"])
 @require_basic_auth
 async def list_chart_spec_templates():
-    templates = [
-        {
-            "id": tid,
-            "name": t["name"],
-            "description": t["description"],
-            "query_shape": t.get("query_shape", ""),
-            "sample_sql": t.get("sample_sql", ""),
-            "default_spec": _default_chart_spec(tid),
-            "min_columns": t.get("min_columns", 0),
-            "max_columns": t.get("max_columns"),
-            "column_roles": t.get("column_roles", {}),
-        }
-        for tid, t in sorted(CHART_TEMPLATES.items())
-    ]
+    templates = _build_chart_spec_template_api_payload(CHART_TEMPLATES)
     return jsonify({"templates": templates})
 
 
@@ -15053,19 +15071,6 @@ async def chart_spec_options_api():
     source_view = str(request.args.get("source_view") or "v_derived_signals_anomaly").strip()
     signal_source = str(request.args.get("signal_source") or "").strip()
     limit = _coerce_positive_int(request.args.get("limit"), 100, 1, 500)
-
-    supported_sources = {
-        "v_derived_signals_anomaly",
-        "v_otel_metrics_anomaly",
-        "otel_metrics_gauge",
-        "otel_metrics_sum",
-        "otel_metrics_histogram",
-        "otel_logs",
-        "otel_traces",
-        "sobs_error_resolutions",
-    }
-    if source_view not in supported_sources:
-        return jsonify({"error": "Unsupported source for options"}), 400
 
     db = get_db()
 
@@ -15078,49 +15083,12 @@ async def chart_spec_options_api():
                 values.append(val)
         return values
 
-    services: list[str] = []
-    signals: list[str] = []
-    metrics: list[str] = []
+    try:
+        payload = _build_chart_spec_options(source_view, signal_source, limit, distinct_values=_distinct_values)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    if source_view == "v_derived_signals_anomaly":
-        services = _distinct_values(
-            "SELECT DISTINCT ServiceName AS v "
-            "FROM v_derived_signals_anomaly "
-            "WHERE time >= now() - INTERVAL 24 HOUR "
-            "ORDER BY v "
-            f"LIMIT {limit}"
-        )
-        signals = _distinct_values(
-            "SELECT DISTINCT SignalName AS v "
-            "FROM v_derived_signals_anomaly "
-            f"{'WHERE' if signal_source else 'WHERE'} time >= now() - INTERVAL 24 HOUR"
-            + (f" AND SignalSource = {_sql_literal(signal_source)}" if signal_source else "")
-            + " ORDER BY v "
-            f"LIMIT {limit}"
-        )
-    elif source_view in {"otel_logs", "otel_traces"}:
-        services = _distinct_values(
-            "SELECT DISTINCT ServiceName AS v " f"FROM {source_view} " "ORDER BY v " f"LIMIT {limit}"
-        )
-        signals = ["log_volume"] if source_view == "otel_logs" else ["trace_volume"]
-    elif source_view == "sobs_error_resolutions":
-        signals = ["resolved_error_volume"]
-    elif source_view in {"v_otel_metrics_anomaly", "otel_metrics_gauge", "otel_metrics_sum", "otel_metrics_histogram"}:
-        services = _distinct_values(
-            "SELECT DISTINCT ServiceName AS v " f"FROM {source_view} " "ORDER BY v " f"LIMIT {limit}"
-        )
-        metrics = _distinct_values(
-            "SELECT DISTINCT MetricName AS v " f"FROM {source_view} " "ORDER BY v " f"LIMIT {limit}"
-        )
-
-    return jsonify(
-        {
-            "source_view": source_view,
-            "services": services,
-            "signals": signals,
-            "metrics": metrics,
-        }
-    )
+    return jsonify(payload)
 
 
 @app.route("/api/dashboards/spec/compile", methods=["POST"])
@@ -15148,15 +15116,12 @@ async def dry_run_chart_spec_api():
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
 
-    run_query = query
-    if not re.search(r"\bLIMIT\b", run_query, re.IGNORECASE):
-        run_query = run_query.rstrip(";") + " LIMIT 20"
+    run_query = _apply_query_limit(query, default_limit=20)
     db = get_db()
     try:
         result = db.execute(run_query)
         rows = result.fetchall()
-        columns = list(rows[0].keys()) if rows else []
-        data = [[row[col] for col in columns] for row in rows]
+        columns, data = _rows_to_columns_and_data(rows)
         column_types = _infer_column_types(columns, data)
     except Exception as exc:
         app.logger.exception("Chart spec dry-run failed")
@@ -15194,9 +15159,7 @@ async def validate_chart_spec_api():
 
     db = get_db()
     try:
-        run_query = query
-        if not re.search(r"\bLIMIT\b", run_query, re.IGNORECASE):
-            run_query = run_query.rstrip(";") + " LIMIT 200"
+        run_query = _apply_query_limit(query, default_limit=200)
         result = db.execute(run_query)
         raw_rows = result.fetchall()
         columns = list(raw_rows[0].keys()) if raw_rows else []
@@ -15229,9 +15192,7 @@ async def render_chart_spec_api():
 
     db = get_db()
     try:
-        run_query = query
-        if not re.search(r"\bLIMIT\b", run_query, re.IGNORECASE):
-            run_query = run_query.rstrip(";") + " LIMIT 1000"
+        run_query = _apply_query_limit(query, default_limit=1000)
         result = db.execute(run_query)
         raw_rows = result.fetchall()
         columns = list(raw_rows[0].keys()) if raw_rows else []
@@ -15282,9 +15243,7 @@ async def render_chart():
     if template_id not in CHART_TEMPLATES:
         return jsonify({"error": f"Unknown template: {template_id}"}), 400
 
-    # Inject a row limit to prevent runaway queries
-    if not re.search(r"\bLIMIT\b", query, re.IGNORECASE):
-        query = query.rstrip(";") + " LIMIT 1000"
+    query = _apply_query_limit(query, default_limit=1000)
 
     db = get_db()
     try:

@@ -6,16 +6,17 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 
 ## Current Baseline
 
-- Overall line coverage is now `84%` from the latest sequential full-suite run.
+- Overall line coverage is now `85%` from the latest sequential full-suite run.
 - `app.py` remains the dominant risk and coverage bottleneck at `79%` line coverage.
 - Route blueprints are a foundation step, but they do not by themselves create the module seams needed for high-confidence unit coverage.
 
 ## Measured Current State
 
-- Fresh sequential coverage run from `coverage-latest.xml` measured overall line coverage at `84%` versus the prior `78.06%` checkpoint baseline.
+- Fresh sequential coverage run from `coverage-latest.xml` measured overall line coverage at `85%` versus the prior `78.06%` checkpoint baseline.
 - `app.py` now measures `79%` line coverage while the extracted business-logic modules continue to climb above the direct-test target.
 - `shared/ai_chart.py` now measures `97.52%` line coverage in the full-suite report, and its dedicated direct test run measured `98%` coverage for the extracted chart-spec parsing/repair/generation helpers.
 - `shared/chart_specs.py` now measures `96%` line coverage in its dedicated direct test run and `96%` in the latest full-suite report after extracting chart-query validation, SQL literal/coercion helpers, default/raw spec assembly, chart-spec normalization, builder SQL compilation, compiled-spec validation, template role-map resolution, boolean parsing, visual override helpers, column-type inference, public dashboard DB-error sanitization, deep placeholder substitution, binding extraction, drilldown timestamp normalization, drilldown metadata attachment, custom ECharts JSON parsing, custom binding resolution, custom drilldown payload assembly, series-point ordering, derived-signal row preparation, and generic chart-template rendering orchestration from `app.py`, including real missing-`sql.mode` and blank-error fallback bug fixes uncovered by the new direct tests.
+- `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report after extracting dashboard chart-query limit injection, raw-row column/data shaping, chart-spec template API payload assembly, and source-specific chart option-list branching from `app.py`.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run after extracting dashboard row serialization, chart row normalization, dashboard/chart row builders, dashboard template-list assembly, dashboard chart form parsing, and query-page add-to-dashboard payload normalization from `app.py`.
 - `shared/ai_runtime.py` now measures `99%` line coverage in its dedicated direct test run after extracting the shared LLM request assembly, streaming parsing, guard prompt/parsing logic, thinking/token/timeout resolution, and DLP endpoint helpers from `app.py`.
 - `shared/ai_sql.py` now measures `96.2%` line coverage after extracting the SQL planner/repair helpers in Milestone 3 phase 1.
@@ -39,7 +40,7 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run after extracting the managed CI push API-key TTL, hashing, status, validation, rotation, revocation, and realtime-flag helpers in Milestone 5.
 - `shared/onboarding.py` now measures `99%` line coverage in its dedicated direct test run after extracting dependency parsers, repository inspection helpers, onboarding issue-body builders, onboarding work-item persistence helpers, the shared onboarding issue-result orchestration helper, GitHub repo import/list lookup helpers, create-repo persistence helpers, inspect-repo flow helpers, and create-issues request/realtime helpers in Milestone 4.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run after extracting the background write-batch, worker-loop, worker-start, queue-depth, enqueue, and worker-shutdown helpers from `app.py`.
-- The latest sequential full-suite validation passed at `1568 passed, 4 skipped`.
+- The latest sequential full-suite validation passed at `1572 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -172,12 +173,14 @@ Measured result so far:
 - `shared/sql_where.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/tag_rules.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run.
+- `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
 - `app.py` now delegates AI helper action-token secret/encode/decode/issue helpers, generic client-action payload sanitization, generic UI action normalization, and chart-to-dashboard pivot suggestion logic to `shared/ai_actions.py` while preserving the app-level wrappers exercised by AI helper execution and normalization tests.
 - `app.py` now delegates log attribute-key loading, cache priming, cached-key reads, discovered-key persistence, and attribute-map extraction to `shared/log_attr_keys.py` while preserving the app-level cache globals and wrappers exercised by log field-hint and trace/resource attribute-key persistence tests.
 - `app.py` now delegates masking settings cache writes/reads, output-masking flag resolution, JSON payload masking, value/string masking, SQL-output masking checks, and the optional SQL-output JSON response helper to `shared/output_masking.py` while preserving the app-level cache state and wrappers exercised by masking preview and toggle regressions.
 - `app.py` now delegates chart-query validation, SQL literal/coercion helpers, default/raw chart-spec assembly, chart-spec normalization, builder SQL compilation, compiled-spec validation, template role-map resolution, boolean parsing, chart visual override handling, column-type inference, public dashboard DB-error sanitization, deep placeholder substitution, binding extraction, drilldown timestamp normalization, drilldown metadata attachment, custom ECharts JSON parsing, custom binding resolution, custom drilldown assembly, custom series-point ordering, derived-signal row preparation, and generic chart-template rendering orchestration to `shared/chart_specs.py` while preserving the app-level wrappers exercised by dashboard chart compile, validate, render, named-query, custom ECharts, derived-signal overlay, drilldown metadata, and non-SELECT rejection regressions.
+- `app.py` now delegates dashboard chart-query limit injection, raw row-to-table shaping, chart-spec template API payload assembly, and source-specific chart option-list branching to `shared/dashboard_api.py` while preserving the app-level wrappers exercised by dashboard query, chart render, chart-spec dry-run/validate/render, and chart option endpoint regressions.
 - `app.py` now delegates dashboard row serialization, chart row normalization, dashboard/chart row builders, dashboard template-list assembly, chart form parsing, and query-page add-to-dashboard payload normalization to `shared/dashboards.py` while preserving the app-level wrappers exercised by dashboard listing, chart add/edit/clone/delete, dashboard delete, and query-page save-to-dashboard regressions.
 - `app.py` now delegates secure-context detection, OTLP/RUM origin allowlist matching, ingest-path CORS gating, allowed-method selection, Vary-header deduplication, and shared security/CORS header application to `shared/otlp_security.py` while preserving the app-level helpers and after-request hook exercised by the OTLP CORS regression tests.
 - `app.py` now delegates raw-metric retention TTL application, deterministic raw-window registration, copied-table counting, overlapping-window listing, and the raw-window copy worker core to `shared/raw_metrics_window.py` while preserving the app-level wrappers and scheduler loop exercised by raw-window, trace-detail, and incident regressions.
