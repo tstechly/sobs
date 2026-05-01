@@ -41,7 +41,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/onboarding.py` now measures `99%` line coverage in its dedicated direct test run after extracting dependency parsers, repository inspection helpers, onboarding issue-body builders, onboarding work-item persistence helpers, the shared onboarding issue-result orchestration helper, GitHub repo import/list lookup helpers, create-repo persistence helpers, inspect-repo flow helpers, and create-issues request/realtime helpers in Milestone 4.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run after extracting the background write-batch, worker-loop, worker-start, queue-depth, enqueue, and worker-shutdown helpers from `app.py`.
 - `shared/reports.py` now measures `100%` line coverage in its dedicated direct test run after extracting report-filter parsing, report row serialization/loading, report record construction, report export payload shaping, import payload validation, and import conflict-planning helpers from `app.py`.
-- The latest sequential full-suite validation passed at `1587 passed, 4 skipped`.
+- `shared/metrics_anomaly.py` now measures `100%` line coverage in its dedicated direct test run after extracting signal/source label metadata, derived-signal dimension loading, anomaly-hours clamping, metrics anomaly API SQL assembly, anomaly API row sanitization, anomaly detail SQL assembly, and anomaly detail row serialization from `app.py`.
+- The latest sequential full-suite validation passed at `1593 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -175,6 +176,7 @@ Measured result so far:
 - `shared/tag_rules.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run.
 - `shared/reports.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/metrics_anomaly.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -198,6 +200,7 @@ Measured result so far:
 - `app.py` now delegates stable record-id helpers, tag-rule condition parsing, tag-rule loading with legacy fallback semantics, single-condition matching, composite tag-rule matching, and attribute-key suggestion ranking to `shared/tag_rules.py` while preserving the app-level helpers used by tag settings, ingest auto-tagging, and existing tests.
 - `app.py` now delegates the write-batch runner, worker loop, worker startup, enqueue, queue-depth, and worker-shutdown helpers to `shared/write_queue.py` while preserving app-level queue APIs for route tests.
 - `app.py` now delegates report-filter parsing, report row serialization/loading, report record construction, report export payload shaping, import payload validation, and import conflict planning to `shared/reports.py` while preserving the app-level wrappers and report create/delete/export/import behaviour exercised by the existing route tests.
+- `app.py` now delegates signal/source label metadata, derived-signal dimension loading, anomaly-hours parsing, metrics anomaly API SQL assembly, anomaly API row sanitization, anomaly detail SQL assembly, and anomaly detail row serialization to `shared/metrics_anomaly.py` while preserving the existing app-level wrappers exercised by anomaly API, anomaly detail page, and signal label/source label tests.
 
 Why these slices were taken early:
 

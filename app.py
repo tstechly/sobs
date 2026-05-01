@@ -252,6 +252,22 @@ from shared.log_attr_keys import _get_cached_attr_keys as _shared_get_cached_att
 from shared.log_attr_keys import _load_log_attr_keys_from_db as _shared_load_log_attr_keys_from_db
 from shared.log_attr_keys import _prime_log_attr_key_cache as _shared_prime_log_attr_key_cache
 from shared.log_attr_keys import _remember_attr_keys as _shared_remember_attr_keys
+from shared.metrics_anomaly import DERIVED_SIGNAL_NAMES as _SHARED_DERIVED_SIGNAL_NAMES
+from shared.metrics_anomaly import DERIVED_SIGNAL_SOURCES as _SHARED_DERIVED_SIGNAL_SOURCES
+from shared.metrics_anomaly import METRICS_ANOMALY_DEFAULT_COLUMNS as _SHARED_METRICS_ANOMALY_DEFAULT_COLUMNS
+from shared.metrics_anomaly import SIGNAL_LABELS as _SHARED_SIGNAL_LABELS
+from shared.metrics_anomaly import SOURCE_LABELS as _SHARED_SOURCE_LABELS
+from shared.metrics_anomaly import build_metrics_anomaly_api_query as _shared_build_metrics_anomaly_api_query
+from shared.metrics_anomaly import build_metrics_anomaly_detail_query as _shared_build_metrics_anomaly_detail_query
+from shared.metrics_anomaly import list_derived_signal_dimensions as _shared_list_derived_signal_dimensions
+from shared.metrics_anomaly import parse_metrics_anomaly_hours as _shared_parse_metrics_anomaly_hours
+from shared.metrics_anomaly import serialize_metrics_anomaly_api_rows as _shared_serialize_metrics_anomaly_api_rows
+from shared.metrics_anomaly import (
+    serialize_metrics_anomaly_detail_rows as _shared_serialize_metrics_anomaly_detail_rows,
+)
+from shared.metrics_anomaly import signal_description as _shared_signal_description
+from shared.metrics_anomaly import signal_label as _shared_signal_label
+from shared.metrics_anomaly import source_label as _shared_source_label
 from shared.notifications import _load_notification_channels as _shared_load_notification_channels
 from shared.notifications import _load_notification_log as _shared_load_notification_log
 from shared.notifications import _load_notification_rules as _shared_load_notification_rules
@@ -8260,38 +8276,7 @@ def _validate_user_sql_where(sql_where: str) -> None:
 
 
 def _list_derived_signal_dimensions(db: ChDbConnection) -> tuple[list[str], list[str], list[str]]:
-    # ServiceName: query raw tables with LowCardinality indexes — avoids a full
-    # 12-way UNION ALL scan through the derived-signals view.
-    services = [
-        row[0]
-        for row in db.execute(
-            "SELECT DISTINCT ServiceName FROM otel_logs WHERE ServiceName != ''"
-            " UNION DISTINCT SELECT DISTINCT ServiceName FROM otel_traces WHERE ServiceName != ''"
-            " UNION DISTINCT SELECT DISTINCT ServiceName FROM hyperdx_sessions WHERE ServiceName != ''"
-            " ORDER BY ServiceName"
-        ).fetchall()
-    ]
-    # SignalName / SignalSource are a static enumeration determined by the view
-    # definition — no DB query needed.
-    signals = sorted(
-        [
-            "log_volume",
-            "error_volume",
-            "error_ratio",
-            "trace_volume",
-            "trace_error_ratio",
-            "latency_p95_ms",
-            "exception_volume",
-            "LCP",
-            "FID",
-            "CLS",
-            "INP",
-            "TTFB",
-            "FCP",
-        ]
-    )
-    sources = ["errors", "logs", "rum_vitals", "traces"]
-    return services, signals, sources
+    return _shared_list_derived_signal_dimensions(db)
 
 
 _AUTO_RULE_GT_HINTS = (
@@ -9822,100 +9807,55 @@ def _annotate_rows_with_rules(
 
 # Mapping of (source, signal_name) → {label, description}.
 # Used by templates and API responses to show readable names alongside raw IDs.
-_SIGNAL_LABELS: dict[tuple[str, str], dict[str, str]] = {
-    # Logs-derived signals
-    ("logs", "log_volume"): {
-        "label": "Log Volume",
-        "description": "Log lines ingested per minute",
-    },
-    ("logs", "error_volume"): {
-        "label": "Error Volume",
-        "description": "Error-level log lines per minute",
-    },
-    ("logs", "error_ratio"): {
-        "label": "Error Ratio",
-        "description": "Fraction of log lines that are errors",
-    },
-    # Traces-derived signals
-    ("traces", "trace_volume"): {
-        "label": "Trace Volume",
-        "description": "Completed spans per minute",
-    },
-    ("traces", "trace_error_ratio"): {
-        "label": "Trace Error Ratio",
-        "description": "Fraction of spans with an error status",
-    },
-    ("traces", "latency_p95_ms"): {
-        "label": "Latency p95",
-        "description": "95th-percentile span duration (ms)",
-    },
-    # Errors-derived signals
-    ("errors", "exception_volume"): {
-        "label": "Exception Volume",
-        "description": "Exception events per minute",
-    },
-    # RUM Web Vitals
-    ("rum_vitals", "LCP"): {
-        "label": "Largest Contentful Paint",
-        "description": "Core Web Vital: LCP (ms) – measures loading performance",
-    },
-    ("rum_vitals", "INP"): {
-        "label": "Interaction to Next Paint",
-        "description": "Core Web Vital: INP (ms) – measures interactivity",
-    },
-    ("rum_vitals", "CLS"): {
-        "label": "Cumulative Layout Shift",
-        "description": "Core Web Vital: CLS (unitless) – measures visual stability",
-    },
-    ("rum_vitals", "TTFB"): {
-        "label": "Time to First Byte",
-        "description": "Core Web Vital: TTFB (ms) – measures server response time",
-    },
-    ("rum_vitals", "FCP"): {
-        "label": "First Contentful Paint",
-        "description": "Core Web Vital: FCP (ms) – measures perceived load speed",
-    },
-    ("rum_vitals", "FID"): {
-        "label": "First Input Delay",
-        "description": "Core Web Vital: FID (ms) – measures input responsiveness",
-    },
-}
-
-# Human-friendly labels for signal sources.
-_SOURCE_LABELS: dict[str, str] = {
-    "logs": "Logs",
-    "traces": "Traces",
-    "errors": "Errors",
-    "rum_vitals": "RUM Vitals",
-    "metrics": "Metrics",
-}
+_SIGNAL_LABELS = _SHARED_SIGNAL_LABELS
+_SOURCE_LABELS = _SHARED_SOURCE_LABELS
+_DERIVED_SIGNAL_NAMES = _SHARED_DERIVED_SIGNAL_NAMES
+_DERIVED_SIGNAL_SOURCES = _SHARED_DERIVED_SIGNAL_SOURCES
+_METRICS_ANOMALY_DEFAULT_COLUMNS = _SHARED_METRICS_ANOMALY_DEFAULT_COLUMNS
 
 
 def signal_label(source: str, signal: str) -> str:
-    """Return a human-friendly label for a (source, signal) pair.
-
-    Falls back to a title-cased version of *signal* when the pair is not
-    registered.
-    """
-    entry = _SIGNAL_LABELS.get((source, signal))
-    if entry:
-        return entry["label"]
-    # Capitalise underscored names as a best-effort fallback.
-    return signal.replace("_", " ").title()
+    return _shared_signal_label(source, signal)
 
 
 def signal_description(source: str, signal: str) -> str:
-    """Return a short description for a (source, signal) pair, or empty string."""
-    entry = _SIGNAL_LABELS.get((source, signal))
-    return entry["description"] if entry else ""
+    return _shared_signal_description(source, signal)
 
 
 def source_label(source: str) -> str:
-    """Return a human-friendly label for a signal source.
+    return _shared_source_label(source)
 
-    Falls back to the raw *source* identifier when not registered.
-    """
-    return _SOURCE_LABELS.get(source, source.replace("_", " ").title())
+
+def _parse_metrics_anomaly_hours(raw_hours: Any, *, default: int = 24) -> int:
+    return _shared_parse_metrics_anomaly_hours(raw_hours, default=default)
+
+
+def _build_metrics_anomaly_api_query(
+    service: str,
+    metric: str,
+    hours: int,
+    attr_fp: str = "",
+) -> tuple[str, list[object]]:
+    return _shared_build_metrics_anomaly_api_query(service, metric, hours, attr_fp)
+
+
+def _serialize_metrics_anomaly_api_rows(rows: list[Any]) -> tuple[list[str], list[list[object | None]]]:
+    return _shared_serialize_metrics_anomaly_api_rows(rows)
+
+
+def _build_metrics_anomaly_detail_query(use_otel_metrics_view: bool, where_clause: str) -> str:
+    return _shared_build_metrics_anomaly_detail_query(use_otel_metrics_view, where_clause)
+
+
+def _serialize_metrics_anomaly_detail_rows(
+    fetched: list[Any],
+    *,
+    use_otel_metrics_view: bool,
+) -> list[dict[str, object]]:
+    return _shared_serialize_metrics_anomaly_detail_rows(
+        fetched,
+        use_otel_metrics_view=use_otel_metrics_view,
+    )
 
 
 # Expose label helpers as Jinja2 globals so every template can call them
@@ -10528,10 +10468,7 @@ async def view_metrics_anomaly():
     point_state = request.args.get("_anomaly_state", "").strip()
     point_score = request.args.get("_anomaly_score", "").strip()
 
-    try:
-        hours = max(1, min(168, int(request.args.get("hours") or 24)))
-    except (TypeError, ValueError):
-        hours = 24
+    hours = _parse_metrics_anomaly_hours(request.args.get("hours"))
 
     where_parts: list[str] = []
     params: list[str] = []
@@ -10575,70 +10512,11 @@ async def view_metrics_anomaly():
     use_otel_metrics_view = bool(metric) and not signal and not source
     if not error_msg:
         try:
-            # Keep existing metric drilldown behavior and support derived signals.
-            result = db.execute(
-                (
-                    (
-                        "SELECT"
-                        "  time,"
-                        "  ServiceName,"
-                        "  MetricName AS Name,"
-                        "  MetricKind AS Kind,"
-                        "  AttrFingerprint,"
-                        "  value,"
-                        "  SampleCount,"
-                        "  baseline_mean,"
-                        "  baseline_stddev,"
-                        "  baseline_lower,"
-                        "  baseline_upper,"
-                        "  anomaly_score,"
-                        "  anomaly_state"
-                        " FROM v_otel_metrics_anomaly"
-                    )
-                    if use_otel_metrics_view
-                    else (
-                        "SELECT"
-                        "  time,"
-                        "  ServiceName,"
-                        "  SignalName AS Name,"
-                        "  SignalSource AS Kind,"
-                        "  AttrFingerprint,"
-                        "  value,"
-                        "  SampleCount,"
-                        "  baseline_mean,"
-                        "  baseline_stddev,"
-                        "  baseline_lower,"
-                        "  baseline_upper,"
-                        "  anomaly_score,"
-                        "  anomaly_state"
-                        " FROM v_derived_signals_anomaly"
-                    )
-                    + f"{where_clause}"
-                    + " ORDER BY time DESC"
-                    + " LIMIT 500"
-                ),
-                params,
+            result = db.execute(_build_metrics_anomaly_detail_query(use_otel_metrics_view, where_clause), params)
+            rows = _serialize_metrics_anomaly_detail_rows(
+                result.fetchall(),
+                use_otel_metrics_view=use_otel_metrics_view,
             )
-            fetched = result.fetchall()
-            for row in fetched:
-                rows.append(
-                    {
-                        "time": str(row["time"]),
-                        "service": str(row["ServiceName"]),
-                        "metric": str(row["Name"]),
-                        "metric_kind": str(row["Kind"]),
-                        "related_target": ("" if use_otel_metrics_view else str(row["Kind"])),
-                        "attr_fp": str(row["AttrFingerprint"]),
-                        "value": row["value"],
-                        "sample_count": row["SampleCount"],
-                        "baseline_mean": row["baseline_mean"],
-                        "baseline_stddev": row["baseline_stddev"],
-                        "baseline_lower": row["baseline_lower"],
-                        "baseline_upper": row["baseline_upper"],
-                        "anomaly_score": row["anomaly_score"],
-                        "anomaly_state": str(row["anomaly_state"]),
-                    }
-                )
         except Exception as exc:
             app.logger.exception("metrics anomaly detail query failed")
             error_msg = _public_dashboard_query_error(exc)
@@ -15726,66 +15604,15 @@ async def metrics_anomaly():
     if not service or not metric:
         return jsonify({"error": "service and metric query parameters are required"}), 400
 
-    try:
-        hours = max(1, min(168, int(request.args.get("hours") or 24)))
-    except (TypeError, ValueError):
-        hours = 24
+    hours = _parse_metrics_anomaly_hours(request.args.get("hours"))
 
     attr_fp = (request.args.get("attr_fp") or "").strip()
 
     db = get_db()
     try:
-        fp_clause = " AND AttrFingerprint = ?" if attr_fp else ""
-        params: list = [service, metric, hours]
-        if attr_fp:
-            params.append(attr_fp)
-        result = db.execute(
-            "SELECT"
-            "  time,"
-            "  value,"
-            "  SampleCount AS sample_count,"
-            "  baseline_mean,"
-            "  baseline_stddev,"
-            "  baseline_lower,"
-            "  baseline_upper,"
-            "  anomaly_score,"
-            "  anomaly_state,"
-            "  MetricKind AS metric_kind,"
-            "  AttrFingerprint AS attr_fp"
-            " FROM v_otel_metrics_anomaly"
-            " WHERE ServiceName = ?"
-            "   AND MetricName = ?"
-            f"   AND time >= now() - INTERVAL ? HOUR"
-            f"{fp_clause}"
-            " ORDER BY time"
-            " LIMIT 1440",
-            params,
-        )
-        rows = result.fetchall()
-        columns = (
-            list(rows[0].keys())
-            if rows
-            else [
-                "time",
-                "value",
-                "sample_count",
-                "baseline_mean",
-                "baseline_stddev",
-                "baseline_lower",
-                "baseline_upper",
-                "anomaly_score",
-                "anomaly_state",
-                "metric_kind",
-                "attr_fp",
-            ]
-        )
-
-        def _safe(v):  # type: ignore
-            if isinstance(v, float) and (v != v):  # IEEE 754: NaN is the only value not equal to itself
-                return None
-            return v
-
-        data = [[_safe(row[col]) for col in columns] for row in rows]
+        query, params = _build_metrics_anomaly_api_query(service, metric, hours, attr_fp)
+        result = db.execute(query, params)
+        columns, data = _serialize_metrics_anomaly_api_rows(result.fetchall())
         return jsonify({"service": service, "metric": metric, "columns": columns, "rows": data})
     except Exception as exc:
         app.logger.exception("metrics_anomaly query failed: service=%s metric=%s", service, metric)
