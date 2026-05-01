@@ -310,7 +310,9 @@ from shared.reports import _build_reports_export_payload as _shared_build_report
 from shared.reports import _get_report as _shared_get_report
 from shared.reports import _get_reports as _shared_get_reports
 from shared.reports import _parse_report_filters as _shared_parse_report_filters
+from shared.reports import _plan_reports_import as _shared_plan_reports_import
 from shared.reports import _serialize_report_row as _shared_serialize_report_row
+from shared.reports import _validate_reports_import_payload as _shared_validate_reports_import_payload
 from shared.rum_assets import _asset_extension as _shared_asset_extension
 from shared.rum_assets import _rum_asset_signature as _shared_rum_asset_signature
 from shared.rum_assets import _rum_asset_signature_payload as _shared_rum_asset_signature_payload
@@ -16034,116 +16036,27 @@ async def api_import_reports():
             on_conflict = (body.get("on_conflict") or "rename").strip().lower()
 
     # ── Validate envelope ────────────────────────────────────────────────────
-    if not isinstance(body, dict) or not body.get("sobs_reports_export"):
-        return jsonify({"error": "Not a valid SOBS reports export file"}), 400
-    if str(body.get("version", "")) != _REPORTS_EXPORT_VERSION:
-        return jsonify({"error": f"Unsupported export version: {body.get('version')!r}"}), 400
-    if on_conflict not in ("rename", "replace", "skip"):
-        return jsonify({"error": "on_conflict must be one of: rename, replace, skip"}), 400
-
-    incoming = body.get("reports")
-    if not isinstance(incoming, list):
-        return jsonify({"error": "'reports' must be a list"}), 400
-    if len(incoming) > _REPORTS_IMPORT_MAX:
-        return jsonify({"error": f"Too many reports (max {_REPORTS_IMPORT_MAX})"}), 400
-
-    # ── Build index of existing reports by (page_type, lower(name)) ──────────
-    db = get_db()
-    existing = _get_reports(db)
-    existing_index: dict[tuple[str, str], dict] = {(r["page_type"], r["name"].lower()): r for r in existing}
-
-    n_imported = 0
-    n_skipped = 0
-    n_replaced = 0
-    n_errors = 0
-    version_base = int(time.time() * 1000)
-
-    for idx, item in enumerate(incoming):
-        if not isinstance(item, dict):
-            n_errors += 1
-            continue
-        name = (item.get("name") or "").strip()
-        description = (item.get("description") or "").strip()
-        page_type = (item.get("page_type") or "").strip()
-        filters = item.get("filters") or {}
-
-        if not name:
-            n_errors += 1
-            continue
-        if page_type not in _REPORT_PAGE_TYPES:
-            n_errors += 1
-            continue
-        if not isinstance(filters, dict):
-            n_errors += 1
-            continue
-
-        conflict_key = (page_type, name.lower())
-        conflict = existing_index.get(conflict_key)
-
-        if conflict:
-            if on_conflict == "skip":
-                n_skipped += 1
-                continue
-            elif on_conflict == "replace":
-                # Soft-delete the existing report
-                _insert_rows_json_each_row(
-                    db,
-                    "sobs_reports",
-                    [
-                        {
-                            "Id": conflict["id"],
-                            "Name": conflict["name"],
-                            "Description": conflict["description"],
-                            "PageType": conflict["page_type"],
-                            "FiltersJson": json.dumps(conflict["filters"], ensure_ascii=False),
-                            "IsDeleted": 1,
-                            "Version": version_base + idx * 2,
-                        }
-                    ],
-                )
-                n_replaced += 1
-                # Remove from index so we don't double-delete
-                del existing_index[conflict_key]
-            else:
-                # rename – find a unique name
-                candidate = f"{name} (imported)"
-                suffix = 2
-                while (page_type, candidate.lower()) in existing_index:
-                    candidate = f"{name} (imported {suffix})"
-                    suffix += 1
-                name = candidate
-
-        new_id = str(uuid.uuid4())
-        _insert_rows_json_each_row(
-            db,
-            "sobs_reports",
-            [
-                {
-                    "Id": new_id,
-                    "Name": name,
-                    "Description": description,
-                    "PageType": page_type,
-                    "FiltersJson": json.dumps(filters, ensure_ascii=False),
-                    "IsDeleted": 0,
-                    "Version": version_base + idx * 2 + 1,
-                }
-            ],
-        )
-        # Track freshly-imported name to avoid collisions within the same batch
-        existing_index[(page_type, name.lower())] = {"id": new_id, "name": name, "page_type": page_type}
-        if conflict and on_conflict == "replace":
-            # Replacement inserts are counted as replaced, not imported.
-            continue
-        n_imported += 1
-
-    return jsonify(
-        {
-            "imported": n_imported,
-            "skipped": n_skipped,
-            "replaced": n_replaced,
-            "errors": n_errors,
-        }
+    incoming, validation_error = _shared_validate_reports_import_payload(
+        body,
+        on_conflict,
+        expected_version=_REPORTS_EXPORT_VERSION,
+        max_reports=_REPORTS_IMPORT_MAX,
     )
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
+
+    db = get_db()
+    rows_to_insert, summary = _shared_plan_reports_import(
+        incoming,
+        _get_reports(db),
+        on_conflict=on_conflict,
+        version_base=int(time.time() * 1000),
+        uuid_factory=uuid.uuid4,
+    )
+    if rows_to_insert:
+        _insert_rows_json_each_row(db, "sobs_reports", rows_to_insert)
+
+    return jsonify(summary)
 
 
 # ---------------------------------------------------------------------------

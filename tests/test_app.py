@@ -15901,6 +15901,41 @@ class TestReports:
         assert replace_reports[0]["filters"].get("device") == "desktop"
         assert replace_reports[0]["id"] != old_id
 
+    async def test_api_import_reports_conflict_replace_with_duplicate_names_in_same_batch(self, client):
+        """on_conflict=replace handles repeated imported names in one batch without failing."""
+        await client.post(
+            "/api/reports",
+            json={"name": "Batch Replace", "page_type": "rum", "filters": {"device": "mobile"}},
+        )
+        export_payload = self._build_reports_export_payload(
+            [
+                {
+                    "name": "Batch Replace",
+                    "description": "first",
+                    "page_type": "rum",
+                    "filters": {"device": "desktop"},
+                },
+                {
+                    "name": "Batch Replace",
+                    "description": "second",
+                    "page_type": "rum",
+                    "filters": {"device": "tablet"},
+                },
+            ],
+            on_conflict="replace",
+        )
+        r = await client.post("/api/reports/import", json=export_payload)
+        assert r.status_code == 200
+        result = json.loads(await r.get_data())
+        assert result == {"imported": 0, "skipped": 0, "replaced": 2, "errors": 0}
+
+        listed = await client.get("/api/reports?page_type=rum")
+        reports = json.loads(await listed.get_data())
+        replace_reports = [rep for rep in reports if rep["name"] == "Batch Replace"]
+        assert len(replace_reports) == 1
+        assert replace_reports[0]["description"] == "second"
+        assert replace_reports[0]["filters"].get("device") == "tablet"
+
     async def test_api_import_reports_rejects_malformed_json(self, client):
         """Invalid envelope is rejected with 400."""
         r = await client.post(

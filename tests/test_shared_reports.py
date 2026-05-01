@@ -9,7 +9,9 @@ from shared.reports import (
     _get_report,
     _get_reports,
     _parse_report_filters,
+    _plan_reports_import,
     _serialize_report_row,
+    _validate_reports_import_payload,
 )
 
 
@@ -156,3 +158,190 @@ def test_build_report_record_and_export_payload_normalize_output():
             }
         ],
     }
+
+
+def test_validate_reports_import_payload_rejects_invalid_envelopes_and_accepts_valid_input():
+    incoming, error = _validate_reports_import_payload({}, "rename", max_reports=5)
+    assert incoming is None
+    assert error == "Not a valid SOBS reports export file"
+
+    incoming, error = _validate_reports_import_payload(
+        {"sobs_reports_export": True, "version": "99", "reports": []},
+        "rename",
+        max_reports=5,
+    )
+    assert incoming is None
+    assert error == "Unsupported export version: '99'"
+
+    incoming, error = _validate_reports_import_payload(
+        {"sobs_reports_export": True, "version": REPORTS_EXPORT_VERSION, "reports": []},
+        "other",
+        max_reports=5,
+    )
+    assert incoming is None
+    assert error == "on_conflict must be one of: rename, replace, skip"
+
+    incoming, error = _validate_reports_import_payload(
+        {"sobs_reports_export": True, "version": REPORTS_EXPORT_VERSION, "reports": {}},
+        "rename",
+        max_reports=5,
+    )
+    assert incoming is None
+    assert error == "'reports' must be a list"
+
+    incoming, error = _validate_reports_import_payload(
+        {"sobs_reports_export": True, "version": REPORTS_EXPORT_VERSION, "reports": [{}, {}]},
+        "rename",
+        max_reports=1,
+    )
+    assert incoming is None
+    assert error == "Too many reports (max 1)"
+
+    body = {"sobs_reports_export": True, "version": REPORTS_EXPORT_VERSION, "reports": [{}]}
+    incoming, error = _validate_reports_import_payload(body, "rename", max_reports=5)
+    assert incoming == [{}]
+    assert error is None
+
+
+def test_plan_reports_import_handles_rename_invalid_and_same_batch_replace_conflicts():
+    rows, summary = _plan_reports_import(
+        [
+            {"name": "Conflict", "description": "new", "page_type": "logs", "filters": {"level": "WARN"}},
+            {"name": "Conflict", "description": "bad", "page_type": "bad", "filters": {}},
+        ],
+        [
+            {
+                "id": "existing-1",
+                "name": "Conflict",
+                "description": "old",
+                "page_type": "logs",
+                "filters": {"level": "ERROR"},
+            }
+        ],
+        on_conflict="rename",
+        version_base=100,
+        uuid_factory=lambda: "new-1",
+    )
+    assert summary == {"imported": 1, "skipped": 0, "replaced": 0, "errors": 1}
+    assert rows == [
+        {
+            "Id": "new-1",
+            "Name": "Conflict (imported)",
+            "Description": "new",
+            "PageType": "logs",
+            "FiltersJson": '{"level": "WARN"}',
+            "IsDeleted": 0,
+            "Version": 101,
+        }
+    ]
+
+    rows, summary = _plan_reports_import(
+        [{"name": "Conflict", "description": "skip", "page_type": "logs", "filters": {"level": "INFO"}}],
+        [{"id": "existing-skip", "name": "Conflict", "description": "old", "page_type": "logs", "filters": {}}],
+        on_conflict="skip",
+        version_base=125,
+        uuid_factory=lambda: "unused",
+    )
+    assert summary == {"imported": 0, "skipped": 1, "replaced": 0, "errors": 0}
+    assert rows == []
+
+    rows, summary = _plan_reports_import(
+        [
+            123,
+            {"name": "Conflict", "description": "next", "page_type": "logs", "filters": {"level": "INFO"}},
+        ],
+        [
+            {"id": "existing-a", "name": "Conflict", "description": "old", "page_type": "logs", "filters": {}},
+            {
+                "id": "existing-b",
+                "name": "Conflict (imported)",
+                "description": "older",
+                "page_type": "logs",
+                "filters": {},
+            },
+        ],
+        on_conflict="rename",
+        version_base=150,
+        uuid_factory=lambda: "new-rename-2",
+    )
+    assert summary == {"imported": 1, "skipped": 0, "replaced": 0, "errors": 1}
+    assert rows == [
+        {
+            "Id": "new-rename-2",
+            "Name": "Conflict (imported 2)",
+            "Description": "next",
+            "PageType": "logs",
+            "FiltersJson": '{"level": "INFO"}',
+            "IsDeleted": 0,
+            "Version": 153,
+        }
+    ]
+
+    uuid_values = iter(["new-2", "new-3"])
+    rows, summary = _plan_reports_import(
+        [
+            {"name": "Replace", "description": "first", "page_type": "rum", "filters": {"device": "desktop"}},
+            {"name": "Replace", "description": "second", "page_type": "rum", "filters": {"device": "tablet"}},
+        ],
+        [
+            {
+                "id": "existing-2",
+                "name": "Replace",
+                "description": "old",
+                "page_type": "rum",
+                "filters": {"device": "mobile"},
+            }
+        ],
+        on_conflict="replace",
+        version_base=200,
+        uuid_factory=lambda: next(uuid_values),
+    )
+    assert summary == {"imported": 0, "skipped": 0, "replaced": 2, "errors": 0}
+    assert rows == [
+        {
+            "Id": "existing-2",
+            "Name": "Replace",
+            "Description": "old",
+            "PageType": "rum",
+            "FiltersJson": '{"device": "mobile"}',
+            "IsDeleted": 1,
+            "Version": 200,
+        },
+        {
+            "Id": "new-2",
+            "Name": "Replace",
+            "Description": "first",
+            "PageType": "rum",
+            "FiltersJson": '{"device": "desktop"}',
+            "IsDeleted": 0,
+            "Version": 201,
+        },
+        {
+            "Id": "new-2",
+            "Name": "Replace",
+            "Description": "first",
+            "PageType": "rum",
+            "FiltersJson": '{"device": "desktop"}',
+            "IsDeleted": 1,
+            "Version": 202,
+        },
+        {
+            "Id": "new-3",
+            "Name": "Replace",
+            "Description": "second",
+            "PageType": "rum",
+            "FiltersJson": '{"device": "tablet"}',
+            "IsDeleted": 0,
+            "Version": 203,
+        },
+    ]
+
+    rows, summary = _plan_reports_import(
+        [{"name": "Replace Missing Filters", "description": "new", "page_type": "rum", "filters": {"ok": True}}],
+        [{"id": "existing-3", "name": "Replace Missing Filters", "description": "old", "page_type": "rum"}],
+        on_conflict="replace",
+        version_base=300,
+        uuid_factory=lambda: "new-4",
+    )
+    assert summary == {"imported": 0, "skipped": 0, "replaced": 1, "errors": 0}
+    assert rows[0]["FiltersJson"] == "{}"

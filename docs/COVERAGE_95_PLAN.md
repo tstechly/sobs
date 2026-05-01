@@ -40,8 +40,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/ci_push.py` now measures `100%` line coverage in its dedicated direct test run after extracting the managed CI push API-key TTL, hashing, status, validation, rotation, revocation, and realtime-flag helpers in Milestone 5.
 - `shared/onboarding.py` now measures `99%` line coverage in its dedicated direct test run after extracting dependency parsers, repository inspection helpers, onboarding issue-body builders, onboarding work-item persistence helpers, the shared onboarding issue-result orchestration helper, GitHub repo import/list lookup helpers, create-repo persistence helpers, inspect-repo flow helpers, and create-issues request/realtime helpers in Milestone 4.
 - `shared/write_queue.py` now measures `99%` line coverage in its dedicated direct test run after extracting the background write-batch, worker-loop, worker-start, queue-depth, enqueue, and worker-shutdown helpers from `app.py`.
-- `shared/reports.py` now measures `100%` line coverage in its dedicated direct test run after extracting report-filter parsing, report row serialization, report loading, report record construction, and report export payload shaping from `app.py`.
-- The latest sequential full-suite validation passed at `1584 passed, 4 skipped`.
+- `shared/reports.py` now measures `100%` line coverage in its dedicated direct test run after extracting report-filter parsing, report row serialization/loading, report record construction, report export payload shaping, import payload validation, and import conflict-planning helpers from `app.py`.
+- The latest sequential full-suite validation passed at `1587 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -197,7 +197,7 @@ Measured result so far:
 - `app.py` now delegates time-window WHERE fragment helpers, WHERE clause assembly, regex-expression clause assembly, SQL replacement outside quoted literals, AI SQL WHERE normalization, and central user SQL WHERE validation to `shared/sql_where.py` while preserving the app-level wrappers used by filter validation and query-route tests.
 - `app.py` now delegates stable record-id helpers, tag-rule condition parsing, tag-rule loading with legacy fallback semantics, single-condition matching, composite tag-rule matching, and attribute-key suggestion ranking to `shared/tag_rules.py` while preserving the app-level helpers used by tag settings, ingest auto-tagging, and existing tests.
 - `app.py` now delegates the write-batch runner, worker loop, worker startup, enqueue, queue-depth, and worker-shutdown helpers to `shared/write_queue.py` while preserving app-level queue APIs for route tests.
-- `app.py` now delegates report-filter parsing, report row serialization/loading, report record construction, and report export payload shaping to `shared/reports.py` while preserving the app-level wrappers and report create/delete/export behaviour exercised by the existing route tests.
+- `app.py` now delegates report-filter parsing, report row serialization/loading, report record construction, report export payload shaping, import payload validation, and import conflict planning to `shared/reports.py` while preserving the app-level wrappers and report create/delete/export/import behaviour exercised by the existing route tests.
 
 Why these slices were taken early:
 
