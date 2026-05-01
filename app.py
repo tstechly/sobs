@@ -4,7 +4,6 @@ A lightweight, single-user telemetry container supporting OpenTelemetry,
 RUM, Logs, Errors, Traces, and AI transparency.
 """
 
-import ast
 import asyncio
 import atexit
 import base64
@@ -415,6 +414,9 @@ from shared.tag_rules import _parse_tag_rule_conditions_json as _shared_parse_ta
 from shared.tag_rules import _record_id_for_log as _shared_record_id_for_log
 from shared.tag_rules import _record_id_for_span as _shared_record_id_for_span
 from shared.tag_rules import _tag_rule_attribute_key_suggestions as _shared_tag_rule_attribute_key_suggestions
+from shared.telemetry_attrs import _hex as _shared_hex
+from shared.telemetry_attrs import _map_to_dict as _shared_map_to_dict
+from shared.telemetry_attrs import _stringify_attrs as _shared_stringify_attrs
 from shared.write_queue import _WRITE_STOP as _SHARED_WRITE_STOP
 from shared.write_queue import _ensure_write_worker as _shared_ensure_write_worker
 from shared.write_queue import _queue_write as _shared_queue_write
@@ -5998,24 +6000,11 @@ def _build_rum_event_item(row: Any) -> dict[str, Any]:
 
 def _hex(b) -> str:
     """Convert bytes or hex string to hex string."""
-    if isinstance(b, (bytes, bytearray)):
-        return b.hex()
-    return str(b) if b else ""
+    return _shared_hex(b)
 
 
 def _stringify_attrs(values: dict | None) -> dict[str, str]:
-    """Convert arbitrary attribute values to a string map suitable for OTel Map columns."""
-    if not values:
-        return {}
-    out: dict[str, str] = {}
-    for key, value in values.items():
-        if value is None:
-            continue
-        if isinstance(value, (str, int, float, bool)):
-            out[str(key)] = str(value)
-        else:
-            out[str(key)] = json.dumps(value, ensure_ascii=False)
-    return out
+    return _shared_stringify_attrs(values)
 
 
 def _genai_tool_calls_to_text(tool_calls_value: Any) -> str:
@@ -6069,26 +6058,7 @@ def _build_ai_trace_turn_cards(spans: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _map_to_dict(value) -> dict:
-    """Best-effort conversion of ClickHouse Map values to Python dicts."""
-    if isinstance(value, dict):
-        return value
-    if not value:
-        return {}
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return {}
-        try:
-            parsed = json.loads(s)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            pass
-        try:
-            parsed = ast.literal_eval(s)
-            return parsed if isinstance(parsed, dict) else {}
-        except (ValueError, SyntaxError):
-            return {}
-    return {}
+    return _shared_map_to_dict(value)
 
 
 def _severity_number(level: str) -> int:

@@ -55,7 +55,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run after extracting repo-health persistence compaction/payload shaping and the GitHub repo-health scan orchestration from `app.py`.
 - `shared/rum_events.py` now measures `100%` line coverage in its dedicated direct test run after extracting RUM session-key derivation and RUM row-to-event-item shaping from `app.py`.
 - `shared/query_params.py` now measures `100%` line coverage in its dedicated direct test run after extracting request limit/offset/sort parsing and time-window query normalization from `app.py`.
-- The latest sequential full-suite validation passed at `1665 passed, 4 skipped`.
+- `shared/telemetry_attrs.py` now measures `100%` line coverage in its dedicated direct test run after extracting hex conversion, telemetry attribute stringification, and ClickHouse map-to-dict coercion from `app.py`.
+- The latest sequential full-suite validation passed at `1668 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -203,6 +204,7 @@ Measured result so far:
 - `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/rum_events.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/query_params.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/telemetry_attrs.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -240,6 +242,7 @@ Measured result so far:
 - `app.py` now delegates repo-health summary persistence compaction/payload shaping and the GitHub repo-health scan orchestration to `shared/repo_health_sync.py` while preserving the existing repo-health sync persistence, sync no-op-on-unchanged summary behavior, repo-health endpoint failure handling, and release-version repo-health filtering exercised by the app tests.
 - `app.py` now delegates RUM session-key derivation and RUM row-to-event-item shaping to `shared/rum_events.py` while preserving the existing RUM session list, incident RUM evidence, untraced incident links, and timezone-aware incident primary-event behavior exercised by the app tests.
 - `app.py` now delegates request limit/offset/sort parsing and time-window query normalization to `shared/query_params.py` while preserving the existing logs/errors/traces/RUM/AI pagination, sort fallback, and time-window filtering behavior exercised by the app tests.
+- `app.py` now delegates hex conversion, telemetry attribute stringification, and ClickHouse map-to-dict coercion to `shared/telemetry_attrs.py` while preserving the existing ingest browser-context persistence, grouped error trace-link normalization, trace-detail incident links, and RUM/browser-context behaviors exercised by the app tests.
 
 Why these slices were taken early:
 
