@@ -53,7 +53,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/rum_client_auth.py` now measures `100%` line coverage in its dedicated direct test run after extracting base64url helpers, origin normalization, request/same-origin checks, RUM client token signing and encode/decode, and RUM client-auth verification from `app.py`.
 - `shared/geo_lookup.py` now measures `100%` line coverage in its dedicated direct test run after extracting private-IP classification, geo dict shaping, and cached local geo lookup batching from `app.py`.
 - `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run after extracting repo-health persistence compaction/payload shaping and the GitHub repo-health scan orchestration from `app.py`.
-- The latest sequential full-suite validation passed at `1655 passed, 4 skipped`.
+- `shared/rum_events.py` now measures `100%` line coverage in its dedicated direct test run after extracting RUM session-key derivation and RUM row-to-event-item shaping from `app.py`.
+- The latest sequential full-suite validation passed at `1660 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -199,6 +200,7 @@ Measured result so far:
 - `shared/rum_client_auth.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/geo_lookup.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/repo_health_sync.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/rum_events.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -234,6 +236,7 @@ Measured result so far:
 - `app.py` now delegates base64url helpers, origin normalization, request/same-origin checks, RUM client token signing and encode/decode, and RUM client-auth verification to `shared/rum_client_auth.py` while preserving the existing RUM client-token issuance, origin-bound token validation, ingest auth, and CSRF same-origin behavior exercised by the app and ingest route tests.
 - `app.py` now delegates private-IP classification, geo dict shaping, and cached local geo lookup batching to `shared/geo_lookup.py` while preserving the existing web-traffic geo API, geo-disabled setting, local public-IP lookup, and private-IP handling behavior exercised by the app and direct geo tests.
 - `app.py` now delegates repo-health summary persistence compaction/payload shaping and the GitHub repo-health scan orchestration to `shared/repo_health_sync.py` while preserving the existing repo-health sync persistence, sync no-op-on-unchanged summary behavior, repo-health endpoint failure handling, and release-version repo-health filtering exercised by the app tests.
+- `app.py` now delegates RUM session-key derivation and RUM row-to-event-item shaping to `shared/rum_events.py` while preserving the existing RUM session list, incident RUM evidence, untraced incident links, and timezone-aware incident primary-event behavior exercised by the app tests.
 
 Why these slices were taken early:
 
