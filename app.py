@@ -173,6 +173,7 @@ from shared.app_settings import _save_masking_custom_keys as _shared_save_maskin
 from shared.app_settings import _save_masking_custom_patterns as _shared_save_masking_custom_patterns
 from shared.app_settings import _set_app_setting as _shared_set_app_setting
 from shared.chart_specs import _apply_chart_spec_visual_overrides as _shared_apply_chart_spec_visual_overrides
+from shared.chart_specs import _attach_drilldown_metadata as _shared_attach_drilldown_metadata
 from shared.chart_specs import _build_raw_chart_spec as _shared_build_raw_chart_spec
 from shared.chart_specs import _coerce_positive_int as _shared_coerce_positive_int
 from shared.chart_specs import _compile_builder_sql as _shared_compile_builder_sql
@@ -180,6 +181,7 @@ from shared.chart_specs import _compile_chart_spec as _shared_compile_chart_spec
 from shared.chart_specs import _deep_substitute as _shared_deep_substitute
 from shared.chart_specs import _default_chart_spec as _shared_default_chart_spec
 from shared.chart_specs import _extract_bindings as _shared_extract_bindings
+from shared.chart_specs import _format_drilldown_time as _shared_format_drilldown_time
 from shared.chart_specs import _infer_column_types as _shared_infer_column_types
 from shared.chart_specs import _normalize_chart_spec as _shared_normalize_chart_spec
 from shared.chart_specs import _parse_bool as _shared_parse_bool
@@ -14513,175 +14515,11 @@ def _extract_bindings(
 
 
 def _format_drilldown_time(value: object) -> str:
-    """Return a canonical ISO-8601 UTC timestamp string for drilldown URLs."""
-    if isinstance(value, datetime):
-        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        normalized = _normalize_ch_timestamp(raw)
-        try:
-            dt = datetime.fromisoformat(normalized)
-        except ValueError:
-            return raw
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _shared_format_drilldown_time(value, normalize_ch_timestamp=_normalize_ch_timestamp)
 
 
 def _attach_drilldown_metadata(template: dict, bindings: dict[str, object], option: dict) -> dict:
-    """Annotate rendered series data with canonical drilldown metadata."""
-    drilldown = template.get("drilldown")
-    if not isinstance(drilldown, dict):
-        return option
-
-    series = option.get("series")
-    if not isinstance(series, list):
-        return option
-
-    template_id = str(template.get("id", ""))
-    bucket_seconds = drilldown.get("bucket_seconds")
-
-    if template_id in {"time_series_percentiles", "dual_axis_anomaly", "anomaly_overlay", "derived_signal_overlay"}:
-        time_values = bindings.get("time")
-        if isinstance(time_values, list):
-            # For anomaly_overlay, also inject per-point anomaly state and score
-            is_anomaly_template = template_id in {"anomaly_overlay", "derived_signal_overlay"}
-            anomaly_states = bindings.get("anomaly_state") if is_anomaly_template else None
-            anomaly_scores = bindings.get("anomaly_score") if is_anomaly_template else None
-            rule_states = bindings.get("rule_state") if template_id == "derived_signal_overlay" else None
-            rule_names = bindings.get("rule_name") if template_id == "derived_signal_overlay" else None
-            rule_reasons = bindings.get("rule_reason") if template_id == "derived_signal_overlay" else None
-            effective_states = bindings.get("effective_state") if template_id == "derived_signal_overlay" else None
-            services = bindings.get("service") if template_id == "derived_signal_overlay" else None
-            sources = bindings.get("source") if template_id == "derived_signal_overlay" else None
-            signals = bindings.get("signal") if template_id == "derived_signal_overlay" else None
-            attr_fps = bindings.get("attr_fp") if template_id == "derived_signal_overlay" else None
-            for series_entry in series:
-                if not isinstance(series_entry, dict):
-                    continue
-                data = series_entry.get("data")
-                if not isinstance(data, list) or len(data) != len(time_values):
-                    continue
-                # For anomaly_overlay, inject state/score into Value series only
-                is_value_series = is_anomaly_template and series_entry.get("name") == "Value"
-                series_entry["data"] = [
-                    {
-                        "value": value,
-                        "drilldown": {
-                            "from_ts": _format_drilldown_time(time_values[idx]),
-                            "window_s": bucket_seconds,
-                            **(  # Inject anomaly metadata for Value series
-                                {
-                                    "_anomaly_state": (
-                                        (
-                                            anomaly_states[idx]  # type: ignore[index]
-                                            if isinstance(anomaly_states, list) and idx < len(anomaly_states)
-                                            else "normal"
-                                        )
-                                    ),
-                                    "_anomaly_score": (
-                                        (
-                                            anomaly_scores[idx]  # type: ignore[index]
-                                            if isinstance(anomaly_scores, list) and idx < len(anomaly_scores)
-                                            else 0
-                                        )
-                                    ),
-                                    **(
-                                        {
-                                            "_rule_state": (
-                                                rule_states[idx]  # type: ignore[index]
-                                                if isinstance(rule_states, list) and idx < len(rule_states)
-                                                else "normal"
-                                            ),
-                                            "_rule_name": (
-                                                rule_names[idx]  # type: ignore[index]
-                                                if isinstance(rule_names, list) and idx < len(rule_names)
-                                                else ""
-                                            ),
-                                            "_rule_reason": (
-                                                rule_reasons[idx]  # type: ignore[index]
-                                                if isinstance(rule_reasons, list) and idx < len(rule_reasons)
-                                                else ""
-                                            ),
-                                            "_effective_state": (
-                                                effective_states[idx]  # type: ignore[index]
-                                                if isinstance(effective_states, list) and idx < len(effective_states)
-                                                else "normal"
-                                            ),
-                                            "service": (
-                                                services[idx]  # type: ignore[index]
-                                                if isinstance(services, list) and idx < len(services)
-                                                else ""
-                                            ),
-                                            "source": (
-                                                sources[idx]  # type: ignore[index]
-                                                if isinstance(sources, list) and idx < len(sources)
-                                                else ""
-                                            ),
-                                            "signal": (
-                                                signals[idx]  # type: ignore[index]
-                                                if isinstance(signals, list) and idx < len(signals)
-                                                else ""
-                                            ),
-                                            "attr_fp": (
-                                                attr_fps[idx]  # type: ignore[index]
-                                                if isinstance(attr_fps, list) and idx < len(attr_fps)
-                                                else ""
-                                            ),
-                                        }
-                                        if template_id == "derived_signal_overlay"
-                                        else {}
-                                    ),
-                                }
-                                if is_value_series
-                                else {}
-                            ),
-                        },
-                    }
-                    for idx, value in enumerate(data)
-                ]
-        return option
-
-    if template_id == "heatmap" and series:
-        x_unique = bindings.get("x_unique_values")
-        y_unique = bindings.get("y_unique_values")
-        first_series = series[0]
-        if isinstance(first_series, dict) and isinstance(x_unique, list) and isinstance(y_unique, list):
-            data = first_series.get("data")
-            if isinstance(data, list):
-                drilldown_data = []
-                for item in data:
-                    if not (isinstance(item, list) and len(item) >= 3):
-                        drilldown_data.append(item)
-                        continue
-                    x_idx = int(item[0])
-                    y_idx = int(item[1])
-                    from_value = y_unique[y_idx] if 0 <= y_idx < len(y_unique) else ""
-                    service_value = x_unique[x_idx] if 0 <= x_idx < len(x_unique) else ""
-                    drilldown_data.append(
-                        {
-                            "value": item,
-                            "drilldown": {
-                                "from_ts": _format_drilldown_time(from_value),
-                                "window_s": bucket_seconds,
-                                "service": service_value,
-                            },
-                        }
-                    )
-                first_series["data"] = drilldown_data
-        return option
-
-    return option
+    return _shared_attach_drilldown_metadata(template, bindings, option, format_drilldown_time=_format_drilldown_time)
 
 
 def _prepare_template_rows(

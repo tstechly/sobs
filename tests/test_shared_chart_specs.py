@@ -1,10 +1,12 @@
 import json
 import re
+from datetime import datetime, timezone
 
 import pytest
 
 from shared.chart_specs import (
     _apply_chart_spec_visual_overrides,
+    _attach_drilldown_metadata,
     _build_raw_chart_spec,
     _coerce_positive_int,
     _compile_builder_sql,
@@ -12,6 +14,7 @@ from shared.chart_specs import (
     _deep_substitute,
     _default_chart_spec,
     _extract_bindings,
+    _format_drilldown_time,
     _infer_column_types,
     _normalize_chart_spec,
     _parse_bool,
@@ -441,3 +444,66 @@ def test_extract_bindings_handles_derived_signal_overlay_delta_and_ratio_modes()
     assert ratio_bindings["y_axis_name"] == "Value"
     assert ratio_bindings["value_axis_min"] == 0
     assert ratio_bindings["value_axis_max"] == 1
+
+
+def test_format_drilldown_time_handles_datetime_iso_clickhouse_and_invalid_inputs():
+    assert (
+        _format_drilldown_time(
+            datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+            normalize_ch_timestamp=lambda value: value,
+        )
+        == "2024-01-01T12:00:00Z"
+    )
+    assert (
+        _format_drilldown_time("2024-01-01T12:00:00Z", normalize_ch_timestamp=lambda value: value)
+        == "2024-01-01T12:00:00Z"
+    )
+    assert (
+        _format_drilldown_time(
+            "2024-01-01 12:00:00",
+            normalize_ch_timestamp=lambda value: value.replace(" ", "T"),
+        )
+        == "2024-01-01T12:00:00Z"
+    )
+    assert _format_drilldown_time("not-a-timestamp", normalize_ch_timestamp=lambda value: value) == "not-a-timestamp"
+    assert _format_drilldown_time("", normalize_ch_timestamp=lambda value: value) == ""
+
+
+def test_attach_drilldown_metadata_handles_time_series_and_heatmap_templates():
+    option = {"series": [{"name": "Value", "data": [10, 20]}, {"name": "Baseline", "data": [8, 9]}]}
+    enriched = _attach_drilldown_metadata(
+        {"id": "derived_signal_overlay", "drilldown": {"bucket_seconds": 60}},
+        {
+            "time": ["2024-01-01T00:00:00Z", "2024-01-01T00:01:00Z"],
+            "anomaly_state": ["warning", "outlier"],
+            "anomaly_score": [1.2, 3.4],
+            "rule_state": ["warning", "outlier"],
+            "rule_name": ["rule-a", "rule-b"],
+            "rule_reason": ["high", "higher"],
+            "effective_state": ["warning", "outlier"],
+            "service": ["checkout", "checkout"],
+            "source": ["traces", "traces"],
+            "signal": ["trace_volume", "trace_volume"],
+            "attr_fp": ["", ""],
+        },
+        option,
+        format_drilldown_time=lambda value: f"fmt:{value}",
+    )
+    assert enriched["series"][0]["data"][0]["drilldown"]["from_ts"] == "fmt:2024-01-01T00:00:00Z"
+    assert enriched["series"][0]["data"][1]["drilldown"]["_anomaly_score"] == 3.4
+    assert enriched["series"][0]["data"][1]["drilldown"]["service"] == "checkout"
+    assert enriched["series"][1]["data"][0]["drilldown"] == {"from_ts": "fmt:2024-01-01T00:00:00Z", "window_s": 60}
+
+    heatmap_option = {"series": [{"data": [[0, 0, 10], [1, 0, 20], "skip"]}]}
+    heatmap = _attach_drilldown_metadata(
+        {"id": "heatmap", "drilldown": {"bucket_seconds": 300}},
+        {"x_unique_values": ["checkout", "payments"], "y_unique_values": ["2024-01-01T00:05:00Z"]},
+        heatmap_option,
+        format_drilldown_time=lambda value: f"fmt:{value}",
+    )
+    assert heatmap["series"][0]["data"][0]["drilldown"] == {
+        "from_ts": "fmt:2024-01-01T00:05:00Z",
+        "window_s": 300,
+        "service": "checkout",
+    }
+    assert heatmap["series"][0]["data"][2] == "skip"

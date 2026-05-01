@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Mapping
 
 
@@ -1012,3 +1013,171 @@ def _extract_bindings(
             bindings["outlier_points"] = outlier_points
 
     return bindings
+
+
+def _format_drilldown_time(value: object, *, normalize_ch_timestamp) -> str:
+    """Return a canonical ISO-8601 UTC timestamp string for drilldown URLs."""
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        normalized = normalize_ch_timestamp(raw)
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return raw
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _attach_drilldown_metadata(
+    template: dict,
+    bindings: dict[str, object],
+    option: dict,
+    *,
+    format_drilldown_time,
+) -> dict:
+    """Annotate rendered series data with canonical drilldown metadata."""
+    drilldown = template.get("drilldown")
+    if not isinstance(drilldown, dict):
+        return option
+
+    series = option.get("series")
+    if not isinstance(series, list):
+        return option
+
+    template_id = str(template.get("id", ""))
+    bucket_seconds = drilldown.get("bucket_seconds")
+
+    if template_id in {"time_series_percentiles", "dual_axis_anomaly", "anomaly_overlay", "derived_signal_overlay"}:
+        time_values = bindings.get("time")
+        if isinstance(time_values, list):
+            is_anomaly_template = template_id in {"anomaly_overlay", "derived_signal_overlay"}
+            anomaly_states = bindings.get("anomaly_state") if is_anomaly_template else None
+            anomaly_scores = bindings.get("anomaly_score") if is_anomaly_template else None
+            rule_states = bindings.get("rule_state") if template_id == "derived_signal_overlay" else None
+            rule_names = bindings.get("rule_name") if template_id == "derived_signal_overlay" else None
+            rule_reasons = bindings.get("rule_reason") if template_id == "derived_signal_overlay" else None
+            effective_states = bindings.get("effective_state") if template_id == "derived_signal_overlay" else None
+            services = bindings.get("service") if template_id == "derived_signal_overlay" else None
+            sources = bindings.get("source") if template_id == "derived_signal_overlay" else None
+            signals = bindings.get("signal") if template_id == "derived_signal_overlay" else None
+            attr_fps = bindings.get("attr_fp") if template_id == "derived_signal_overlay" else None
+            for series_entry in series:
+                if not isinstance(series_entry, dict):
+                    continue
+                data = series_entry.get("data")
+                if not isinstance(data, list) or len(data) != len(time_values):
+                    continue
+                is_value_series = is_anomaly_template and series_entry.get("name") == "Value"
+                series_entry["data"] = [
+                    {
+                        "value": value_item,
+                        "drilldown": {
+                            "from_ts": format_drilldown_time(time_values[idx]),
+                            "window_s": bucket_seconds,
+                            **(
+                                {
+                                    "_anomaly_state": (
+                                        anomaly_states[idx]
+                                        if isinstance(anomaly_states, list) and idx < len(anomaly_states)
+                                        else "normal"
+                                    ),
+                                    "_anomaly_score": (
+                                        anomaly_scores[idx]
+                                        if isinstance(anomaly_scores, list) and idx < len(anomaly_scores)
+                                        else 0
+                                    ),
+                                    **(
+                                        {
+                                            "_rule_state": (
+                                                rule_states[idx]
+                                                if isinstance(rule_states, list) and idx < len(rule_states)
+                                                else "normal"
+                                            ),
+                                            "_rule_name": (
+                                                rule_names[idx]
+                                                if isinstance(rule_names, list) and idx < len(rule_names)
+                                                else ""
+                                            ),
+                                            "_rule_reason": (
+                                                rule_reasons[idx]
+                                                if isinstance(rule_reasons, list) and idx < len(rule_reasons)
+                                                else ""
+                                            ),
+                                            "_effective_state": (
+                                                effective_states[idx]
+                                                if isinstance(effective_states, list) and idx < len(effective_states)
+                                                else "normal"
+                                            ),
+                                            "service": (
+                                                services[idx]
+                                                if isinstance(services, list) and idx < len(services)
+                                                else ""
+                                            ),
+                                            "source": (
+                                                sources[idx] if isinstance(sources, list) and idx < len(sources) else ""
+                                            ),
+                                            "signal": (
+                                                signals[idx] if isinstance(signals, list) and idx < len(signals) else ""
+                                            ),
+                                            "attr_fp": (
+                                                attr_fps[idx]
+                                                if isinstance(attr_fps, list) and idx < len(attr_fps)
+                                                else ""
+                                            ),
+                                        }
+                                        if template_id == "derived_signal_overlay"
+                                        else {}
+                                    ),
+                                }
+                                if is_value_series
+                                else {}
+                            ),
+                        },
+                    }
+                    for idx, value_item in enumerate(data)
+                ]
+        return option
+
+    if template_id == "heatmap" and series:
+        x_unique = bindings.get("x_unique_values")
+        y_unique = bindings.get("y_unique_values")
+        first_series = series[0]
+        if isinstance(first_series, dict) and isinstance(x_unique, list) and isinstance(y_unique, list):
+            data = first_series.get("data")
+            if isinstance(data, list):
+                drilldown_data = []
+                for item in data:
+                    if not (isinstance(item, list) and len(item) >= 3):
+                        drilldown_data.append(item)
+                        continue
+                    x_idx = int(item[0])
+                    y_idx = int(item[1])
+                    from_value = y_unique[y_idx] if 0 <= y_idx < len(y_unique) else ""
+                    service_value = x_unique[x_idx] if 0 <= x_idx < len(x_unique) else ""
+                    drilldown_data.append(
+                        {
+                            "value": item,
+                            "drilldown": {
+                                "from_ts": format_drilldown_time(from_value),
+                                "window_s": bucket_seconds,
+                                "service": service_value,
+                            },
+                        }
+                    )
+                first_series["data"] = drilldown_data
+        return option
+
+    return option
