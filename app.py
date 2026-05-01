@@ -319,6 +319,10 @@ from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _sh
 from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
 from shared.raw_metrics_window import _run_raw_window_copy_worker as _shared_run_raw_window_copy_worker
 from shared.raw_metrics_window import _window_copy_counts as _shared_window_copy_counts
+from shared.release_enrichment import _github_item_is_security_related as _shared_github_item_is_security_related
+from shared.release_enrichment import _github_ref_candidates as _shared_github_ref_candidates
+from shared.release_enrichment import _github_version_tokens as _shared_github_version_tokens
+from shared.release_enrichment import _text_mentions_version_tokens as _shared_text_mentions_version_tokens
 from shared.release_registry import _build_seed_registry_rows as _shared_build_seed_registry_rows
 from shared.release_registry import _parse_app_registry_seed as _shared_parse_app_registry_seed
 from shared.release_registry import _serialize_artifact_row as _shared_serialize_artifact_row
@@ -11511,25 +11515,7 @@ async def _github_actions_dependency_rows(
 
 
 def _github_ref_candidates(release_version: str) -> list[str]:
-    """Return Git refs to try for a release version, in priority order."""
-    version = (release_version or "").strip()
-    if not version:
-        return []
-
-    candidates = [f"refs/tags/{version}"]
-    if not version.startswith("v"):
-        candidates.append(f"refs/tags/v{version}")
-    candidates.append(f"refs/heads/{version}")
-    candidates.append(version)
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for ref in candidates:
-        if ref in seen:
-            continue
-        seen.add(ref)
-        deduped.append(ref)
-    return deduped
+    return _shared_github_ref_candidates(release_version)
 
 
 def _github_backfill_max_releases(db: "ChDbConnection") -> int:
@@ -11542,40 +11528,15 @@ def _github_backfill_max_releases(db: "ChDbConnection") -> int:
 
 
 def _github_version_tokens(version: str) -> set[str]:
-    v = str(version or "").strip().lower()
-    if not v:
-        return set()
-    tokens = {v}
-    if not v.startswith("v"):
-        tokens.add(f"v{v}")
-    return tokens
+    return _shared_github_version_tokens(version)
 
 
 def _text_mentions_version_tokens(text: str, tokens: set[str]) -> bool:
-    if not text or not tokens:
-        return False
-    lower = text.lower()
-    for token in tokens:
-        if re.search(rf"(^|[^0-9a-z]){re.escape(token)}([^0-9a-z]|$)", lower):
-            return True
-    return False
+    return _shared_text_mentions_version_tokens(text, tokens)
 
 
 def _github_item_is_security_related(item: dict[str, Any]) -> bool:
-    security_keywords = ("security", "vulnerability", "cve", "ghsa", "dependabot")
-    title = str(item.get("title") or "").lower()
-    body = str(item.get("body") or "").lower()
-    if any(keyword in title or keyword in body for keyword in security_keywords):
-        return True
-    labels = item.get("labels", [])
-    if isinstance(labels, list):
-        for label in labels:
-            if not isinstance(label, dict):
-                continue
-            name = str(label.get("name") or "").lower()
-            if any(keyword in name for keyword in security_keywords):
-                return True
-    return False
+    return _shared_github_item_is_security_related(item)
 
 
 async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int]:
