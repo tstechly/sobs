@@ -203,6 +203,11 @@ from shared.ci_push import _normalize_ttl_days as _shared_normalize_ttl_days
 from shared.ci_push import _revoke_ci_push_api_key as _shared_revoke_ci_push_api_key
 from shared.ci_push import _rotate_ci_push_api_key as _shared_rotate_ci_push_api_key
 from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_realtime_enabled
+from shared.cve_findings import _build_dispositions_by_key as _shared_build_dispositions_by_key
+from shared.cve_findings import _build_library_api_payload as _shared_build_library_api_payload
+from shared.cve_findings import _effective_cve_disposition as _shared_effective_cve_disposition
+from shared.cve_findings import _filter_cve_findings as _shared_filter_cve_findings
+from shared.cve_findings import _serialize_cve_findings as _shared_serialize_cve_findings
 from shared.cve_scan import _build_cve_scan_summary as _shared_build_cve_scan_summary
 from shared.cve_scan import _build_osv_cve_findings as _shared_build_osv_cve_findings
 from shared.dashboard_api import _apply_query_limit as _shared_apply_query_limit
@@ -11798,18 +11803,7 @@ def _effective_cve_disposition(
     version: str,
     versions_by_package: dict[str, set[str]],
 ) -> tuple[str, bool]:
-    """Return effective disposition and whether it was auto-expired.
-
-    A `fixed` disposition expires once a different version for the same
-    package+ecosystem appears in the merged inventory.
-    """
-    disposition = str(raw_disposition or "open")
-    if disposition != "fixed":
-        return disposition, False
-    current_versions = versions_by_package.get(f"{ecosystem}::{package}", set())
-    if any(v != version for v in current_versions):
-        return "open", True
-    return disposition, False
+    return _shared_effective_cve_disposition(raw_disposition, package, ecosystem, version, versions_by_package)
 
 
 async def _run_cve_scan(db: "ChDbConnection | None" = None) -> dict:
@@ -12206,53 +12200,12 @@ async def api_enrichment_libraries():
             "FROM sobs_cve_findings FINAL "
             "GROUP BY Package, Ecosystem, Version"
         ).fetchall()
-        cve_count_by_key = {f"{str(r[0])}::{str(r[1])}::{str(r[2])}": int(r[3]) for r in cve_rows}
-        source_order = {"release_registry": 0, "otel_sdk": 1, "otel_scope": 2}
-
-        libraries: list[dict[str, Any]] = []
-        for item in inventory:
-            package = str(item.get("package") or "")
-            ecosystem = str(item.get("ecosystem") or "")
-            version = str(item.get("version") or "")
-            service = str(item.get("service") or item.get("app_name") or "")
-            source = str(item.get("source") or "")
-            cve_count = cve_count_by_key.get(f"{package}::{ecosystem}::{version}", 0)
-            if not ecosystem:
-                status = "unknown_ecosystem"
-            elif cve_count > 0:
-                status = "vulnerable"
-            else:
-                status = "clean"
-            libraries.append(
-                {
-                    "package": package,
-                    "ecosystem": ecosystem,
-                    "version": version,
-                    "service": service,
-                    "source": source,
-                    "app_name": str(item.get("app_name") or ""),
-                    "release_version": str(item.get("release_version") or ""),
-                    "environment": str(item.get("environment") or ""),
-                    "cve_count": cve_count,
-                    "status": status,
-                }
-            )
-
-        libraries.sort(
-            key=lambda x: (
-                -int(x.get("cve_count", 0)),
-                source_order.get(str(x.get("source") or ""), 99),
-                str(x.get("package") or "").lower(),
-                str(x.get("version") or "").lower(),
-                str(x.get("service") or "").lower(),
-            )
-        )
         return jsonify(
-            {
-                "ok": True,
-                "libraries": libraries,
-                "scanned_at": _get_app_setting(db, _CVE_LAST_SCAN_SETTING) or "",
-            }
+            _shared_build_library_api_payload(
+                inventory,
+                cve_rows,
+                scanned_at=_get_app_setting(db, _CVE_LAST_SCAN_SETTING) or "",
+            )
         )
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
@@ -12401,62 +12354,25 @@ async def view_enrichment_cve():
             disposition_rows = db.execute(
                 "SELECT OsvId, Package, Ecosystem, Version, Disposition, Note " "FROM sobs_cve_dispositions FINAL"
             ).fetchall()
-            dispositions_by_key = {
-                f"{str(r[0])}::{str(r[1])}::{str(r[2])}::{str(r[3])}": {
-                    "disposition": str(r[4] or "open"),
-                    "note": str(r[5] or ""),
-                }
-                for r in disposition_rows
-            }
+            dispositions_by_key = _shared_build_dispositions_by_key(disposition_rows)
             rows = db.execute(
                 "SELECT Package, Ecosystem, Version, ServiceName, OsvId, CveIds, Summary, Severity, Published "
                 "FROM sobs_cve_findings FINAL "
                 "ORDER BY Published DESC LIMIT 500"
             ).fetchall()
-            for r in rows:
-                finding_key = f"{str(r[4])}::{str(r[0])}::{str(r[1])}::{str(r[2])}"
-                raw_disposition = dispositions_by_key.get(finding_key, {}).get("disposition", "open")
-                disposition, disposition_expired = _effective_cve_disposition(
-                    str(raw_disposition or "open"),
-                    str(r[0]),
-                    str(r[1]),
-                    str(r[2]),
-                    versions_by_package,
-                )
-                cve_findings.append(
-                    {
-                        "package": str(r[0]),
-                        "ecosystem": str(r[1]),
-                        "version": str(r[2]),
-                        "service": str(r[3]),
-                        "osv_id": str(r[4]),
-                        "cve_ids": [c for c in str(r[5]).split(",") if c],
-                        "summary": str(r[6]),
-                        "severity": str(r[7]),
-                        "published": str(r[8]),
-                        "disposition": disposition,
-                        "raw_disposition": str(raw_disposition or "open"),
-                        "disposition_expired": disposition_expired,
-                        "disposition_note": dispositions_by_key.get(finding_key, {}).get("note", ""),
-                    }
-                )
-            ecosystems = sorted({f["ecosystem"] for f in cve_findings if f["ecosystem"]})
-            severities = sorted({f["severity"] for f in cve_findings if f["severity"]})
-            if selected_severities:
-                selected_severity_set = set(selected_severities)
-                cve_findings = [f for f in cve_findings if f["severity"] in selected_severity_set]
-            if selected_ecosystems:
-                selected_ecosystem_set = set(selected_ecosystems)
-                cve_findings = [f for f in cve_findings if f["ecosystem"] in selected_ecosystem_set]
-            if package_filter:
-                pkg_lower = package_filter.lower()
-                cve_findings = [f for f in cve_findings if pkg_lower in f["package"].lower()]
-            if not show_all:
-                cve_findings = [
-                    f
-                    for f in cve_findings
-                    if f.get("disposition", "open") not in ("accepted", "false_positive", "fixed")
-                ]
+            cve_findings = _shared_serialize_cve_findings(
+                rows,
+                dispositions_by_key=dispositions_by_key,
+                versions_by_package=versions_by_package,
+                show_all=True,
+            )
+            cve_findings, ecosystems, severities = _shared_filter_cve_findings(
+                cve_findings,
+                selected_severities=selected_severities,
+                selected_ecosystems=selected_ecosystems,
+                package_filter=package_filter,
+                show_all=show_all,
+            )
         except Exception:
             pass
 
@@ -12494,49 +12410,18 @@ async def api_cve_findings():
         disposition_rows = db.execute(
             "SELECT OsvId, Package, Ecosystem, Version, Disposition, Note " "FROM sobs_cve_dispositions FINAL"
         ).fetchall()
-        dispositions_by_key = {
-            f"{str(r[0])}::{str(r[1])}::{str(r[2])}::{str(r[3])}": {
-                "disposition": str(r[4] or "open"),
-                "note": str(r[5] or ""),
-            }
-            for r in disposition_rows
-        }
+        dispositions_by_key = _shared_build_dispositions_by_key(disposition_rows)
         rows = db.execute(
             "SELECT Package, Ecosystem, Version, ServiceName, OsvId, CveIds, Summary, Severity, Published "
             "FROM sobs_cve_findings FINAL "
             "ORDER BY Published DESC LIMIT 100"
         ).fetchall()
-        findings = []
-        for r in rows:
-            finding_key = f"{str(r[4])}::{str(r[0])}::{str(r[1])}::{str(r[2])}"
-            disposition_data = dispositions_by_key.get(finding_key, {})
-            raw_disposition = str(disposition_data.get("disposition", "open") or "open")
-            disposition, disposition_expired = _effective_cve_disposition(
-                raw_disposition,
-                str(r[0]),
-                str(r[1]),
-                str(r[2]),
-                versions_by_package,
-            )
-            if (not show_all) and disposition in ("accepted", "false_positive", "fixed"):
-                continue
-            findings.append(
-                {
-                    "package": str(r[0]),
-                    "ecosystem": str(r[1]),
-                    "version": str(r[2]),
-                    "service": str(r[3]),
-                    "osv_id": str(r[4]),
-                    "cve_ids": [c for c in str(r[5]).split(",") if c],
-                    "summary": str(r[6]),
-                    "severity": str(r[7]),
-                    "published": str(r[8]),
-                    "disposition": disposition,
-                    "raw_disposition": raw_disposition,
-                    "disposition_expired": disposition_expired,
-                    "disposition_note": str(disposition_data.get("note", "") or ""),
-                }
-            )
+        findings = _shared_serialize_cve_findings(
+            rows,
+            dispositions_by_key=dispositions_by_key,
+            versions_by_package=versions_by_package,
+            show_all=show_all,
+        )
         last_scan = _get_app_setting(db, _CVE_LAST_SCAN_SETTING) or ""
         return jsonify({"ok": True, "findings": findings, "last_scan": last_scan})
     except Exception as exc:
