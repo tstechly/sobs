@@ -339,6 +339,9 @@ from shared.onboarding import _parse_package_lock_dependencies as _shared_parse_
 from shared.onboarding import _parse_requirements_dependencies as _shared_parse_requirements_dependencies
 from shared.onboarding import _persist_onboarding_work_item as _shared_persist_onboarding_work_item
 from shared.onboarding import _resolve_onboarding_issue_request as _shared_resolve_onboarding_issue_request
+from shared.otlp_attrs import _attr_list_to_dict as _shared_attr_list_to_dict
+from shared.otlp_attrs import _proto_any_value_to_python as _shared_proto_any_value_to_python
+from shared.otlp_attrs import _proto_kvlist_to_dict as _shared_proto_kvlist_to_dict
 from shared.otlp_security import _append_vary_header as _shared_append_vary_header
 from shared.otlp_security import _apply_security_headers as _shared_apply_security_headers
 from shared.otlp_security import _origin_allowed_for_otlp as _shared_origin_allowed_for_otlp
@@ -6229,41 +6232,15 @@ def _seed_app_release_registry_from_env(db: ChDbConnection) -> None:
 
 
 def _attr_list_to_dict(attr_list: list) -> dict:
-    """Convert OTLP attribute list [{key, value}] to plain dict."""
-    out = {}
-    for item in attr_list:
-        key = item.get("key", "")
-        val_obj = item.get("value", {})
-        # OTLP uses typed value wrappers
-        for vtype in ("stringValue", "intValue", "doubleValue", "boolValue", "bytesValue"):
-            if vtype in val_obj:
-                out[key] = val_obj[vtype]
-                break
-    return out
+    return _shared_attr_list_to_dict(attr_list)
 
 
 def _proto_any_value_to_python(val):
-    """Convert OTLP AnyValue proto object to a plain Python value."""
-    kind = val.WhichOneof("value")
-    if kind == "string_value":
-        return val.string_value
-    if kind == "int_value":
-        return val.int_value
-    if kind == "double_value":
-        return val.double_value
-    if kind == "bool_value":
-        return val.bool_value
-    if kind == "bytes_value":
-        return base64.b64encode(bytes(val.bytes_value)).decode("ascii")
-    if kind == "array_value":
-        return [_proto_any_value_to_python(v) for v in val.array_value.values]
-    if kind == "kvlist_value":
-        return {kv.key: _proto_any_value_to_python(kv.value) for kv in val.kvlist_value.values}
-    return None
+    return _shared_proto_any_value_to_python(val)
 
 
 def _proto_kvlist_to_dict(attributes) -> dict:
-    return {kv.key: _proto_any_value_to_python(kv.value) for kv in attributes}
+    return _shared_proto_kvlist_to_dict(attributes)
 
 
 # ---------------------------------------------------------------------------
