@@ -1378,3 +1378,154 @@ def _render_custom_echarts(
     if drilldown:
         option["_customDrilldown"] = drilldown
     return option
+
+
+def _prepare_template_rows(
+    template_id: str,
+    columns: list[str],
+    rows: list[dict[str, object]],
+    role_indices: dict[str, int] | None = None,
+    *,
+    annotate_rows_with_rules,
+    anomaly_rules: list[dict[str, object]],
+) -> tuple[list[str], list[dict[str, object]]]:
+    if template_id != "derived_signal_overlay":
+        return columns, rows
+
+    required_columns = [
+        "time",
+        "service",
+        "source",
+        "signal",
+        "attr_fp",
+        "value",
+        "sample_count",
+        "baseline_mean",
+        "baseline_lower",
+        "baseline_upper",
+        "anomaly_state",
+        "anomaly_score",
+    ]
+    if len(columns) < len(required_columns):
+        return columns, rows
+
+    def _col_for_role(role: str, fallback_idx: int) -> str:
+        idx = fallback_idx
+        if isinstance(role_indices, dict) and role in role_indices:
+            idx = role_indices[role]
+        if 0 <= idx < len(columns):
+            return columns[idx]
+        return columns[fallback_idx]
+
+    role_columns = {
+        "time": _col_for_role("time", 0),
+        "service": _col_for_role("service", 1),
+        "source": _col_for_role("source", 2),
+        "signal": _col_for_role("signal", 3),
+        "attr_fp": _col_for_role("attr_fp", 4),
+        "value": _col_for_role("value", 5),
+        "sample_count": _col_for_role("sample_count", 6),
+        "baseline_mean": _col_for_role("baseline_mean", 7),
+        "baseline_lower": _col_for_role("baseline_lower", 8),
+        "baseline_upper": _col_for_role("baseline_upper", 9),
+        "anomaly_state": _col_for_role("anomaly_state", 10),
+        "anomaly_score": _col_for_role("anomaly_score", 11),
+    }
+
+    normalized_rows: list[dict[str, object]] = []
+    for raw_row in rows:
+        normalized_rows.append(
+            {
+                "time": raw_row.get(role_columns["time"]),
+                "service": raw_row.get(role_columns["service"]),
+                "source": raw_row.get(role_columns["source"]),
+                "signal": raw_row.get(role_columns["signal"]),
+                "attr_fp": raw_row.get(role_columns["attr_fp"]),
+                "value": raw_row.get(role_columns["value"]),
+                "sample_count": raw_row.get(role_columns["sample_count"]),
+                "baseline_mean": raw_row.get(role_columns["baseline_mean"]),
+                "baseline_lower": raw_row.get(role_columns["baseline_lower"]),
+                "baseline_upper": raw_row.get(role_columns["baseline_upper"]),
+                "anomaly_state": raw_row.get(role_columns["anomaly_state"]),
+                "anomaly_score": raw_row.get(role_columns["anomaly_score"]),
+            }
+        )
+
+    annotate_rows_with_rules(
+        normalized_rows,
+        anomaly_rules,
+        source_key="source",
+        signal_key="signal",
+        service_key="service",
+        attr_fp_key="attr_fp",
+        value_key="value",
+        sample_count_key="sample_count",
+        time_key="time",
+    )
+
+    prepared_columns = required_columns + ["rule_state", "rule_name", "rule_reason", "effective_state"]
+    prepared_rows = [{column: row.get(column, "") for column in prepared_columns} for row in normalized_rows]
+    return prepared_columns, prepared_rows
+
+
+def _render_chart_from_template(
+    template_id: str,
+    columns: list[str],
+    rows: list[object],
+    spec: dict[str, object] | None = None,
+    named_datasets: dict[str, dict[str, object]] | None = None,
+    *,
+    chart_templates: Mapping[str, object],
+    resolve_template_role_indices,
+    prepare_template_rows,
+    extract_bindings,
+    deep_substitute,
+    attach_drilldown_metadata,
+    render_custom_echarts,
+) -> dict[str, object]:
+    template_raw = chart_templates.get(template_id)
+    if not isinstance(template_raw, dict):
+        raise ValueError(f"Unknown template: {template_id}")
+    template = template_raw
+
+    if template_id == "custom_echarts":
+        return render_custom_echarts(template, columns, rows, spec, named_datasets=named_datasets)
+
+    if not rows:
+        return {
+            "backgroundColor": "transparent",
+            "textStyle": {"color": "#adb5bd"},
+            "title": {
+                "text": "No data for selected query/time window",
+                "left": "center",
+                "top": "middle",
+                "textStyle": {"color": "#6c757d", "fontSize": 13, "fontWeight": 500},
+            },
+            "series": [],
+            "xAxis": {"show": False},
+            "yAxis": {"show": False},
+        }
+
+    min_cols_raw = template.get("min_columns", 0)
+    min_cols = int(min_cols_raw) if isinstance(min_cols_raw, (int, float)) else 0
+    max_cols_raw = template.get("max_columns")
+    max_cols = int(max_cols_raw) if isinstance(max_cols_raw, (int, float)) else None
+    if len(columns) < min_cols:
+        raise ValueError(f"Template {template_id} requires at least {min_cols} columns, got {len(columns)}")
+    if max_cols and len(columns) > max_cols:
+        raise ValueError(f"Template {template_id} accepts maximum {max_cols} columns, got {len(columns)}")
+
+    role_indices = resolve_template_role_indices(template_id, template, columns, spec)
+
+    if rows and isinstance(rows[0], dict):
+        columns, rows = prepare_template_rows(template_id, columns, rows, role_indices)
+
+    bindings = extract_bindings(template, columns, rows, role_indices)
+    option = deep_substitute(template["echarts_option_template"], bindings)
+    if isinstance(option, dict):
+        option = attach_drilldown_metadata(template, bindings, option)
+        if "backgroundColor" not in option:
+            option["backgroundColor"] = "transparent"
+        if "textStyle" not in option:
+            option["textStyle"] = {"color": "#adb5bd"}
+    return option

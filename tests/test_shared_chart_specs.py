@@ -21,7 +21,9 @@ from shared.chart_specs import (
     _normalize_custom_series_point_order,
     _parse_bool,
     _parse_custom_json_config,
+    _prepare_template_rows,
     _public_dashboard_query_error,
+    _render_chart_from_template,
     _render_custom_echarts,
     _resolve_custom_binding_expr,
     _resolve_template_role_indices,
@@ -681,3 +683,211 @@ def test_render_custom_echarts_handles_template_fallback_dict_rows_and_invalid_c
             [[1]],
             {"visual": {"custom_mapping_json": "{}", "custom_option_json": "[]"}},
         )
+
+
+def test_prepare_template_rows_handles_passthrough_short_rows_and_derived_signal_overlay_mapping():
+    passthrough_columns, passthrough_rows = _prepare_template_rows(
+        "heatmap",
+        ["time", "value"],
+        [{"time": "2024-01-01T00:00:00Z", "value": 1}],
+        annotate_rows_with_rules=lambda *args, **kwargs: None,
+        anomaly_rules=[],
+    )
+    assert passthrough_columns == ["time", "value"]
+    assert passthrough_rows == [{"time": "2024-01-01T00:00:00Z", "value": 1}]
+
+    short_columns, short_rows = _prepare_template_rows(
+        "derived_signal_overlay",
+        ["time", "value"],
+        [{"time": "2024-01-01T00:00:00Z", "value": 1}],
+        annotate_rows_with_rules=lambda *args, **kwargs: None,
+        anomaly_rules=[],
+    )
+    assert short_columns == ["time", "value"]
+    assert short_rows == [{"time": "2024-01-01T00:00:00Z", "value": 1}]
+
+    def _fake_annotate(rows, rules, **kwargs):
+        assert rules == [{"name": "rule-a"}]
+        assert kwargs["source_key"] == "source"
+        rows[0]["rule_state"] = "warning"
+        rows[0]["rule_name"] = "rule-a"
+        rows[0]["rule_reason"] = "high"
+        rows[0]["effective_state"] = "warning"
+
+    prepared_columns, prepared_rows = _prepare_template_rows(
+        "derived_signal_overlay",
+        [
+            "metric",
+            "svc",
+            "src",
+            "sig",
+            "fingerprint",
+            "val",
+            "samples",
+            "mean",
+            "low",
+            "high",
+            "state",
+            "score",
+        ],
+        [
+            {
+                "metric": "2024-01-01T00:00:00Z",
+                "svc": "checkout",
+                "src": "traces",
+                "sig": "trace_volume",
+                "fingerprint": "fp-1",
+                "val": 12.0,
+                "samples": 4,
+                "mean": 10.0,
+                "low": 8.0,
+                "high": 14.0,
+                "state": "warning",
+                "score": 2.4,
+            }
+        ],
+        {
+            "time": 0,
+            "service": 1,
+            "source": 2,
+            "signal": 3,
+            "attr_fp": 4,
+            "value": 5,
+            "sample_count": 6,
+            "baseline_mean": 7,
+            "baseline_lower": 8,
+            "baseline_upper": 9,
+            "anomaly_state": 10,
+            "anomaly_score": 11,
+        },
+        annotate_rows_with_rules=_fake_annotate,
+        anomaly_rules=[{"name": "rule-a"}],
+    )
+
+    assert prepared_columns[-4:] == ["rule_state", "rule_name", "rule_reason", "effective_state"]
+    assert prepared_rows == [
+        {
+            "time": "2024-01-01T00:00:00Z",
+            "service": "checkout",
+            "source": "traces",
+            "signal": "trace_volume",
+            "attr_fp": "fp-1",
+            "value": 12.0,
+            "sample_count": 4,
+            "baseline_mean": 10.0,
+            "baseline_lower": 8.0,
+            "baseline_upper": 14.0,
+            "anomaly_state": "warning",
+            "anomaly_score": 2.4,
+            "rule_state": "warning",
+            "rule_name": "rule-a",
+            "rule_reason": "high",
+            "effective_state": "warning",
+        }
+    ]
+
+
+def test_render_chart_from_template_handles_unknown_empty_custom_and_validation_paths():
+    with pytest.raises(ValueError, match="Unknown template"):
+        _render_chart_from_template(
+            "missing",
+            ["time"],
+            [[1]],
+            chart_templates={},
+            resolve_template_role_indices=lambda *args, **kwargs: {},
+            prepare_template_rows=lambda *args, **kwargs: args[1:3],
+            extract_bindings=lambda *args, **kwargs: {},
+            deep_substitute=lambda *args, **kwargs: {},
+            attach_drilldown_metadata=lambda *args, **kwargs: {},
+            render_custom_echarts=lambda *args, **kwargs: {},
+        )
+
+    empty = _render_chart_from_template(
+        "heatmap",
+        ["time", "value"],
+        [],
+        chart_templates={"heatmap": {"echarts_option_template": {}, "min_columns": 1}},
+        resolve_template_role_indices=lambda *args, **kwargs: {},
+        prepare_template_rows=lambda *args, **kwargs: args[1:3],
+        extract_bindings=lambda *args, **kwargs: {},
+        deep_substitute=lambda *args, **kwargs: {},
+        attach_drilldown_metadata=lambda *args, **kwargs: {},
+        render_custom_echarts=lambda *args, **kwargs: {},
+    )
+    assert empty["title"]["text"] == "No data for selected query/time window"
+
+    custom = _render_chart_from_template(
+        "custom_echarts",
+        ["time"],
+        [[1]],
+        chart_templates={"custom_echarts": {"echarts_option_template": {}}},
+        resolve_template_role_indices=lambda *args, **kwargs: {},
+        prepare_template_rows=lambda *args, **kwargs: args[1:3],
+        extract_bindings=lambda *args, **kwargs: {},
+        deep_substitute=lambda *args, **kwargs: {},
+        attach_drilldown_metadata=lambda *args, **kwargs: {},
+        render_custom_echarts=lambda template, columns, rows, spec, named_datasets=None: {"ok": True, "rows": rows},
+    )
+    assert custom == {"ok": True, "rows": [[1]]}
+
+    with pytest.raises(ValueError, match="requires at least 2 columns"):
+        _render_chart_from_template(
+            "heatmap",
+            ["time"],
+            [[1]],
+            chart_templates={"heatmap": {"echarts_option_template": {}, "min_columns": 2}},
+            resolve_template_role_indices=lambda *args, **kwargs: {},
+            prepare_template_rows=lambda *args, **kwargs: args[1:3],
+            extract_bindings=lambda *args, **kwargs: {},
+            deep_substitute=lambda *args, **kwargs: {},
+            attach_drilldown_metadata=lambda *args, **kwargs: {},
+            render_custom_echarts=lambda *args, **kwargs: {},
+        )
+
+    with pytest.raises(ValueError, match="accepts maximum 1 columns"):
+        _render_chart_from_template(
+            "heatmap",
+            ["time", "value"],
+            [[1, 2]],
+            chart_templates={"heatmap": {"echarts_option_template": {}, "min_columns": 1, "max_columns": 1}},
+            resolve_template_role_indices=lambda *args, **kwargs: {},
+            prepare_template_rows=lambda *args, **kwargs: args[1:3],
+            extract_bindings=lambda *args, **kwargs: {},
+            deep_substitute=lambda *args, **kwargs: {},
+            attach_drilldown_metadata=lambda *args, **kwargs: {},
+            render_custom_echarts=lambda *args, **kwargs: {},
+        )
+
+
+def test_render_chart_from_template_prepares_dict_rows_and_applies_defaults():
+    calls: dict[str, object] = {}
+
+    def _fake_prepare(template_id, columns, rows, role_indices):
+        calls["prepared"] = (template_id, columns, rows, role_indices)
+        return ["time", "value"], [["2024-01-01T00:00:00Z", 1]]
+
+    def _fake_extract(template, columns, rows, role_indices):
+        calls["bindings"] = (template, columns, rows, role_indices)
+        return {"points": rows}
+
+    rendered = _render_chart_from_template(
+        "heatmap",
+        ["svc", "val"],
+        [{"svc": "checkout", "val": 1}],
+        chart_templates={"heatmap": {"echarts_option_template": {"series": "{{points}}"}, "min_columns": 1}},
+        resolve_template_role_indices=lambda *args, **kwargs: {"time": 0},
+        prepare_template_rows=_fake_prepare,
+        extract_bindings=_fake_extract,
+        deep_substitute=lambda template, bindings: {"series": bindings["points"]},
+        attach_drilldown_metadata=lambda template, bindings, option: {**option, "drilldown": True},
+        render_custom_echarts=lambda *args, **kwargs: {},
+    )
+
+    assert calls["prepared"][0] == "heatmap"
+    assert calls["bindings"][1] == ["time", "value"]
+    assert rendered == {
+        "series": [["2024-01-01T00:00:00Z", 1]],
+        "drilldown": True,
+        "backgroundColor": "transparent",
+        "textStyle": {"color": "#adb5bd"},
+    }
