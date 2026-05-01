@@ -303,6 +303,14 @@ from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _sh
 from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
 from shared.raw_metrics_window import _run_raw_window_copy_worker as _shared_run_raw_window_copy_worker
 from shared.raw_metrics_window import _window_copy_counts as _shared_window_copy_counts
+from shared.reports import REPORT_PAGE_TYPES as _SHARED_REPORT_PAGE_TYPES
+from shared.reports import REPORTS_EXPORT_VERSION as _SHARED_REPORTS_EXPORT_VERSION
+from shared.reports import _build_report_record as _shared_build_report_record
+from shared.reports import _build_reports_export_payload as _shared_build_reports_export_payload
+from shared.reports import _get_report as _shared_get_report
+from shared.reports import _get_reports as _shared_get_reports
+from shared.reports import _parse_report_filters as _shared_parse_report_filters
+from shared.reports import _serialize_report_row as _shared_serialize_report_row
 from shared.rum_assets import _asset_extension as _shared_asset_extension
 from shared.rum_assets import _rum_asset_signature as _shared_rum_asset_signature
 from shared.rum_assets import _rum_asset_signature_payload as _shared_rum_asset_signature_payload
@@ -15787,57 +15795,44 @@ async def metrics_anomaly():
 # ---------------------------------------------------------------------------
 
 # Valid page types for reports
-_REPORT_PAGE_TYPES = {"logs", "traces", "errors", "metrics", "rum", "ai", "work_items", "web_traffic"}
+_REPORT_PAGE_TYPES = _SHARED_REPORT_PAGE_TYPES
 
 
 def _parse_report_filters(raw_filters_json: Any) -> dict[str, Any]:
-    if not raw_filters_json:
-        return {}
-    try:
-        parsed = json.loads(str(raw_filters_json))
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return _shared_parse_report_filters(raw_filters_json)
 
 
-def _get_reports(db: ChDbConnection, page_type: str | None = None) -> list[dict]:
-    if page_type:
-        rows = db.execute(
-            "SELECT Id, Name, Description, PageType, FiltersJson "
-            "FROM sobs_reports FINAL WHERE IsDeleted = 0 AND PageType = ? ORDER BY Name",
-            [page_type],
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT Id, Name, Description, PageType, FiltersJson "
-            "FROM sobs_reports FINAL WHERE IsDeleted = 0 ORDER BY PageType, Name"
-        ).fetchall()
-    return [
-        {
-            "id": str(r["Id"]),
-            "name": str(r["Name"]),
-            "description": str(r["Description"]),
-            "page_type": str(r["PageType"]),
-            "filters": _parse_report_filters(r["FiltersJson"]),
-        }
-        for r in rows
-    ]
+def _serialize_report_row(row) -> dict[str, Any]:
+    return _shared_serialize_report_row(row)
 
 
-def _get_report(db: ChDbConnection, report_id: str) -> dict | None:
-    row = db.execute(
-        "SELECT Id, Name, Description, PageType, FiltersJson " "FROM sobs_reports FINAL WHERE IsDeleted = 0 AND Id = ?",
-        [report_id],
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "id": str(row["Id"]),
-        "name": str(row["Name"]),
-        "description": str(row["Description"]),
-        "page_type": str(row["PageType"]),
-        "filters": _parse_report_filters(row["FiltersJson"]),
-    }
+def _get_reports(db: ChDbConnection, page_type: str | None = None) -> list[dict[str, Any]]:
+    return _shared_get_reports(db, page_type)
+
+
+def _get_report(db: ChDbConnection, report_id: str) -> dict[str, Any] | None:
+    return _shared_get_report(db, report_id)
+
+
+def _build_report_record(
+    report_id: str,
+    name: str,
+    description: str,
+    page_type: str,
+    filters: Mapping[str, object],
+    *,
+    version: int,
+    is_deleted: int = 0,
+) -> dict[str, object]:
+    return _shared_build_report_record(
+        report_id,
+        name,
+        description,
+        page_type,
+        filters,
+        version=version,
+        is_deleted=is_deleted,
+    )
 
 
 @app.route("/reports")
@@ -15861,15 +15856,15 @@ async def delete_report(report_id: str):
         db,
         "sobs_reports",
         [
-            {
-                "Id": report_id,
-                "Name": report["name"],
-                "Description": report["description"],
-                "PageType": report["page_type"],
-                "FiltersJson": json.dumps(report["filters"], ensure_ascii=False),
-                "IsDeleted": 1,
-                "Version": version,
-            }
+            _build_report_record(
+                report_id,
+                report["name"],
+                report["description"],
+                report["page_type"],
+                cast(dict[str, object], report["filters"]),
+                version=version,
+                is_deleted=1,
+            )
         ],
     )
     await flash(f"Report '{report['name']}' deleted", "success")
@@ -15907,17 +15902,7 @@ async def api_create_report():
     _insert_rows_json_each_row(
         db,
         "sobs_reports",
-        [
-            {
-                "Id": report_id,
-                "Name": name,
-                "Description": description,
-                "PageType": page_type,
-                "FiltersJson": json.dumps(filters, ensure_ascii=False),
-                "IsDeleted": 0,
-                "Version": version,
-            }
-        ],
+        [_build_report_record(report_id, name, description, page_type, filters, version=version)],
     )
     result = {"id": report_id, "name": name, "description": description, "page_type": page_type, "filters": filters}
     return jsonify(result), 201
@@ -15935,22 +15920,22 @@ async def api_delete_report(report_id: str):
         db,
         "sobs_reports",
         [
-            {
-                "Id": report_id,
-                "Name": report["name"],
-                "Description": report["description"],
-                "PageType": report["page_type"],
-                "FiltersJson": json.dumps(report["filters"], ensure_ascii=False),
-                "IsDeleted": 1,
-                "Version": version,
-            }
+            _build_report_record(
+                report_id,
+                report["name"],
+                report["description"],
+                report["page_type"],
+                cast(dict[str, object], report["filters"]),
+                version=version,
+                is_deleted=1,
+            )
         ],
     )
     return jsonify({"deleted": True})
 
 
 # Export schema version for forward-compatibility
-_REPORTS_EXPORT_VERSION = "1"
+_REPORTS_EXPORT_VERSION = _SHARED_REPORTS_EXPORT_VERSION
 
 # Maximum number of reports that may be imported in a single request
 _REPORTS_IMPORT_MAX = 500
@@ -15979,21 +15964,11 @@ async def api_export_reports():
     else:
         reports = _get_reports(db)
 
-    payload = {
-        "sobs_reports_export": True,
-        "version": _REPORTS_EXPORT_VERSION,
-        "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "reports": [
-            {
-                "id": r["id"],
-                "name": r["name"],
-                "description": r["description"],
-                "page_type": r["page_type"],
-                "filters": r["filters"],
-            }
-            for r in reports
-        ],
-    }
+    payload = _shared_build_reports_export_payload(
+        reports,
+        exported_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        version=_REPORTS_EXPORT_VERSION,
+    )
     json_bytes = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
     filename = "sobs_reports_export.json"
     return Response(
