@@ -3,11 +3,14 @@ import pytest
 from shared.dashboard_api import (
     SUPPORTED_CHART_OPTION_SOURCES,
     _apply_query_limit,
+    _build_ai_chart_datasets,
+    _build_ai_chart_spec_response,
     _build_chart_spec_options,
     _build_chart_spec_template_api_payload,
     _build_named_datasets,
     _execute_chart_query_result,
     _execute_chart_spec_named_queries,
+    _finalize_ai_chart_generation,
     _rows_to_columns_and_data,
 )
 
@@ -300,4 +303,94 @@ def test_execute_chart_query_result_preserves_existing_limit_and_optional_shapes
     assert payload == {
         "columns": ["value"],
         "records": [{"value": 7}],
+    }
+
+
+def test_build_ai_chart_datasets_keeps_main_dataset_and_filters_failed_named_queries():
+    datasets = _build_ai_chart_datasets(
+        "SELECT 1 AS value",
+        ["value"],
+        [[1]],
+        [
+            {"name": "good", "purpose": "ok", "sql": "SELECT 2 AS n", "columns": ["n"], "rows": [[2]]},
+            {"name": "bad", "purpose": "broken", "sql": "SELECT nope", "columns": ["n"], "rows": [], "error": "boom"},
+        ],
+    )
+
+    assert datasets == [
+        {
+            "name": "main",
+            "purpose": "primary dataset",
+            "sql": "SELECT 1 AS value",
+            "columns": ["value"],
+            "rows": [[1]],
+        },
+        {
+            "name": "good",
+            "purpose": "ok",
+            "sql": "SELECT 2 AS n",
+            "columns": ["n"],
+            "rows": [[2]],
+        },
+    ]
+
+
+def test_finalize_ai_chart_generation_uses_inferred_mapping_or_fallback():
+    option_json, mapping_json, chart_error = _finalize_ai_chart_generation(
+        '{"series":[{"data":"{{rows}}"}]}',
+        "",
+        ["service", "value"],
+        infer_custom_mapping_from_option=lambda _json, columns: {"points": {"columns": columns}},
+        build_fallback_custom_option_json=lambda: "fallback",
+    )
+    assert option_json == '{"series":[{"data":"{{rows}}"}]}'
+    assert mapping_json == '{"points": {"columns": ["service", "value"]}}'
+    assert chart_error == ""
+
+    fallback_option, fallback_mapping, fallback_error = _finalize_ai_chart_generation(
+        "",
+        "Chart spec JSON parse error: bad json",
+        ["service", "value"],
+        infer_custom_mapping_from_option=lambda _json, columns: {"points": {"columns": columns}},
+        build_fallback_custom_option_json=lambda: "fallback",
+    )
+    assert fallback_option == "fallback"
+    assert fallback_mapping == '{"points": {"from": "rows"}}'
+    assert "fallback chart option template" in fallback_error.lower()
+
+
+def test_build_ai_chart_spec_response_filters_named_queries_and_builds_spec_payload():
+    payload = _build_ai_chart_spec_response(
+        "SELECT 1 AS value",
+        2,
+        ["value"],
+        [
+            {"name": "good", "sql": "SELECT 2 AS n", "purpose": "ok", "error": ""},
+            {"name": "bad", "sql": "SELECT nope", "purpose": "broken", "error": "boom"},
+        ],
+        '{"series":[]}',
+        '{"points":{"from":"rows"}}',
+        "",
+    )
+
+    assert payload == {
+        "ok": True,
+        "spec": {
+            "template_id": "custom_echarts",
+            "sql": {"mode": "raw", "override_sql": "SELECT 1 AS value"},
+            "named_queries": [{"name": "good", "sql": "SELECT 2 AS n", "purpose": "ok"}],
+            "visual": {
+                "custom_option_json": '{"series":[]}',
+                "custom_mapping_json": '{"points":{"from":"rows"}}',
+            },
+        },
+        "sql": "SELECT 1 AS value",
+        "retry_count": 2,
+        "columns": ["value"],
+        "named_queries": [{"name": "good", "sql": "SELECT 2 AS n", "purpose": "ok"}],
+        "named_query_results": [
+            {"name": "good", "sql": "SELECT 2 AS n", "purpose": "ok", "error": ""},
+            {"name": "bad", "sql": "SELECT nope", "purpose": "broken", "error": "boom"},
+        ],
+        "chart_error": "",
     }

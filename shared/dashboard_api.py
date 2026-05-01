@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping
 
@@ -190,3 +191,94 @@ def _build_named_datasets(
             "rows": result.get("rows") or [],
         }
     return datasets
+
+
+def _build_ai_chart_datasets(
+    sql: str,
+    columns: list[str],
+    rows: list[list[object]],
+    named_query_results: list[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    datasets: list[dict[str, object]] = [
+        {
+            "name": "main",
+            "purpose": "primary dataset",
+            "sql": sql,
+            "columns": columns,
+            "rows": rows,
+        }
+    ]
+    for named_query in named_query_results:
+        if str(named_query.get("error") or ""):
+            continue
+        datasets.append(
+            {
+                "name": str(named_query.get("name") or ""),
+                "purpose": str(named_query.get("purpose") or ""),
+                "sql": str(named_query.get("sql") or ""),
+                "columns": named_query.get("columns") or [],
+                "rows": named_query.get("rows") or [],
+            }
+        )
+    return datasets
+
+
+def _finalize_ai_chart_generation(
+    chart_spec_json: str,
+    chart_error: str,
+    columns: list[str],
+    *,
+    infer_custom_mapping_from_option: Callable[[str, list[str]], Mapping[str, object] | None],
+    build_fallback_custom_option_json: Callable[[], str],
+) -> tuple[str, str, str]:
+    if chart_spec_json:
+        inferred_mapping = infer_custom_mapping_from_option(chart_spec_json, columns)
+        custom_mapping_json = json.dumps(inferred_mapping, ensure_ascii=False) if inferred_mapping else "{}"
+        return chart_spec_json, custom_mapping_json, chart_error
+
+    custom_mapping_json = json.dumps({"points": {"from": "rows"}}, ensure_ascii=False)
+    chart_error = (
+        f"{chart_error} Using fallback chart option template."
+        if chart_error
+        else "Chart generation failed; using fallback chart option template."
+    )
+    return build_fallback_custom_option_json(), custom_mapping_json, chart_error
+
+
+def _build_ai_chart_spec_response(
+    sql: str,
+    sql_retry_count: int,
+    columns: list[str],
+    named_query_results: list[Mapping[str, object]],
+    chart_spec_json: str,
+    custom_mapping_json: str,
+    chart_error: str,
+) -> dict[str, object]:
+    named_queries = [
+        {
+            "name": str(named_query.get("name") or ""),
+            "sql": str(named_query.get("sql") or ""),
+            "purpose": str(named_query.get("purpose") or ""),
+        }
+        for named_query in named_query_results
+        if not str(named_query.get("error") or "") and named_query.get("name") and named_query.get("sql")
+    ]
+
+    return {
+        "ok": True,
+        "spec": {
+            "template_id": "custom_echarts",
+            "sql": {"mode": "raw", "override_sql": sql},
+            "named_queries": named_queries,
+            "visual": {
+                "custom_option_json": chart_spec_json or "{}",
+                "custom_mapping_json": custom_mapping_json,
+            },
+        },
+        "sql": sql,
+        "retry_count": sql_retry_count,
+        "columns": columns,
+        "named_queries": named_queries,
+        "named_query_results": named_query_results,
+        "chart_error": chart_error,
+    }

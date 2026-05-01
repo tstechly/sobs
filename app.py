@@ -204,11 +204,14 @@ from shared.ci_push import _revoke_ci_push_api_key as _shared_revoke_ci_push_api
 from shared.ci_push import _rotate_ci_push_api_key as _shared_rotate_ci_push_api_key
 from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_realtime_enabled
 from shared.dashboard_api import _apply_query_limit as _shared_apply_query_limit
+from shared.dashboard_api import _build_ai_chart_datasets as _shared_build_ai_chart_datasets
+from shared.dashboard_api import _build_ai_chart_spec_response as _shared_build_ai_chart_spec_response
 from shared.dashboard_api import _build_chart_spec_options as _shared_build_chart_spec_options
 from shared.dashboard_api import _build_chart_spec_template_api_payload as _shared_build_chart_spec_template_api_payload
 from shared.dashboard_api import _build_named_datasets as _shared_build_named_datasets
 from shared.dashboard_api import _execute_chart_query_result as _shared_execute_chart_query_result
 from shared.dashboard_api import _execute_chart_spec_named_queries as _shared_execute_chart_spec_named_queries
+from shared.dashboard_api import _finalize_ai_chart_generation as _shared_finalize_ai_chart_generation
 from shared.dashboard_api import _rows_to_columns_and_data as _shared_rows_to_columns_and_data
 from shared.dashboards import _build_chart_record as _shared_build_chart_record
 from shared.dashboards import _build_chart_tombstones as _shared_build_chart_tombstones
@@ -14710,6 +14713,49 @@ def _build_chart_spec_options(
     )
 
 
+def _build_ai_chart_datasets(
+    sql: str,
+    columns: list[str],
+    rows: list[list[object]],
+    named_query_results: list[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    return _shared_build_ai_chart_datasets(sql, columns, rows, named_query_results)
+
+
+def _finalize_ai_chart_generation(
+    chart_spec_json: str,
+    chart_error: str,
+    columns: list[str],
+) -> tuple[str, str, str]:
+    return _shared_finalize_ai_chart_generation(
+        chart_spec_json,
+        chart_error,
+        columns,
+        infer_custom_mapping_from_option=_infer_custom_mapping_from_option,
+        build_fallback_custom_option_json=_build_fallback_custom_option_json,
+    )
+
+
+def _build_ai_chart_spec_response(
+    sql: str,
+    sql_retry_count: int,
+    columns: list[str],
+    named_query_results: list[Mapping[str, object]],
+    chart_spec_json: str,
+    custom_mapping_json: str,
+    chart_error: str,
+) -> dict[str, object]:
+    return _shared_build_ai_chart_spec_response(
+        sql,
+        sql_retry_count,
+        columns,
+        named_query_results,
+        chart_spec_json,
+        custom_mapping_json,
+        chart_error,
+    )
+
+
 def _build_named_datasets(named_query_results: list[Mapping[str, object]]) -> dict[str, dict[str, object]]:
     return _shared_build_named_datasets(
         named_query_results,
@@ -15490,21 +15536,8 @@ async def ai_build_chart_spec():
             422,
         )
 
-    # Primary query data for chart generation context.
-    columns: list[str] = []
-    rows: list[list] = []
-    datasets: list[dict[str, Any]] = []
     columns = list(primary_df.columns)
     rows = _json_safe_rows(primary_df.values.tolist()) if not primary_df.empty else []
-    datasets.append(
-        {
-            "name": "main",
-            "purpose": "primary dataset",
-            "sql": sql,
-            "columns": columns,
-            "rows": rows,
-        }
-    )
 
     # Optionally generate named queries for complex multi-dataset charts
     named_query_results: list[dict[str, Any]] = []
@@ -15527,17 +15560,8 @@ async def ai_build_chart_spec():
             thinking_level=thinking_level,
             use_repair=True,
         )
-        for nq in named_query_results:
-            if not str(nq.get("error") or ""):
-                datasets.append(
-                    {
-                        "name": str(nq.get("name") or ""),
-                        "purpose": str(nq.get("purpose") or ""),
-                        "sql": str(nq.get("sql") or ""),
-                        "columns": nq.get("columns") or [],
-                        "rows": nq.get("rows") or [],
-                    }
-                )
+
+    datasets = _build_ai_chart_datasets(sql, columns, rows, named_query_results)
 
     # Generate eCharts option JSON via LLM
     chart_spec_json = ""
@@ -15555,50 +15579,22 @@ async def ai_build_chart_spec():
             named_datasets=datasets,
             thinking_level=thinking_level,
         )
-        if chart_spec_json:
-            inferred_mapping = _infer_custom_mapping_from_option(chart_spec_json, columns)
-            custom_mapping_json = json.dumps(inferred_mapping, ensure_ascii=False) if inferred_mapping else "{}"
-        else:
-            # Ensure the UI always gets a usable option JSON even when chart generation fails.
-            chart_spec_json = _build_fallback_custom_option_json()
-            custom_mapping_json = json.dumps({"points": {"from": "rows"}}, ensure_ascii=False)
-            chart_error = (
-                f"{chart_error} Using fallback chart option template."
-                if chart_error
-                else "Chart generation failed; using fallback chart option template."
-            )
-
-    named_queries: list[dict[str, str]] = [
-        {
-            "name": str(nq.get("name") or ""),
-            "sql": str(nq.get("sql") or ""),
-            "purpose": str(nq.get("purpose") or ""),
-        }
-        for nq in named_query_results
-        if not str(nq.get("error") or "") and nq.get("name") and nq.get("sql")
-    ]
-
-    spec: dict[str, object] = {
-        "template_id": "custom_echarts",
-        "sql": {"mode": "raw", "override_sql": sql},
-        "named_queries": named_queries,
-        "visual": {
-            "custom_option_json": chart_spec_json or "{}",
-            "custom_mapping_json": custom_mapping_json,
-        },
-    }
+        chart_spec_json, custom_mapping_json, chart_error = _finalize_ai_chart_generation(
+            chart_spec_json,
+            chart_error,
+            columns,
+        )
 
     return jsonify(
-        {
-            "ok": True,
-            "spec": spec,
-            "sql": sql,
-            "retry_count": sql_retry_count,
-            "columns": columns,
-            "named_queries": named_queries,
-            "named_query_results": named_query_results,
-            "chart_error": chart_error,
-        }
+        _build_ai_chart_spec_response(
+            sql,
+            sql_retry_count,
+            columns,
+            named_query_results,
+            chart_spec_json,
+            custom_mapping_json,
+            chart_error,
+        )
     )
 
 
