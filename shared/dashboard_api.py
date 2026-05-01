@@ -29,6 +29,27 @@ def _rows_to_columns_and_data(rows: list[Mapping[str, object]]) -> tuple[list[st
     return columns, [[row[column] for column in columns] for row in rows]
 
 
+def _execute_chart_query_result(
+    db,
+    query: str,
+    *,
+    default_limit: int,
+    include_rows: bool,
+    include_records: bool,
+) -> dict[str, object]:
+    run_query = _apply_query_limit(query, default_limit=default_limit)
+    raw_rows = db.execute(run_query).fetchall()
+    columns, rows = _rows_to_columns_and_data(raw_rows)
+    payload: dict[str, object] = {
+        "columns": columns,
+    }
+    if include_rows:
+        payload["rows"] = rows
+    if include_records:
+        payload["records"] = [dict(row) for row in raw_rows]
+    return payload
+
+
 def _build_chart_spec_template_api_payload(
     chart_templates: Mapping[str, Mapping[str, object]],
     *,

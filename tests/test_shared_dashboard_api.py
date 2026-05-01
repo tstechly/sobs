@@ -6,6 +6,7 @@ from shared.dashboard_api import (
     _build_chart_spec_options,
     _build_chart_spec_template_api_payload,
     _build_named_datasets,
+    _execute_chart_query_result,
     _execute_chart_spec_named_queries,
     _rows_to_columns_and_data,
 )
@@ -248,4 +249,55 @@ def test_execute_chart_spec_named_queries_sanitizes_failures_and_build_named_dat
     assert datasets == {
         "bad": {"columns": [], "records": [], "rows": []},
         "ok": {"columns": ["value"], "records": [{"value": 3}], "rows": [[3]]},
+    }
+
+
+def test_execute_chart_query_result_shapes_rows_and_records_with_default_limit():
+    db = _FakeDb(
+        {
+            "SELECT service, count FROM metrics LIMIT 25": [
+                {"service": "checkout", "count": 2},
+                {"service": "payments", "count": 3},
+            ]
+        }
+    )
+
+    payload = _execute_chart_query_result(
+        db,
+        "SELECT service, count FROM metrics",
+        default_limit=25,
+        include_rows=True,
+        include_records=True,
+    )
+
+    assert db.executed == ["SELECT service, count FROM metrics LIMIT 25"]
+    assert payload == {
+        "columns": ["service", "count"],
+        "rows": [["checkout", 2], ["payments", 3]],
+        "records": [
+            {"service": "checkout", "count": 2},
+            {"service": "payments", "count": 3},
+        ],
+    }
+
+
+def test_execute_chart_query_result_preserves_existing_limit_and_optional_shapes():
+    db = _FakeDb(
+        {
+            "SELECT value FROM metrics LIMIT 5": [{"value": 7}],
+        }
+    )
+
+    payload = _execute_chart_query_result(
+        db,
+        "SELECT value FROM metrics LIMIT 5",
+        default_limit=20,
+        include_rows=False,
+        include_records=True,
+    )
+
+    assert db.executed == ["SELECT value FROM metrics LIMIT 5"]
+    assert payload == {
+        "columns": ["value"],
+        "records": [{"value": 7}],
     }

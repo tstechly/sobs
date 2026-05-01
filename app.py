@@ -207,6 +207,7 @@ from shared.dashboard_api import _apply_query_limit as _shared_apply_query_limit
 from shared.dashboard_api import _build_chart_spec_options as _shared_build_chart_spec_options
 from shared.dashboard_api import _build_chart_spec_template_api_payload as _shared_build_chart_spec_template_api_payload
 from shared.dashboard_api import _build_named_datasets as _shared_build_named_datasets
+from shared.dashboard_api import _execute_chart_query_result as _shared_execute_chart_query_result
 from shared.dashboard_api import _execute_chart_spec_named_queries as _shared_execute_chart_spec_named_queries
 from shared.dashboard_api import _rows_to_columns_and_data as _shared_rows_to_columns_and_data
 from shared.dashboards import _build_chart_record as _shared_build_chart_record
@@ -14670,6 +14671,23 @@ def _rows_to_columns_and_data(rows: list[Mapping[str, object]]) -> tuple[list[st
     return _shared_rows_to_columns_and_data(rows)
 
 
+def _execute_chart_query_result(
+    db: "ChDbConnection",
+    query: str,
+    *,
+    default_limit: int,
+    include_rows: bool,
+    include_records: bool,
+) -> dict[str, object]:
+    return _shared_execute_chart_query_result(
+        db,
+        query,
+        default_limit=default_limit,
+        include_rows=include_rows,
+        include_records=include_records,
+    )
+
+
 def _build_chart_spec_template_api_payload(
     chart_templates: Mapping[str, Mapping[str, object]],
 ) -> list[dict[str, object]]:
@@ -15057,13 +15075,10 @@ async def execute_chart_query():
     err = _validate_chart_query(query)
     if err:
         return jsonify({"error": err}), 400
-    query = _apply_query_limit(query, default_limit=1000)
     db = get_db()
     try:
-        result = db.execute(query)
-        rows = result.fetchall()
-        columns, data = _rows_to_columns_and_data(rows)
-        return jsonify({"columns": columns, "rows": data})
+        payload = _execute_chart_query_result(db, query, default_limit=1000, include_rows=True, include_records=False)
+        return jsonify({"columns": payload["columns"], "rows": payload["rows"]})
     except Exception as exc:
         app.logger.exception("Chart query execution failed: %s", query)
         return jsonify({"error": _public_dashboard_query_error(exc)}), 400
@@ -15127,12 +15142,11 @@ async def dry_run_chart_spec_api():
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
 
-    run_query = _apply_query_limit(query, default_limit=20)
     db = get_db()
     try:
-        result = db.execute(run_query)
-        rows = result.fetchall()
-        columns, data = _rows_to_columns_and_data(rows)
+        payload = _execute_chart_query_result(db, query, default_limit=20, include_rows=True, include_records=False)
+        columns = payload["columns"]
+        data = payload["rows"]
         column_types = _infer_column_types(columns, data)
     except Exception as exc:
         app.logger.exception("Chart spec dry-run failed")
@@ -15170,11 +15184,9 @@ async def validate_chart_spec_api():
 
     db = get_db()
     try:
-        run_query = _apply_query_limit(query, default_limit=200)
-        result = db.execute(run_query)
-        raw_rows = result.fetchall()
-        columns = list(raw_rows[0].keys()) if raw_rows else []
-        data = [dict(row) for row in raw_rows]
+        payload = _execute_chart_query_result(db, query, default_limit=200, include_rows=False, include_records=True)
+        columns = payload["columns"]
+        data = payload["records"]
         _render_chart_from_template(template_id, columns, data, normalized_spec)
     except Exception as exc:
         return jsonify({"valid": False, "error": _public_dashboard_query_error(exc)}), 400
@@ -15203,11 +15215,9 @@ async def render_chart_spec_api():
 
     db = get_db()
     try:
-        run_query = _apply_query_limit(query, default_limit=1000)
-        result = db.execute(run_query)
-        raw_rows = result.fetchall()
-        columns = list(raw_rows[0].keys()) if raw_rows else []
-        data = [dict(row) for row in raw_rows]
+        payload = _execute_chart_query_result(db, query, default_limit=1000, include_rows=False, include_records=True)
+        columns = payload["columns"]
+        data = payload["records"]
 
         # Execute named queries and collect datasets
         named_query_results = _execute_chart_spec_named_queries(
@@ -15243,14 +15253,11 @@ async def render_chart():
     if template_id not in CHART_TEMPLATES:
         return jsonify({"error": f"Unknown template: {template_id}"}), 400
 
-    query = _apply_query_limit(query, default_limit=1000)
-
     db = get_db()
     try:
-        result = db.execute(query)
-        raw_rows = result.fetchall()
-        columns = list(raw_rows[0].keys()) if raw_rows else []
-        data = [dict(row) for row in raw_rows]
+        payload = _execute_chart_query_result(db, query, default_limit=1000, include_rows=False, include_records=True)
+        columns = payload["columns"]
+        data = payload["records"]
 
         # Render using template
         option = _render_chart_from_template(template_id, columns, data)
