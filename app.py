@@ -414,6 +414,9 @@ from shared.sql_where import _replace_sql_outside_single_quotes as _shared_repla
 from shared.sql_where import _time_window_conditions as _shared_time_window_conditions
 from shared.sql_where import _validate_user_sql_where as _shared_validate_user_sql_where
 from shared.sql_where import _where_clause as _shared_where_clause
+from shared.storage_write import _WRITABLE_TABLES as _SHARED_WRITABLE_TABLES
+from shared.storage_write import _insert_rows_json_each_row as _shared_insert_rows_json_each_row
+from shared.storage_write import _normalize_ch_timestamp as _shared_normalize_ch_timestamp
 from shared.tag_rules import _load_tag_rules as _shared_load_tag_rules
 from shared.tag_rules import _match_single_condition as _shared_match_single_condition
 from shared.tag_rules import _match_tag_rule as _shared_match_tag_rule
@@ -6117,98 +6120,21 @@ def _error_id_sql_expr() -> str:
 # ``_insert_rows_json_each_row``.  This prevents inadvertent writes to
 # unintended tables if the ``table_name`` argument were ever derived from an
 # unexpected source, and makes the write surface explicit and auditable.
-_WRITABLE_TABLES: frozenset[str] = frozenset(
-    [
-        # OTEL/observability ingest tables
-        "otel_logs",
-        "otel_traces",
-        "otel_metrics_gauge",
-        "otel_metrics_sum",
-        "otel_metrics_histogram",
-        "otel_metrics_gauge_pinned",
-        "otel_metrics_sum_pinned",
-        "otel_metrics_histogram_pinned",
-        "hyperdx_sessions",
-        # SOBS internal state tables
-        "sobs_ai_memories",
-        "sobs_ai_settings",
-        "sobs_agent_rules",
-        "sobs_agent_runs",
-        "sobs_anomaly_rules",
-        "sobs_app_releases",
-        "sobs_app_settings",
-        "sobs_apps",
-        "sobs_chart_configs",
-        "sobs_cve_dispositions",
-        "sobs_cve_findings",
-        "sobs_dashboards",
-        "sobs_github_work_items",
-        "sobs_log_attr_keys",
-        "sobs_notification_channels",
-        "sobs_notification_log",
-        "sobs_notification_rules",
-        "sobs_raw_window_copy_state",
-        "sobs_raw_windows",
-        "sobs_record_tags",
-        "sobs_release_artifacts",
-        "sobs_reports",
-        "sobs_tag_rules",
-    ]
-)
+_WRITABLE_TABLES: frozenset[str] = _SHARED_WRITABLE_TABLES
 
 
 def _insert_rows_json_each_row(db, table_name: str, rows: list[dict]) -> int:
-    if table_name not in _WRITABLE_TABLES:
-        raise ValueError(
-            f"Attempt to write to unregistered table '{table_name}'. "
-            "Only tables in _WRITABLE_TABLES may be written via _insert_rows_json_each_row."
-        )
-    if not rows:
-        return 0
-    dt_keys = {
-        "Timestamp",
-        "TimeUnix",
-        "UpdatedAt",
-        "CreatedAt",
-        "CompletedAt",
-        "ReleasedAt",
-        "UploadedAt",
-        "ScannedAt",
-    }
-    normalized_rows = []
-    for row in rows:
-        item = dict(row)
-        for key in dt_keys:
-            if key in item:
-                item[key] = _normalize_ch_timestamp(item[key])
-        if "Events" in item and isinstance(item["Events"], dict) and "Timestamp" in item["Events"]:
-            item["Events"]["Timestamp"] = [_normalize_ch_timestamp(v) for v in item["Events"]["Timestamp"]]
-        normalized_rows.append(item)
-    payload = "\n".join(json.dumps(row, ensure_ascii=False) for row in normalized_rows)
-    with _telemetry.span(
-        "sobs.storage.write", **{"storage.engine": "chdb", "table": table_name, "row.count": len(normalized_rows)}
-    ):
-        db.execute(f"INSERT INTO {table_name} FORMAT JSONEachRow\n" + payload)
-    return len(normalized_rows)
+    return _shared_insert_rows_json_each_row(
+        db,
+        table_name,
+        rows,
+        normalize_ch_timestamp=_normalize_ch_timestamp,
+        span_factory=lambda name, attrs: _telemetry.span(name, **attrs),
+    )
 
 
 def _normalize_ch_timestamp(value) -> str:
-    """Convert common timestamp forms to ClickHouse DateTime64-compatible strings."""
-    if isinstance(value, datetime):
-        dt = value.astimezone(timezone.utc) if value.tzinfo else value
-    else:
-        raw = str(value or "").strip()
-        if not raw:
-            dt = datetime.now(timezone.utc)
-        else:
-            try:
-                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                # Last resort: preserve value and hope ClickHouse parser accepts it.
-                return raw.replace("T", " ")
-            if dt.tzinfo:
-                dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+    return _shared_normalize_ch_timestamp(value)
 
 
 def _safe_json_dumps(value: Any) -> str:
