@@ -333,6 +333,11 @@ from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _sh
 from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
 from shared.raw_metrics_window import _run_raw_window_copy_worker as _shared_run_raw_window_copy_worker
 from shared.raw_metrics_window import _window_copy_counts as _shared_window_copy_counts
+from shared.release_backfill import GITHUB_CONTENTS_LOCKFILE_CANDIDATES as _SHARED_GITHUB_CONTENTS_LOCKFILE_CANDIDATES
+from shared.release_backfill import _build_github_backfill_targets as _shared_build_github_backfill_targets
+from shared.release_backfill import (
+    _build_github_contents_dependency_row as _shared_build_github_contents_dependency_row,
+)
 from shared.release_enrichment import _github_item_is_security_related as _shared_github_item_is_security_related
 from shared.release_enrichment import _github_ref_candidates as _shared_github_ref_candidates
 from shared.release_enrichment import _github_version_tokens as _shared_github_version_tokens
@@ -11567,20 +11572,6 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
         app.logger.debug("github deps fetch: failed loading releases", exc_info=True)
         return {"attempted": 0, "inserted": 0, "max_releases": max_releases}
 
-    apps_by_id = {
-        str(row[0]): {
-            "repo_url": str(row[1] or "").strip(),
-            "enabled": int(row[2] or 0),
-        }
-        for row in app_rows
-    }
-
-    candidates: list[tuple[str, str, str]] = [
-        ("requirements.txt", "text/plain", "requirements"),
-        ("package-lock.json", "application/json", "package_lock"),
-        ("go.sum", "text/plain", "go_sum"),
-        ("Gemfile.lock", "text/plain", "gemfile_lock"),
-    ]
     parser_by_kind: dict[str, Callable[[str], list[dict[str, str]]]] = {
         "requirements": _parse_requirements_dependencies,
         "package_lock": _parse_package_lock_dependencies,
@@ -11593,22 +11584,19 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
     attempted = 0
     inserted = 0
 
-    for row in release_rows:
-        release_id = str(row[0] or "")
-        app_id = str(row[1] or "")
-        release_version = str(row[2] or "").strip()
-        commit_sha = str(row[3] or "").strip()
-        app_info = apps_by_id.get(app_id, {})
-        repo_url = str(app_info.get("repo_url") or "").strip()
-        app_enabled = int(cast(Any, app_info.get("enabled")) or 0)
-        if not release_id or not release_version or release_id in existing_release_ids:
-            continue
-        if not app_enabled or not repo_url:
-            continue
+    release_targets = _shared_build_github_backfill_targets(
+        release_rows,
+        app_rows,
+        existing_release_ids,
+        parse_github_repo_owner_name=_parse_github_repo_owner_name,
+    )
 
-        owner, repo = _parse_github_repo_owner_name(repo_url)
-        if not owner or not repo:
-            continue
+    for target in release_targets:
+        release_id = str(target["release_id"])
+        release_version = str(target["release_version"])
+        commit_sha = str(target["commit_sha"])
+        owner = str(target["owner"])
+        repo = str(target["repo"])
 
         attempted += 1
 
@@ -11629,7 +11617,7 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
 
         found_for_release = False
         for ref in _github_ref_candidates(release_version):
-            for lockfile_path, content_type, parser_kind in candidates:
+            for lockfile_path, content_type, parser_kind in _SHARED_GITHUB_CONTENTS_LOCKFILE_CANDIDATES:
                 encoded_path = urllib.parse.quote(lockfile_path, safe="/")
                 url = f"https://api.github.com/repos/{owner}/{repo}/contents/{encoded_path}"
                 try:
@@ -11664,35 +11652,21 @@ async def _fetch_release_deps_from_github(db: "ChDbConnection") -> dict[str, int
                 if not deps:
                     continue
 
-                checksum = hashlib.sha256(raw_bytes).hexdigest()
-                storage_ref = f"github://{owner}/{repo}/{lockfile_path}?ref={urllib.parse.quote(ref, safe='')}"
                 artifact_id = str(uuid.uuid4())
                 inserted_rows.append(
-                    {
-                        "Id": artifact_id,
-                        "ReleaseId": release_id,
-                        "ArtifactType": "dependencies-lockfile",
-                        "Name": lockfile_path,
-                        "ContentType": content_type,
-                        "Size": len(raw_bytes),
-                        "StorageRef": storage_ref,
-                        "ChecksumSha256": checksum,
-                        "Platform": "",
-                        "Architecture": "",
-                        "MetadataJson": json.dumps(
-                            {
-                                "source": "github_contents_api",
-                                "repo": f"{owner}/{repo}",
-                                "ref": ref,
-                                "path": lockfile_path,
-                                "dependencies": deps,
-                            },
-                            separators=(",", ":"),
-                        ),
-                        "UploadedAt": _normalize_ch_timestamp(datetime.now(timezone.utc)),
-                        "IsDeleted": 0,
-                        "Version": int(time.time() * 1000),
-                    }
+                    _shared_build_github_contents_dependency_row(
+                        artifact_id=artifact_id,
+                        release_id=release_id,
+                        owner=owner,
+                        repo=repo,
+                        lockfile_path=lockfile_path,
+                        content_type=content_type,
+                        ref=ref,
+                        raw_bytes=raw_bytes,
+                        dependencies=deps,
+                        uploaded_at=_normalize_ch_timestamp(datetime.now(timezone.utc)),
+                        version=int(time.time() * 1000),
+                    )
                 )
                 existing_release_ids.add(release_id)
                 inserted += 1
