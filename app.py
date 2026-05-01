@@ -13,7 +13,6 @@ import difflib
 import hashlib
 import inspect
 import io
-import ipaddress as _ipaddress
 import json
 import logging
 import os
@@ -231,6 +230,9 @@ from shared.dashboards import _get_dashboards as _shared_get_dashboards
 from shared.dashboards import _parse_chart_form_submission as _shared_parse_chart_form_submission
 from shared.dashboards import _prepare_import_chart as _shared_prepare_import_chart
 from shared.dashboards import _prepare_query_add_to_dashboard_chart as _shared_prepare_query_add_to_dashboard_chart
+from shared.geo_lookup import _build_geo_dict as _shared_build_geo_dict
+from shared.geo_lookup import _geo_lookup_batch as _shared_geo_lookup_batch
+from shared.geo_lookup import _is_private_ip as _shared_is_private_ip
 from shared.github import (
     _github_repo_token_key,
     _github_token_expiry_status,
@@ -11156,11 +11158,7 @@ def _fetch_trace_metric_context(
 
 def _is_private_ip(ip: str) -> bool:
     """Return True for private/loopback/link-local IPs that should not be geolocated."""
-    try:
-        addr = _ipaddress.ip_address(ip)
-        return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified
-    except ValueError:
-        return True
+    return _shared_is_private_ip(ip)
 
 
 def _build_geo_dict(
@@ -11171,7 +11169,7 @@ def _build_geo_dict(
     lon: float = 0.0,
 ) -> dict:
     """Build a normalised geo dict used throughout the geo-lookup subsystem."""
-    return {"country": country, "country_code": country_code, "city": city, "lat": lat, "lon": lon}
+    return _shared_build_geo_dict(country=country, country_code=country_code, city=city, lat=lat, lon=lon)
 
 
 def _get_geo_db():
@@ -11203,47 +11201,14 @@ def _geo_lookup_batch(ips: list[str], geo_enabled: bool = True) -> dict[str, dic
     geoip2fast is MIT licensed; its bundled data is sourced from IANA/RIR
     delegated statistics files (public domain).
     """
-    if not geo_enabled or not ips:
-        return {}
-
-    geo_db = _get_geo_db()
-    results: dict[str, dict] = {}
-
-    with _GEO_CACHE_LOCK:
-        uncached: list[str] = []
-        for ip in ips:
-            if _is_private_ip(ip):
-                results[ip] = _build_geo_dict(country="Private/Local")
-            elif ip in _GEO_CACHE:
-                _GEO_CACHE.move_to_end(ip)
-                results[ip] = _GEO_CACHE[ip]
-            else:
-                uncached.append(ip)
-
-    if not uncached or geo_db is None:
-        return results
-
-    fresh: dict[str, dict] = {}
-    for ip in uncached:
-        try:
-            r = geo_db.lookup(ip)  # type: ignore[union-attr]
-            if r and not r.is_private:
-                fresh[ip] = _build_geo_dict(
-                    country=r.country_name or "",
-                    country_code=r.country_code or "",
-                )
-            else:
-                fresh[ip] = _build_geo_dict(country="Private/Local")
-        except Exception:
-            pass
-
-    with _GEO_CACHE_LOCK:
-        while len(_GEO_CACHE) >= _GEO_CACHE_MAX:
-            _GEO_CACHE.popitem(last=False)
-        _GEO_CACHE.update(fresh)
-
-    results.update(fresh)
-    return results
+    return _shared_geo_lookup_batch(
+        ips,
+        geo_enabled=geo_enabled,
+        geo_db=_get_geo_db(),
+        geo_cache=_GEO_CACHE,
+        geo_cache_max=_GEO_CACHE_MAX,
+        geo_cache_lock=_GEO_CACHE_LOCK,
+    )
 
 
 # ---------------------------------------------------------------------------
