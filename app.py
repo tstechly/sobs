@@ -183,6 +183,13 @@ from shared.app_settings import _save_json_string_list_setting as _shared_save_j
 from shared.app_settings import _save_masking_custom_keys as _shared_save_masking_custom_keys
 from shared.app_settings import _save_masking_custom_patterns as _shared_save_masking_custom_patterns
 from shared.app_settings import _set_app_setting as _shared_set_app_setting
+from shared.apps_registry import _app_slug as _shared_app_slug
+from shared.apps_registry import _find_app_by_id as _shared_find_app_by_id
+from shared.apps_registry import _find_app_id_by_repo_url as _shared_find_app_id_by_repo_url
+from shared.apps_registry import _find_release_by_id as _shared_find_release_by_id
+from shared.apps_registry import _safe_json_dumps as _shared_safe_json_dumps
+from shared.apps_registry import _safe_json_loads as _shared_safe_json_loads
+from shared.apps_registry import _serialize_app_row as _shared_serialize_app_row
 from shared.chart_specs import _apply_chart_spec_visual_overrides as _shared_apply_chart_spec_visual_overrides
 from shared.chart_specs import _attach_drilldown_metadata as _shared_attach_drilldown_metadata
 from shared.chart_specs import _build_raw_chart_spec as _shared_build_raw_chart_spec
@@ -6205,20 +6212,7 @@ def _normalize_ch_timestamp(value) -> str:
 
 
 def _safe_json_dumps(value: Any) -> str:
-    if value is None:
-        return "{}"
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return "{}"
-        try:
-            parsed = json.loads(stripped)
-            return json.dumps(parsed, ensure_ascii=False)
-        except Exception:
-            return "{}"
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return "{}"
+    return _shared_safe_json_dumps(value)
 
 
 @overload
@@ -6230,70 +6224,27 @@ def _safe_json_loads(value: object, default: list[Any]) -> list[Any]: ...
 
 
 def _safe_json_loads(value: object, default: Any) -> Any:
-    raw = str(value or "").strip()
-    if not raw:
-        return default
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return default
-    if isinstance(default, dict) and isinstance(parsed, dict):
-        return cast(dict[str, Any], parsed)
-    if isinstance(default, list) and isinstance(parsed, list):
-        return cast(list[Any], parsed)
-    return default
+    return _shared_safe_json_loads(value, default)
 
 
 def _app_slug(value: str, fallback: str = "app") -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
-    return (slug or fallback)[:80]
+    return _shared_app_slug(value, fallback)
 
 
 def _find_app_by_id(db: ChDbConnection, app_id: str) -> dict[str, Any] | None:
-    row = db.execute(
-        "SELECT * FROM sobs_apps FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
-        [app_id],
-    ).fetchone()
-    return dict(row) if row else None
+    return _shared_find_app_by_id(db, app_id)
 
 
 def _find_app_id_by_repo_url(db: ChDbConnection, repo_url: str) -> str:
-    normalized_input = str(repo_url or "").strip()
-    if not normalized_input:
-        return ""
-    input_owner, input_repo = _parse_github_repo_owner_name(normalized_input)
-    if not input_owner or not input_repo:
-        return ""
-
-    rows = db.execute("SELECT Id, RepoUrl FROM sobs_apps FINAL WHERE IsDeleted=0").fetchall()
-    for row in rows:
-        owner, repo = _parse_github_repo_owner_name(str(row["RepoUrl"] or ""))
-        if owner.lower() == input_owner.lower() and repo.lower() == input_repo.lower():
-            return str(row["Id"] or "")
-    return ""
+    return _shared_find_app_id_by_repo_url(db, repo_url)
 
 
 def _find_release_by_id(db: ChDbConnection, release_id: str) -> dict[str, Any] | None:
-    row = db.execute(
-        "SELECT * FROM sobs_app_releases FINAL WHERE Id=? AND IsDeleted=0 LIMIT 1",
-        [release_id],
-    ).fetchone()
-    return dict(row) if row else None
+    return _shared_find_release_by_id(db, release_id)
 
 
 def _serialize_app_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": str(row.get("Id", "")),
-        "name": str(row.get("Name", "")),
-        "slug": str(row.get("Slug", "")),
-        "ownerTeam": str(row.get("OwnerTeam", "")),
-        "repoUrl": str(row.get("RepoUrl", "")),
-        "defaultEnvironment": str(row.get("DefaultEnvironment", "")),
-        "enabled": bool(int(row.get("Enabled", 1) or 0)),
-        "metadata": _safe_json_loads(row.get("MetadataJson", ""), {}),
-        "createdAt": str(row.get("CreatedAt", "")),
-        "updatedAt": str(row.get("UpdatedAt", "")),
-    }
+    return _shared_serialize_app_row(row)
 
 
 def _serialize_release_row(row: dict[str, Any]) -> dict[str, Any]:

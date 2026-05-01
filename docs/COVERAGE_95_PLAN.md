@@ -56,7 +56,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/rum_events.py` now measures `100%` line coverage in its dedicated direct test run after extracting RUM session-key derivation and RUM row-to-event-item shaping from `app.py`.
 - `shared/query_params.py` now measures `100%` line coverage in its dedicated direct test run after extracting request limit/offset/sort parsing and time-window query normalization from `app.py`.
 - `shared/telemetry_attrs.py` now measures `100%` line coverage in its dedicated direct test run after extracting hex conversion, telemetry attribute stringification, and ClickHouse map-to-dict coercion from `app.py`.
-- The latest sequential full-suite validation passed at `1668 passed, 4 skipped`.
+- `shared/apps_registry.py` now measures `100%` line coverage in its dedicated direct test run after extracting app-registry JSON coercion, slug normalization, app/release lookup, and app-row serialization helpers from `app.py`.
+- The latest sequential full-suite validation passed at `1675 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -205,6 +206,7 @@ Measured result so far:
 - `shared/rum_events.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/query_params.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/telemetry_attrs.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/apps_registry.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -243,6 +245,7 @@ Measured result so far:
 - `app.py` now delegates RUM session-key derivation and RUM row-to-event-item shaping to `shared/rum_events.py` while preserving the existing RUM session list, incident RUM evidence, untraced incident links, and timezone-aware incident primary-event behavior exercised by the app tests.
 - `app.py` now delegates request limit/offset/sort parsing and time-window query normalization to `shared/query_params.py` while preserving the existing logs/errors/traces/RUM/AI pagination, sort fallback, and time-window filtering behavior exercised by the app tests.
 - `app.py` now delegates hex conversion, telemetry attribute stringification, and ClickHouse map-to-dict coercion to `shared/telemetry_attrs.py` while preserving the existing ingest browser-context persistence, grouped error trace-link normalization, trace-detail incident links, and RUM/browser-context behaviors exercised by the app tests.
+- `app.py` now delegates app-registry JSON coercion, slug normalization, app/release lookup, and app-row serialization to `shared/apps_registry.py` while preserving the existing repository settings wizard, apps API, onboarding create-repo/import-repo, and app registry serialization behaviors exercised by the app tests.
 
 Why these slices were taken early:
 
