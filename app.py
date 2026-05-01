@@ -206,6 +206,8 @@ from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_
 from shared.dashboard_api import _apply_query_limit as _shared_apply_query_limit
 from shared.dashboard_api import _build_chart_spec_options as _shared_build_chart_spec_options
 from shared.dashboard_api import _build_chart_spec_template_api_payload as _shared_build_chart_spec_template_api_payload
+from shared.dashboard_api import _build_named_datasets as _shared_build_named_datasets
+from shared.dashboard_api import _execute_chart_spec_named_queries as _shared_execute_chart_spec_named_queries
 from shared.dashboard_api import _rows_to_columns_and_data as _shared_rows_to_columns_and_data
 from shared.dashboards import _build_chart_record as _shared_build_chart_record
 from shared.dashboards import _build_chart_tombstones as _shared_build_chart_tombstones
@@ -14690,6 +14692,15 @@ def _build_chart_spec_options(
     )
 
 
+def _build_named_datasets(named_query_results: list[Mapping[str, object]]) -> dict[str, dict[str, object]]:
+    return _shared_build_named_datasets(
+        named_query_results,
+        warn_named_query_failure=lambda name, error: app.logger.warning(
+            "Named query '%s' failed during render: %s", name, error
+        ),
+    )
+
+
 @app.route("/api/dashboards/list", methods=["GET"])
 @require_basic_auth
 async def api_dashboards_list():
@@ -15199,24 +15210,13 @@ async def render_chart_spec_api():
         data = [dict(row) for row in raw_rows]
 
         # Execute named queries and collect datasets
-        named_datasets: dict[str, dict[str, object]] = {}
         named_query_results = _execute_chart_spec_named_queries(
             db,
             normalized_spec.get("named_queries"),
             default_limit=1000,
             include_records=True,
         )
-        for nq in named_query_results:
-            nq_name = str(nq.get("name") or "").strip()
-            if not nq_name:
-                continue
-            if str(nq.get("error") or ""):
-                app.logger.warning("Named query '%s' failed during render: %s", nq_name, nq.get("error"))
-            named_datasets[nq_name] = {
-                "columns": nq.get("columns") or [],
-                "records": nq.get("records") or [],
-                "rows": nq.get("rows") or [],
-            }
+        named_datasets = _build_named_datasets(named_query_results)
 
         option = _render_chart_from_template(template_id, columns, data, normalized_spec, named_datasets=named_datasets)
         option = _apply_chart_spec_visual_overrides(template_id, option, normalized_spec)
@@ -15413,44 +15413,13 @@ def _execute_chart_spec_named_queries(
     include_records: bool,
 ) -> list[dict[str, object]]:
     """Execute spec named queries with uniform output shape for dry-run/render."""
-    results: list[dict[str, object]] = []
-    if not isinstance(named_queries, list):
-        return results
-    for nq in named_queries:
-        if not isinstance(nq, dict):
-            continue
-        nq_name = str(nq.get("name") or "").strip()
-        nq_sql = str(nq.get("sql") or "").strip()
-        if not nq_name or not nq_sql:
-            continue
-        nq_run = nq_sql if re.search(r"\bLIMIT\b", nq_sql, re.IGNORECASE) else f"{nq_sql} LIMIT {default_limit}"
-        try:
-            nq_result = db.execute(nq_run)
-            nq_rows = nq_result.fetchall()
-            nq_columns = list(nq_rows[0].keys()) if nq_rows else []
-            nq_data = [[row[col] for col in nq_columns] for row in nq_rows]
-            item: dict[str, object] = {
-                "name": nq_name,
-                "purpose": str(nq.get("purpose") or ""),
-                "columns": nq_columns,
-                "rows": nq_data,
-                "error": "",
-            }
-            if include_records:
-                item["records"] = [dict(row) for row in nq_rows]
-            results.append(item)
-        except Exception as exc:
-            item = {
-                "name": nq_name,
-                "purpose": str(nq.get("purpose") or ""),
-                "columns": [],
-                "rows": [],
-                "error": _public_dashboard_query_error(exc),
-            }
-            if include_records:
-                item["records"] = []
-            results.append(item)
-    return results
+    return _shared_execute_chart_spec_named_queries(
+        db,
+        named_queries,
+        default_limit=default_limit,
+        include_records=include_records,
+        public_query_error=_public_dashboard_query_error,
+    )
 
 
 @app.route("/api/dashboards/spec/ai-build", methods=["POST"])

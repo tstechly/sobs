@@ -102,3 +102,70 @@ def _build_chart_spec_options(
         "signals": signals,
         "metrics": metrics,
     }
+
+
+def _execute_chart_spec_named_queries(
+    db,
+    named_queries: object,
+    *,
+    default_limit: int,
+    include_records: bool,
+    public_query_error: Callable[[Exception], str],
+) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    if not isinstance(named_queries, list):
+        return results
+    for named_query in named_queries:
+        if not isinstance(named_query, dict):
+            continue
+        query_name = str(named_query.get("name") or "").strip()
+        query_sql = str(named_query.get("sql") or "").strip()
+        if not query_name or not query_sql:
+            continue
+        run_sql = _apply_query_limit(query_sql, default_limit=default_limit)
+        try:
+            query_rows = db.execute(run_sql).fetchall()
+            columns, rows = _rows_to_columns_and_data(query_rows)
+            item: dict[str, object] = {
+                "name": query_name,
+                "purpose": str(named_query.get("purpose") or ""),
+                "columns": columns,
+                "rows": rows,
+                "error": "",
+            }
+            if include_records:
+                item["records"] = [dict(row) for row in query_rows]
+            results.append(item)
+        except Exception as exc:
+            item = {
+                "name": query_name,
+                "purpose": str(named_query.get("purpose") or ""),
+                "columns": [],
+                "rows": [],
+                "error": public_query_error(exc),
+            }
+            if include_records:
+                item["records"] = []
+            results.append(item)
+    return results
+
+
+def _build_named_datasets(
+    named_query_results: list[Mapping[str, object]],
+    *,
+    warn_named_query_failure: Callable[[str, str], None] | None = None,
+) -> dict[str, dict[str, object]]:
+    datasets: dict[str, dict[str, object]] = {}
+    for result in named_query_results:
+        query_name = str(result.get("name") or "").strip()
+        if not query_name:
+            continue
+        error = str(result.get("error") or "")
+        if error and warn_named_query_failure is not None:
+            warn_named_query_failure(query_name, error)
+        datasets[query_name] = {
+            "columns": result.get("columns") or [],
+            "records": result.get("records") or [],
+            "rows": result.get("rows") or [],
+        }
+    return datasets
