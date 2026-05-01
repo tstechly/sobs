@@ -34,7 +34,7 @@ from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, wraps
-from typing import Any, Callable, cast, overload
+from typing import Any, Callable, Mapping, cast, overload
 
 import chdb.dbapi as chdb_driver
 import httpx
@@ -203,6 +203,15 @@ from shared.ci_push import _normalize_ttl_days as _shared_normalize_ttl_days
 from shared.ci_push import _revoke_ci_push_api_key as _shared_revoke_ci_push_api_key
 from shared.ci_push import _rotate_ci_push_api_key as _shared_rotate_ci_push_api_key
 from shared.ci_push import _set_ci_push_realtime_enabled as _shared_set_ci_push_realtime_enabled
+from shared.dashboards import _build_chart_record as _shared_build_chart_record
+from shared.dashboards import _build_chart_tombstones as _shared_build_chart_tombstones
+from shared.dashboards import _build_dashboard_record as _shared_build_dashboard_record
+from shared.dashboards import _build_dashboard_templates as _shared_build_dashboard_templates
+from shared.dashboards import _get_charts as _shared_get_charts
+from shared.dashboards import _get_dashboard as _shared_get_dashboard
+from shared.dashboards import _get_dashboards as _shared_get_dashboards
+from shared.dashboards import _parse_chart_form_submission as _shared_parse_chart_form_submission
+from shared.dashboards import _prepare_query_add_to_dashboard_chart as _shared_prepare_query_add_to_dashboard_chart
 from shared.github import (
     _github_repo_token_key,
     _github_token_expiry_status,
@@ -14575,49 +14584,76 @@ def _render_custom_echarts(
 
 
 def _get_dashboards(db: ChDbConnection) -> list[dict]:
-    rows = db.execute(
-        "SELECT Id, Name, Description FROM sobs_dashboards FINAL WHERE IsDeleted = 0 ORDER BY Name"
-    ).fetchall()
-    return [{"id": str(r["Id"]), "name": str(r["Name"]), "description": str(r["Description"])} for r in rows]
+    return _shared_get_dashboards(db)
 
 
 def _get_dashboard(db: ChDbConnection, dashboard_id: str) -> dict | None:
-    row = db.execute(
-        "SELECT Id, Name, Description FROM sobs_dashboards FINAL WHERE IsDeleted = 0 AND Id = ?",
-        [dashboard_id],
-    ).fetchone()
-    if not row:
-        return None
-    return {"id": str(row["Id"]), "name": str(row["Name"]), "description": str(row["Description"])}
+    return _shared_get_dashboard(db, dashboard_id)
 
 
 def _get_charts(db: ChDbConnection, dashboard_id: str) -> list[dict]:
-    rows = db.execute(
-        "SELECT Id, Title, ChartType, Query, OptionsJson, Position "
-        "FROM sobs_chart_configs FINAL WHERE IsDeleted = 0 AND DashboardId = ? "
-        "ORDER BY Position, Id",
-        [dashboard_id],
-    ).fetchall()
-    charts: list[dict] = []
-    for r in rows:
-        chart_type = str(r["ChartType"])
-        query = str(r["Query"])
-        options_json = str(r["OptionsJson"])
-        chart_spec = _build_raw_chart_spec(chart_type, query, options_json)
-        options_json = json.dumps({"chart_spec": chart_spec}, ensure_ascii=False)
+    return _shared_get_charts(db, dashboard_id, build_raw_chart_spec=_build_raw_chart_spec)
 
-        charts.append(
-            {
-                "id": str(r["Id"]),
-                "title": str(r["Title"]),
-                "chart_type": chart_type,
-                "query": query,
-                "options_json": options_json,
-                "position": int(r["Position"]),
-                "chart_spec": chart_spec,
-            }
-        )
-    return charts
+
+def _build_dashboard_record(
+    dashboard_id: str,
+    name: str,
+    description: str,
+    *,
+    version: int,
+    is_deleted: int = 0,
+) -> dict[str, object]:
+    return _shared_build_dashboard_record(dashboard_id, name, description, version=version, is_deleted=is_deleted)
+
+
+def _build_chart_record(
+    chart_id: str,
+    dashboard_id: str,
+    title: str,
+    chart_type: str,
+    query: str,
+    options_json: str,
+    position: int,
+    *,
+    version: int,
+    is_deleted: int = 0,
+) -> dict[str, object]:
+    return _shared_build_chart_record(
+        chart_id,
+        dashboard_id,
+        title,
+        chart_type,
+        query,
+        options_json,
+        position,
+        version=version,
+        is_deleted=is_deleted,
+    )
+
+
+def _build_chart_tombstones(
+    charts: list[dict[str, object]], dashboard_id: str, *, version: int
+) -> list[dict[str, object]]:
+    return _shared_build_chart_tombstones(charts, dashboard_id, version=version)
+
+
+def _prepare_query_add_to_dashboard_chart(
+    payload: Mapping[str, object],
+    *,
+    next_position: int,
+    version: int,
+) -> dict[str, object]:
+    return _shared_prepare_query_add_to_dashboard_chart(
+        payload,
+        compile_chart_spec=_compile_chart_spec,
+        next_position=next_position,
+        chart_id_factory=uuid.uuid4,
+        version=version,
+    )
+
+
+def _build_dashboard_templates(chart_templates: Mapping[str, Mapping[str, object]]) -> list[dict[str, object]]:
+    return _shared_build_dashboard_templates(chart_templates, default_chart_spec=_default_chart_spec)
 
 
 @app.route("/api/dashboards/list", methods=["GET"])
@@ -14635,74 +14671,29 @@ async def api_query_add_to_dashboard():
     """Persist query-page SQL + chart JSON into a dashboard chart record."""
     payload = await request.get_json(silent=True) or {}
 
-    dashboard_id = str(payload.get("dashboard_id") or "").strip()
-    title = str(payload.get("title") or "").strip()
-    sql = str(payload.get("sql") or "").strip()
-    chart_spec_raw = payload.get("chart_spec")
+    try:
+        dashboard_id = str(payload.get("dashboard_id") or "").strip()
+        version = int(time.time() * 1000)
+        db = get_db()
+        existing = _get_charts(db, dashboard_id) if dashboard_id else []
+        prepared = _prepare_query_add_to_dashboard_chart(
+            payload,
+            next_position=max((c["position"] for c in existing), default=-1) + 1,
+            version=version,
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
-    if not dashboard_id:
-        return jsonify({"ok": False, "error": "dashboard_id is required"}), 400
-    if not sql:
-        return jsonify({"ok": False, "error": "sql is required"}), 400
-    if not chart_spec_raw:
-        return jsonify({"ok": False, "error": "chart_spec is required"}), 400
-
-    db = get_db()
     dashboard = _get_dashboard(db, dashboard_id)
     if not dashboard:
         return jsonify({"ok": False, "error": "Dashboard not found"}), 404
 
-    if not title:
-        title = "Query Chart"
-
-    try:
-        chart_option = json.loads(chart_spec_raw) if isinstance(chart_spec_raw, str) else chart_spec_raw
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"chart_spec must be valid JSON: {exc}"}), 400
-    if not isinstance(chart_option, dict):
-        return jsonify({"ok": False, "error": "chart_spec must be a JSON object"}), 400
-
-    spec_raw = {
-        "template_id": "custom_echarts",
-        "sql": {"mode": "raw", "override_sql": sql},
-        "visual": {
-            "custom_option_json": json.dumps(chart_option, ensure_ascii=False),
-            "custom_mapping_json": "{}",
-        },
-    }
-    try:
-        template_id, query, normalized_spec = _compile_chart_spec(spec_raw)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"Chart spec error: {exc}"}), 400
-
-    options_json = json.dumps({"chart_spec": normalized_spec}, ensure_ascii=False)
-    existing = _get_charts(db, dashboard_id)
-    position = max((c["position"] for c in existing), default=-1) + 1
-
-    chart_id = str(uuid.uuid4())
-    version = int(time.time() * 1000)
-    _insert_rows_json_each_row(
-        db,
-        "sobs_chart_configs",
-        [
-            {
-                "Id": chart_id,
-                "DashboardId": dashboard_id,
-                "Title": title,
-                "ChartType": template_id,
-                "Query": query,
-                "OptionsJson": options_json,
-                "Position": position,
-                "IsDeleted": 0,
-                "Version": version,
-            }
-        ],
-    )
+    _insert_rows_json_each_row(db, "sobs_chart_configs", [prepared["record"]])
 
     return jsonify(
         {
             "ok": True,
-            "chart_id": chart_id,
+            "chart_id": prepared["chart_id"],
             "dashboard_id": dashboard_id,
             "dashboard_name": dashboard["name"],
             "dashboard_url": url_for("view_custom_dashboard", dashboard_id=dashboard_id),
@@ -14737,9 +14728,7 @@ async def create_dashboard():
     version = int(time.time() * 1000)
     db = get_db()
     _insert_rows_json_each_row(
-        db,
-        "sobs_dashboards",
-        [{"Id": dashboard_id, "Name": name, "Description": description, "IsDeleted": 0, "Version": version}],
+        db, "sobs_dashboards", [_build_dashboard_record(dashboard_id, name, description, version=version)]
     )
     return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
 
@@ -14753,20 +14742,7 @@ async def view_custom_dashboard(dashboard_id: str):
         await flash("Dashboard not found", "danger")
         return redirect(url_for("list_dashboards"))
     charts = _get_charts(db, dashboard_id)
-    # Convert chart_type to template metadata for frontend
-    templates = [
-        {
-            "id": tid,
-            "name": t["name"],
-            "description": t["description"],
-            "icon": t["icon"],
-            "query_shape": t.get("query_shape", ""),
-            "sample_sql": t.get("sample_sql", ""),
-            "drilldown": t.get("drilldown"),
-            "default_spec": _default_chart_spec(tid),
-        }
-        for tid, t in sorted(CHART_TEMPLATES.items())
-    ]
+    templates = _build_dashboard_templates(CHART_TEMPLATES)
     return await render_template(
         "custom_dashboard_view.html",
         dashboard=dashboard,
@@ -14856,38 +14832,20 @@ async def delete_dashboard(dashboard_id: str):
         await flash("Dashboard not found", "danger")
         return redirect(url_for("list_dashboards"))
     version = int(time.time() * 1000)
-    # Soft-delete dashboard
     _insert_rows_json_each_row(
         db,
         "sobs_dashboards",
         [
-            {
-                "Id": dashboard_id,
-                "Name": dashboard["name"],
-                "Description": dashboard["description"],
-                "IsDeleted": 1,
-                "Version": version,
-            }
+            _build_dashboard_record(
+                dashboard_id, dashboard["name"], dashboard["description"], version=version, is_deleted=1
+            )
         ],
     )
-    # Soft-delete all charts in this dashboard
     charts = _get_charts(db, dashboard_id)
     if charts:
-        tombstones = [
-            {
-                "Id": c["id"],
-                "DashboardId": dashboard_id,
-                "Title": c["title"],
-                "ChartType": c["chart_type"],
-                "Query": c["query"],
-                "OptionsJson": c["options_json"],
-                "Position": c["position"],
-                "IsDeleted": 1,
-                "Version": version,
-            }
-            for c in charts
-        ]
-        _insert_rows_json_each_row(db, "sobs_chart_configs", tombstones)
+        _insert_rows_json_each_row(
+            db, "sobs_chart_configs", _build_chart_tombstones(charts, dashboard_id, version=version)
+        )
     await flash(f"Dashboard '{dashboard['name']}' deleted", "success")
     return redirect(url_for("list_dashboards"))
 
@@ -14914,39 +14872,16 @@ async def add_chart(dashboard_id: str):
         db,
         "sobs_chart_configs",
         [
-            {
-                "Id": chart_id,
-                "DashboardId": dashboard_id,
-                "Title": title,
-                "ChartType": template_id,
-                "Query": query,
-                "OptionsJson": options_json,
-                "Position": position,
-                "IsDeleted": 0,
-                "Version": version,
-            }
+            _build_chart_record(
+                chart_id, dashboard_id, title, template_id, query, options_json, position, version=version
+            )
         ],
     )
     return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
 
 
 def _parse_chart_form_submission(form) -> tuple[str, str, str, str]:
-    title = (form.get("title") or "").strip()
-    chart_spec_json = (form.get("chart_spec_json") or "").strip()
-
-    if not title:
-        raise ValueError("Chart title is required")
-    if not chart_spec_json:
-        raise ValueError("Chart spec is required")
-
-    try:
-        spec_raw = json.loads(chart_spec_json)
-        template_id, query, normalized_spec = _compile_chart_spec(spec_raw)
-    except Exception as exc:
-        raise ValueError(f"Chart spec error: {exc}") from exc
-
-    options_json = json.dumps({"chart_spec": normalized_spec}, ensure_ascii=False)
-    return title, template_id, query, options_json
+    return _shared_parse_chart_form_submission(form, compile_chart_spec=_compile_chart_spec)
 
 
 @app.route("/dashboards/<dashboard_id>/charts/<chart_id>/edit", methods=["POST"])
@@ -14976,17 +14911,16 @@ async def edit_chart(dashboard_id: str, chart_id: str):
         db,
         "sobs_chart_configs",
         [
-            {
-                "Id": chart_id,
-                "DashboardId": dashboard_id,
-                "Title": title,
-                "ChartType": template_id,
-                "Query": query,
-                "OptionsJson": options_json,
-                "Position": chart["position"],
-                "IsDeleted": 0,
-                "Version": version,
-            }
+            _build_chart_record(
+                chart_id,
+                dashboard_id,
+                title,
+                template_id,
+                query,
+                options_json,
+                chart["position"],
+                version=version,
+            )
         ],
     )
     return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
@@ -15020,17 +14954,16 @@ async def clone_chart(dashboard_id: str, chart_id: str):
         db,
         "sobs_chart_configs",
         [
-            {
-                "Id": str(uuid.uuid4()),
-                "DashboardId": dashboard_id,
-                "Title": title,
-                "ChartType": template_id,
-                "Query": query,
-                "OptionsJson": options_json,
-                "Position": position,
-                "IsDeleted": 0,
-                "Version": version,
-            }
+            _build_chart_record(
+                str(uuid.uuid4()),
+                dashboard_id,
+                title,
+                template_id,
+                query,
+                options_json,
+                position,
+                version=version,
+            )
         ],
     )
     return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
@@ -15054,17 +14987,17 @@ async def remove_chart(dashboard_id: str, chart_id: str):
         db,
         "sobs_chart_configs",
         [
-            {
-                "Id": chart_id,
-                "DashboardId": dashboard_id,
-                "Title": chart["title"],
-                "ChartType": chart["chart_type"],
-                "Query": chart["query"],
-                "OptionsJson": chart["options_json"],
-                "Position": chart["position"],
-                "IsDeleted": 1,
-                "Version": version,
-            }
+            _build_chart_record(
+                chart_id,
+                dashboard_id,
+                chart["title"],
+                chart["chart_type"],
+                chart["query"],
+                chart["options_json"],
+                chart["position"],
+                version=version,
+                is_deleted=1,
+            )
         ],
     )
     return redirect(url_for("view_custom_dashboard", dashboard_id=dashboard_id))
