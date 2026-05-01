@@ -11,7 +11,6 @@ import base64
 import copy
 import difflib
 import hashlib
-import hmac
 import inspect
 import io
 import ipaddress as _ipaddress
@@ -374,6 +373,15 @@ from shared.rum_assets import _rum_asset_signature_payload as _shared_rum_asset_
 from shared.rum_assets import _sanitize_rum_asset_name as _shared_sanitize_rum_asset_name
 from shared.rum_assets import _sanitize_rum_asset_type as _shared_sanitize_rum_asset_type
 from shared.rum_assets import _verify_rum_asset_signature as _shared_verify_rum_asset_signature
+from shared.rum_client_auth import _normalize_origin as _shared_normalize_origin
+from shared.rum_client_auth import _request_origin as _shared_request_origin
+from shared.rum_client_auth import _rum_b64url_decode as _shared_rum_b64url_decode
+from shared.rum_client_auth import _rum_b64url_encode as _shared_rum_b64url_encode
+from shared.rum_client_auth import _rum_client_sign as _shared_rum_client_sign
+from shared.rum_client_auth import _rum_client_token_decode as _shared_rum_client_token_decode
+from shared.rum_client_auth import _rum_client_token_encode as _shared_rum_client_token_encode
+from shared.rum_client_auth import _same_origin_request as _shared_same_origin_request
+from shared.rum_client_auth import _verify_rum_client_auth as _shared_verify_rum_client_auth
 from shared.sql_where import _append_regex_expression_clauses as _shared_append_regex_expression_clauses
 from shared.sql_where import _append_time_window_filter as _shared_append_time_window_filter
 from shared.sql_where import _normalize_ai_sql_where as _shared_normalize_ai_sql_where
@@ -5693,136 +5701,46 @@ def _verify_rum_asset_signature(
 
 
 def _rum_b64url_encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+    return _shared_rum_b64url_encode(value)
 
 
 def _rum_b64url_decode(value: str) -> bytes:
-    text = str(value or "").strip()
-    if not text:
-        return b""
-    pad_len = (-len(text)) % 4
-    return base64.urlsafe_b64decode(text + ("=" * pad_len))
+    return _shared_rum_b64url_decode(value)
 
 
 def _normalize_origin(value: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    parsed = urllib.parse.urlparse(raw)
-    if not parsed.scheme or not parsed.netloc:
-        return ""
-    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+    return _shared_normalize_origin(value)
 
 
 def _request_origin() -> str:
-    origin = _normalize_origin(request.headers.get("Origin", ""))
-    if origin:
-        return origin
-    referer = request.headers.get("Referer", "")
-    parsed = urllib.parse.urlparse(str(referer or "").strip())
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-    return ""
+    return _shared_request_origin(dict(request.headers))
 
 
 def _same_origin_request() -> bool:
-    origin = _normalize_origin(request.headers.get("Origin", ""))
-    referer = request.headers.get("Referer", "")
-    referer_origin = ""
-    if referer:
-        parsed = urllib.parse.urlparse(str(referer or "").strip())
-        if parsed.scheme and parsed.netloc:
-            referer_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-
-    forwarded_host = str(request.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip().lower()
-    expected_host = forwarded_host or str(request.host or "").strip().lower()
-    forwarded_proto = str(request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
-    expected_scheme = forwarded_proto or str(request.scheme or "").strip().lower() or "http"
-    expected_origin = f"{expected_scheme}://{expected_host}" if expected_host else ""
-    if not expected_origin:
-        return False
-    return origin == expected_origin or referer_origin == expected_origin
+    return _shared_same_origin_request(dict(request.headers), host=request.host, scheme=request.scheme)
 
 
 def _rum_client_sign(payload: str) -> str:
-    return hmac.new(RUM_CLIENT_SIGNING_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return _shared_rum_client_sign(payload, signing_key=RUM_CLIENT_SIGNING_KEY)
 
 
 def _rum_client_token_encode(claims: dict[str, Any]) -> str:
-    encoded_payload = _rum_b64url_encode(json.dumps(claims, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    signature = _rum_client_sign(encoded_payload)
-    return f"{encoded_payload}.{signature}"
+    return _shared_rum_client_token_encode(claims, signing_key=RUM_CLIENT_SIGNING_KEY)
 
 
 def _rum_client_token_decode(token: str) -> tuple[dict[str, Any] | None, str]:
-    parts = str(token or "").strip().split(".")
-    if len(parts) != 2:
-        return None, "Invalid RUM client token format"
-    payload_b64, signature = parts[0], parts[1].lower()
-    expected = _rum_client_sign(payload_b64)
-    if not secrets.compare_digest(signature, expected):
-        return None, "Invalid RUM client token signature"
-    try:
-        claims = json.loads(_rum_b64url_decode(payload_b64).decode("utf-8"))
-    except Exception:
-        return None, "Invalid RUM client token payload"
-    if not isinstance(claims, dict):
-        return None, "Invalid RUM client token payload"
-    return claims, ""
+    return _shared_rum_client_token_decode(token, signing_key=RUM_CLIENT_SIGNING_KEY)
 
 
 def _verify_rum_client_auth(events: list[Any]) -> tuple[bool, int, str]:
-    mode = (RUM_CLIENT_AUTH_MODE or "none").strip().lower()
-    if mode in ("", "none", "off", "disabled"):
-        return True, 200, ""
-
-    if mode not in ("origin", "origin-session"):
-        return False, 500, "Invalid SOBS_RUM_CLIENT_AUTH_MODE"
-
-    if not RUM_CLIENT_SIGNING_KEY:
-        return False, 503, "RUM client signing key is not configured"
-
-    token = (request.headers.get("X-SOBS-RUM-Token") or "").strip()
-    if not token:
-        for event in events:
-            if isinstance(event, dict):
-                token = str(event.get("clientAuthToken", "")).strip()
-                if token:
-                    break
-    if not token:
-        return False, 401, "Missing RUM client auth token"
-
-    claims, err = _rum_client_token_decode(token)
-    if claims is None:
-        return False, 401, err
-
-    now = int(time.time())
-    try:
-        exp = int(claims.get("exp", 0) or 0)
-    except (TypeError, ValueError):
-        return False, 401, "Invalid RUM client token expiry"
-    if exp <= now:
-        return False, 401, "RUM client token expired"
-
-    bound_origin = _normalize_origin(str(claims.get("origin", "")))
-    req_origin = _request_origin()
-    if not bound_origin:
-        return False, 401, "RUM client token missing origin binding"
-    if not req_origin:
-        return False, 401, "Missing Origin/Referer for RUM client auth"
-    if req_origin != bound_origin:
-        return False, 401, "RUM client token origin mismatch"
-
-    bound_app = str(claims.get("app", "")).strip()
-    if bound_app:
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            event_app = str(event.get("appName", "")).strip()
-            if event_app and event_app != bound_app:
-                return False, 401, "RUM client token app mismatch"
-
-    return True, 200, ""
+    return _shared_verify_rum_client_auth(
+        events,
+        mode=RUM_CLIENT_AUTH_MODE,
+        signing_key=RUM_CLIENT_SIGNING_KEY,
+        headers=dict(request.headers),
+        host=request.host,
+        scheme=request.scheme,
+    )
 
 
 def _rum_asset_meta_path(asset_id: str) -> str:
