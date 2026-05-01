@@ -7,6 +7,7 @@ import pytest
 from shared.chart_specs import (
     _apply_chart_spec_visual_overrides,
     _attach_drilldown_metadata,
+    _build_custom_drilldown,
     _build_raw_chart_spec,
     _coerce_positive_int,
     _compile_builder_sql,
@@ -17,9 +18,14 @@ from shared.chart_specs import (
     _format_drilldown_time,
     _infer_column_types,
     _normalize_chart_spec,
+    _normalize_custom_series_point_order,
     _parse_bool,
+    _parse_custom_json_config,
     _public_dashboard_query_error,
+    _render_custom_echarts,
+    _resolve_custom_binding_expr,
     _resolve_template_role_indices,
+    _resolve_template_string,
     _sql_literal,
     _validate_chart_query,
 )
@@ -507,3 +513,171 @@ def test_attach_drilldown_metadata_handles_time_series_and_heatmap_templates():
         "service": "checkout",
     }
     assert heatmap["series"][0]["data"][2] == "skip"
+
+
+def test_parse_custom_json_config_and_binding_expr_handle_json_sources_and_errors():
+    assert _parse_custom_json_config({"a": 1}, "field") == {"a": 1}
+    assert _parse_custom_json_config(None, "field") == {}
+    assert _parse_custom_json_config("", "field") == {}
+    assert _parse_custom_json_config("[1, 2]", "field") == [1, 2]
+
+    with pytest.raises(ValueError, match="field must be valid JSON"):
+        _parse_custom_json_config("{bad", "field")
+
+    records = [{"svc": "checkout", "value": 10}, {"svc": "payments", "value": 20}]
+    rows = [["checkout", 10], ["payments", 20]]
+    columns = ["svc", "value"]
+
+    assert _resolve_custom_binding_expr("", columns, records, rows) is None
+    assert _resolve_custom_binding_expr("columns", columns, records, rows) == columns
+    assert _resolve_custom_binding_expr("svc", columns, records, rows) == ["checkout", "payments"]
+    assert _resolve_custom_binding_expr({"from": "rows"}, columns, records, rows) == rows
+    assert _resolve_custom_binding_expr({"from": "records"}, columns, records, rows) == records
+    assert _resolve_custom_binding_expr({"from": "literal", "value": 7}, columns, records, rows) == 7
+    assert _resolve_custom_binding_expr({"from": "column", "name": "value"}, columns, records, rows) == [10, 20]
+
+    with pytest.raises(ValueError, match="strings or objects"):
+        _resolve_custom_binding_expr(7, columns, records, rows)
+
+    with pytest.raises(ValueError, match="non-empty 'name'"):
+        _resolve_custom_binding_expr({"from": "column", "name": ""}, columns, records, rows)
+
+    with pytest.raises(ValueError, match="Unsupported custom mapping mode"):
+        _resolve_custom_binding_expr({"from": "nope"}, columns, records, rows)
+
+
+def test_template_string_drilldown_and_custom_point_order_cover_rendering_helpers():
+    assert _resolve_template_string("svc={{ svc }};missing={{missing}}", {"svc": "checkout"}) == "svc=checkout;missing="
+    assert _build_custom_drilldown({}, []) is None
+
+    drilldown = _build_custom_drilldown(
+        {
+            "_drilldown": {
+                "target": "logs",
+                "label": "Open logs",
+                "bucket_seconds": 60,
+                "time_axis": "ts",
+                "service_axis": "service",
+                "extra": {"service": "{{service}}", "from_ts": "{{ts}}", "fixed": 3},
+            }
+        },
+        [{"service": "checkout", "ts": "2024-01-01T00:00:00Z"}],
+    )
+    assert drilldown == {
+        "target": "logs",
+        "label": "Open logs",
+        "bucket_seconds": 60,
+        "time_axis": "ts",
+        "service_axis": "service",
+        "extra": {"service": "checkout", "from_ts": "2024-01-01T00:00:00Z", "fixed": 3},
+    }
+    assert _build_custom_drilldown({"_drilldown": {"target": "bad"}}, []) is None
+
+    option = {
+        "series": [
+            {
+                "data": [
+                    ["2024-01-01T00:02:00Z", 2],
+                    ["2024-01-01T00:01:00Z", 1],
+                    [1, 4],
+                    ["non-iso", 3],
+                ]
+            },
+            {"data": [["only-one"]]},
+            {"data": ["skip-me", ["2024-01-01T00:00:00Z", 0]]},
+        ]
+    }
+    _normalize_custom_series_point_order(option)
+    assert option["series"][0]["data"] == [
+        ["2024-01-01T00:01:00Z", 1],
+        ["2024-01-01T00:02:00Z", 2],
+        [1, 4],
+        ["non-iso", 3],
+    ]
+
+
+def test_normalize_custom_series_point_order_handles_missing_series_and_mixed_non_series_entries():
+    option = {"series": ["skip", {"data": [[2, "b"], [1, "a"]]}]}
+    _normalize_custom_series_point_order(option)
+    assert option["series"][1]["data"] == [[1, "a"], [2, "b"]]
+
+    empty = {}
+    _normalize_custom_series_point_order(empty)
+    assert empty == {}
+
+
+def test_render_custom_echarts_supports_named_datasets_defaults_and_custom_drilldown():
+    option = _render_custom_echarts(
+        {
+            "echarts_option_template": {
+                "title": {"text": "{{columns:details}}"},
+                "series": [{"type": "line", "data": "{{points}}"}],
+            }
+        },
+        ["ts", "service", "value"],
+        [["2024-01-01T00:02:00Z", "checkout", 2], ["2024-01-01T00:01:00Z", "checkout", 1]],
+        {
+            "visual": {
+                "custom_mapping_json": json.dumps(
+                    {
+                        "points": {"from": "rows"},
+                        "_drilldown": {
+                            "target": "logs",
+                            "extra": {"service": "{{service}}", "from_ts": "{{ts}}"},
+                        },
+                    }
+                ),
+                "custom_option_json": json.dumps(
+                    {
+                        "title": {"text": "{{columns:details}}"},
+                        "series": [{"type": "line", "data": "{{points}}"}],
+                    }
+                ),
+            }
+        },
+        named_datasets={"details": {"columns": ["ts", "value"], "rows": [[1, 2]], "records": [{"ts": 1}]}},
+    )
+
+    assert option["backgroundColor"] == "transparent"
+    assert option["textStyle"] == {"color": "#adb5bd"}
+    assert option["title"]["text"] == ["ts", "value"]
+    assert option["series"][0]["data"] == [
+        ["2024-01-01T00:01:00Z", "checkout", 1],
+        ["2024-01-01T00:02:00Z", "checkout", 2],
+    ]
+    assert option["_customDrilldown"] == {
+        "target": "logs",
+        "label": "Open Source View",
+        "extra": {"service": "checkout", "from_ts": "2024-01-01T00:02:00Z"},
+    }
+
+    with pytest.raises(ValueError, match="visual.custom_mapping_json must be a JSON object"):
+        _render_custom_echarts(
+            {"echarts_option_template": {}},
+            ["value"],
+            [[1]],
+            {"visual": {"custom_mapping_json": "[]", "custom_option_json": "{}"}},
+        )
+
+
+def test_render_custom_echarts_handles_template_fallback_dict_rows_and_invalid_custom_option_shapes():
+    option = _render_custom_echarts(
+        {
+            "echarts_option_template": {
+                "series": [{"type": "line", "data": "{{rows}}"}],
+            }
+        },
+        ["ts", "value"],
+        [{"ts": "2024-01-01T00:00:00Z", "value": 1}],
+        {"visual": {"custom_mapping_json": json.dumps({}), "custom_option_json": "  "}},
+        named_datasets={"skip": []},
+    )
+    assert option["series"][0]["data"] == [["2024-01-01T00:00:00Z", 1]]
+
+    with pytest.raises(ValueError, match="visual.custom_option_json must be a JSON object"):
+        _render_custom_echarts(
+            {"echarts_option_template": {}},
+            ["value"],
+            [[1]],
+            {"visual": {"custom_mapping_json": "{}", "custom_option_json": "[]"}},
+        )

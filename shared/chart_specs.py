@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 from datetime import datetime, timezone
@@ -1180,4 +1181,200 @@ def _attach_drilldown_metadata(
                 first_series["data"] = drilldown_data
         return option
 
+    return option
+
+
+def _parse_custom_json_config(raw: object, field_name: str) -> object:
+    if isinstance(raw, (dict, list)):
+        return raw
+    if raw is None:
+        return {}
+    text = str(raw).strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be valid JSON") from exc
+
+
+def _resolve_custom_binding_expr(
+    expr: object, columns: list[str], records: list[dict[str, object]], rows: list[list[object]]
+) -> object:
+    if isinstance(expr, str):
+        key = expr.strip()
+        if not key:
+            return None
+        if key == "columns":
+            return columns
+        if key == "rows":
+            return rows
+        if key == "records":
+            return records
+        return [record.get(key) for record in records]
+
+    if not isinstance(expr, dict):
+        raise ValueError("custom_mapping_json values must be strings or objects")
+
+    mode = str(expr.get("from") or "column").strip().lower()
+    if mode == "columns":
+        return columns
+    if mode == "rows":
+        return rows
+    if mode == "records":
+        return records
+    if mode == "literal":
+        return expr.get("value")
+    if mode == "column":
+        name = str(expr.get("name") or "").strip()
+        if not name:
+            raise ValueError("custom_mapping_json column mapping requires a non-empty 'name'")
+        return [record.get(name) for record in records]
+
+    raise ValueError(f"Unsupported custom mapping mode: {mode}")
+
+
+def _resolve_template_string(value: str, record: dict[str, object]) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        resolved = record.get(key)
+        if resolved is None:
+            return ""
+        return str(resolved)
+
+    return re.sub(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}", _replace, value)
+
+
+def _build_custom_drilldown(mapping: dict[str, object], records: list[dict[str, object]]) -> dict[str, object] | None:
+    drilldown_raw = mapping.get("_drilldown")
+    if not isinstance(drilldown_raw, dict):
+        return None
+
+    target = str(drilldown_raw.get("target") or "").strip()
+    if target not in {"logs", "metrics", "traces", "errors"}:
+        return None
+
+    first_record = records[0] if records else {}
+    label = str(drilldown_raw.get("label") or "Open Source View").strip() or "Open Source View"
+
+    extra_raw = drilldown_raw.get("extra")
+    extra: dict[str, object] = {}
+    if isinstance(extra_raw, dict):
+        for key, value in extra_raw.items():
+            extra_key = str(key).strip()
+            if not extra_key:
+                continue
+            if isinstance(value, str):
+                extra[extra_key] = _resolve_template_string(value, first_record)
+            else:
+                extra[extra_key] = value
+
+    out: dict[str, object] = {"target": target, "label": label}
+    for optional_key in ["bucket_seconds", "time_axis", "service_axis"]:
+        if optional_key in drilldown_raw:
+            out[optional_key] = drilldown_raw[optional_key]
+    if extra:
+        out["extra"] = extra
+    return out
+
+
+def _normalize_custom_series_point_order(option: dict[str, object]) -> None:
+    """Ensure deterministic ordering for tuple-like series points in custom ECharts."""
+    series = option.get("series")
+    if not isinstance(series, list):
+        return
+
+    def _to_sort_key(value: object) -> tuple[int, object]:
+        if isinstance(value, datetime):
+            return (0, value)
+        if isinstance(value, (int, float)):
+            return (1, float(value))
+        if isinstance(value, str):
+            text = value.strip()
+            try:
+                return (0, datetime.fromisoformat(text.replace("Z", "+00:00")))
+            except ValueError:
+                return (2, text)
+        return (3, str(value))
+
+    for entry in series:
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("data")
+        if not isinstance(data, list) or len(data) < 2:
+            continue
+        if not all(isinstance(point, (list, tuple)) and len(point) >= 2 for point in data):
+            continue
+        try:
+            data.sort(key=lambda point: _to_sort_key(point[0]))
+        except Exception:
+            continue
+
+
+def _render_custom_echarts(
+    template: dict[str, object],
+    columns: list[str],
+    rows: list[object],
+    spec: dict[str, object] | None,
+    named_datasets: dict[str, dict[str, object]] | None = None,
+) -> dict[str, object]:
+    visual = spec.get("visual") if isinstance(spec, dict) and isinstance(spec.get("visual"), dict) else {}
+    visual_dict = visual if isinstance(visual, dict) else {}
+
+    mapping_raw = _parse_custom_json_config(visual_dict.get("custom_mapping_json"), "visual.custom_mapping_json")
+    if not isinstance(mapping_raw, dict):
+        raise ValueError("visual.custom_mapping_json must be a JSON object")
+    mapping = mapping_raw
+
+    option_raw_cfg = visual_dict.get("custom_option_json")
+    if option_raw_cfg is None or (isinstance(option_raw_cfg, str) and not option_raw_cfg.strip()):
+        option_template = copy.deepcopy(template.get("echarts_option_template", {}))
+    else:
+        option_template = _parse_custom_json_config(option_raw_cfg, "visual.custom_option_json")
+    if not isinstance(option_template, dict):
+        raise ValueError("visual.custom_option_json must be a JSON object")
+
+    records: list[dict[str, object]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            records.append({str(key): row.get(key) for key in columns})
+            continue
+        if isinstance(row, (list, tuple)):
+            records.append({col: row[idx] if idx < len(row) else None for idx, col in enumerate(columns)})
+
+    rows_2d = [[record.get(col) for col in columns] for record in records]
+
+    bindings: dict[str, object] = {
+        "columns": columns,
+        "records": records,
+        "rows": rows_2d,
+    }
+    for key, expr in mapping.items():
+        binding_key = str(key).strip()
+        if not binding_key or binding_key.startswith("_"):
+            continue
+        bindings[binding_key] = _resolve_custom_binding_expr(expr, columns, records, rows_2d)
+
+    if named_datasets:
+        for dataset_name, dataset_data in named_datasets.items():
+            if not isinstance(dataset_data, dict):
+                continue
+            bindings[f"rows:{dataset_name}"] = dataset_data.get("rows") or []
+            bindings[f"records:{dataset_name}"] = dataset_data.get("records") or []
+            bindings[f"columns:{dataset_name}"] = dataset_data.get("columns") or []
+
+    option = _deep_substitute(option_template, bindings)
+    if not isinstance(option, dict):
+        raise ValueError("Custom ECharts option must resolve to a JSON object")
+
+    if "backgroundColor" not in option:
+        option["backgroundColor"] = "transparent"
+    if "textStyle" not in option:
+        option["textStyle"] = {"color": "#adb5bd"}
+
+    _normalize_custom_series_point_order(option)
+
+    drilldown = _build_custom_drilldown(mapping, records)
+    if drilldown:
+        option["_customDrilldown"] = drilldown
     return option
