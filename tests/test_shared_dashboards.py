@@ -3,6 +3,8 @@ import json
 import pytest
 
 from shared.dashboards import (
+    _build_chart_export_filename,
+    _build_chart_export_payload,
     _build_chart_record,
     _build_chart_tombstones,
     _build_dashboard_record,
@@ -11,6 +13,7 @@ from shared.dashboards import (
     _get_dashboard,
     _get_dashboards,
     _parse_chart_form_submission,
+    _prepare_import_chart,
     _prepare_query_add_to_dashboard_chart,
     _serialize_chart_row,
     _serialize_dashboard_row,
@@ -295,3 +298,77 @@ def test_build_dashboard_templates_maps_template_metadata_and_defaults():
             "default_spec": {"template_id": "heatmap"},
         },
     ]
+
+
+def test_build_chart_export_helpers_and_prepare_import_chart_cover_template_round_trip():
+    export_payload = _build_chart_export_payload(
+        {
+            "title": "Latency / P95",
+            "chart_spec": {"template_id": "heatmap", "sql": {"mode": "raw", "override_sql": "SELECT 1"}},
+        }
+    )
+    assert export_payload == {
+        "sobs_chart_template_version": 1,
+        "title": "Latency / P95",
+        "chart_spec": {"template_id": "heatmap", "sql": {"mode": "raw", "override_sql": "SELECT 1"}},
+    }
+    assert _build_chart_export_filename("Latency / P95") == "sobs_chart_Latency___P95.json"
+
+    def _fake_compile(spec_raw):
+        assert spec_raw == {"template_id": "heatmap"}
+        return "heatmap", "SELECT 1", {"template_id": "heatmap"}
+
+    prepared = _prepare_import_chart(
+        {"sobs_chart_template_version": 1, "title": "Imported", "chart_spec": {"template_id": "heatmap"}},
+        compile_chart_spec=_fake_compile,
+        next_position=3,
+        chart_id_factory=lambda: "chart-42",
+        version=999,
+        dashboard_id="db-1",
+    )
+    assert prepared["chart_id"] == "chart-42"
+    assert prepared["title"] == "Imported"
+    assert prepared["position"] == 3
+    assert prepared["record"] == {
+        "Id": "chart-42",
+        "DashboardId": "db-1",
+        "Title": "Imported",
+        "ChartType": "heatmap",
+        "Query": "SELECT 1",
+        "OptionsJson": json.dumps({"chart_spec": {"template_id": "heatmap"}}, ensure_ascii=False),
+        "Position": 3,
+        "IsDeleted": 0,
+        "Version": 999,
+    }
+
+
+def test_prepare_import_chart_validates_template_version_and_chart_spec_errors():
+    with pytest.raises(ValueError, match="Invalid or unsupported chart template format"):
+        _prepare_import_chart(
+            {},
+            compile_chart_spec=lambda spec_raw: ("heatmap", "SELECT 1", spec_raw),
+            next_position=0,
+            chart_id_factory=lambda: "chart-1",
+            version=1,
+            dashboard_id="db-1",
+        )
+
+    with pytest.raises(ValueError, match="chart_spec is required in template"):
+        _prepare_import_chart(
+            {"sobs_chart_template_version": 1},
+            compile_chart_spec=lambda spec_raw: ("heatmap", "SELECT 1", spec_raw),
+            next_position=0,
+            chart_id_factory=lambda: "chart-1",
+            version=1,
+            dashboard_id="db-1",
+        )
+
+    with pytest.raises(ValueError, match="Chart spec error"):
+        _prepare_import_chart(
+            {"sobs_chart_template_version": 1, "chart_spec": {"template_id": "heatmap"}},
+            compile_chart_spec=lambda spec_raw: (_ for _ in ()).throw(RuntimeError("boom")),
+            next_position=0,
+            chart_id_factory=lambda: "chart-1",
+            version=1,
+            dashboard_id="db-1",
+        )

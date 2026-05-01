@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 
 
@@ -215,3 +216,63 @@ def _build_dashboard_templates(
         }
         for template_id, template in sorted(chart_templates.items())
     ]
+
+
+def _build_chart_export_payload(chart: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "sobs_chart_template_version": 1,
+        "title": str(chart["title"]),
+        "chart_spec": chart["chart_spec"],
+    }
+
+
+def _build_chart_export_filename(title: str) -> str:
+    safe_title = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:64] or "chart"
+    return f"sobs_chart_{safe_title}.json"
+
+
+def _prepare_import_chart(
+    payload: Mapping[str, object],
+    *,
+    compile_chart_spec,
+    next_position: int,
+    chart_id_factory,
+    version: int,
+    dashboard_id: str,
+) -> dict[str, object]:
+    template_version = payload.get("sobs_chart_template_version")
+    if template_version != 1:
+        raise ValueError("Invalid or unsupported chart template format (expected sobs_chart_template_version: 1)")
+
+    title = str(payload.get("title") or "").strip() or "Imported Chart"
+    chart_spec_raw = payload.get("chart_spec")
+    if not chart_spec_raw:
+        raise ValueError("chart_spec is required in template")
+
+    try:
+        template_id, query, normalized_spec = compile_chart_spec(chart_spec_raw)
+    except Exception as exc:
+        raise ValueError(f"Chart spec error: {exc}") from exc
+
+    chart_id = str(chart_id_factory())
+    options_json = json.dumps({"chart_spec": normalized_spec}, ensure_ascii=False)
+    record = _build_chart_record(
+        chart_id,
+        dashboard_id,
+        title,
+        template_id,
+        query,
+        options_json,
+        next_position,
+        version=version,
+    )
+    return {
+        "chart_id": chart_id,
+        "title": title,
+        "chart_type": template_id,
+        "query": query,
+        "options_json": options_json,
+        "position": next_position,
+        "version": version,
+        "record": record,
+    }

@@ -213,6 +213,8 @@ from shared.dashboard_api import _execute_chart_query_result as _shared_execute_
 from shared.dashboard_api import _execute_chart_spec_named_queries as _shared_execute_chart_spec_named_queries
 from shared.dashboard_api import _finalize_ai_chart_generation as _shared_finalize_ai_chart_generation
 from shared.dashboard_api import _rows_to_columns_and_data as _shared_rows_to_columns_and_data
+from shared.dashboards import _build_chart_export_filename as _shared_build_chart_export_filename
+from shared.dashboards import _build_chart_export_payload as _shared_build_chart_export_payload
 from shared.dashboards import _build_chart_record as _shared_build_chart_record
 from shared.dashboards import _build_chart_tombstones as _shared_build_chart_tombstones
 from shared.dashboards import _build_dashboard_record as _shared_build_dashboard_record
@@ -221,6 +223,7 @@ from shared.dashboards import _get_charts as _shared_get_charts
 from shared.dashboards import _get_dashboard as _shared_get_dashboard
 from shared.dashboards import _get_dashboards as _shared_get_dashboards
 from shared.dashboards import _parse_chart_form_submission as _shared_parse_chart_form_submission
+from shared.dashboards import _prepare_import_chart as _shared_prepare_import_chart
 from shared.dashboards import _prepare_query_add_to_dashboard_chart as _shared_prepare_query_add_to_dashboard_chart
 from shared.github import (
     _github_repo_token_key,
@@ -14647,6 +14650,14 @@ def _build_chart_tombstones(
     return _shared_build_chart_tombstones(charts, dashboard_id, version=version)
 
 
+def _build_chart_export_payload(chart: Mapping[str, object]) -> dict[str, object]:
+    return _shared_build_chart_export_payload(chart)
+
+
+def _build_chart_export_filename(title: str) -> str:
+    return _shared_build_chart_export_filename(title)
+
+
 def _prepare_query_add_to_dashboard_chart(
     payload: Mapping[str, object],
     *,
@@ -14659,6 +14670,23 @@ def _prepare_query_add_to_dashboard_chart(
         next_position=next_position,
         chart_id_factory=uuid.uuid4,
         version=version,
+    )
+
+
+def _prepare_import_chart(
+    payload: Mapping[str, object],
+    *,
+    dashboard_id: str,
+    next_position: int,
+    version: int,
+) -> dict[str, object]:
+    return _shared_prepare_import_chart(
+        payload,
+        compile_chart_spec=_compile_chart_spec,
+        next_position=next_position,
+        chart_id_factory=uuid.uuid4,
+        version=version,
+        dashboard_id=dashboard_id,
     )
 
 
@@ -14797,7 +14825,7 @@ async def api_query_add_to_dashboard():
     if not dashboard:
         return jsonify({"ok": False, "error": "Dashboard not found"}), 404
 
-    _insert_rows_json_each_row(db, "sobs_chart_configs", [prepared["record"]])
+    _insert_rows_json_each_row(db, "sobs_chart_configs", [cast(dict[str, object], prepared["record"])])
 
     return jsonify(
         {
@@ -15612,14 +15640,8 @@ async def export_chart(dashboard_id: str, chart_id: str):
     if not chart:
         return jsonify({"ok": False, "error": "Chart not found"}), 404
 
-    template_payload: dict[str, object] = {
-        "sobs_chart_template_version": 1,
-        "title": chart["title"],
-        "chart_spec": chart["chart_spec"],
-    }
-
-    safe_title = re.sub(r"[^a-zA-Z0-9_-]", "_", chart["title"])[:64] or "chart"
-    filename = f"sobs_chart_{safe_title}.json"
+    template_payload = _build_chart_export_payload(chart)
+    filename = _build_chart_export_filename(str(chart["title"]))
     from quart import Response as QuartResponse
 
     return QuartResponse(
@@ -15639,60 +15661,25 @@ async def import_chart(dashboard_id: str):
         return jsonify({"ok": False, "error": "Dashboard not found"}), 404
 
     payload = await request.get_json(silent=True) or {}
-
-    template_version = payload.get("sobs_chart_template_version")
-    if template_version != 1:
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "Invalid or unsupported chart template format (expected sobs_chart_template_version: 1)",
-                }
-            ),
-            400,
-        )
-
-    title = str(payload.get("title") or "").strip()
-    if not title:
-        title = "Imported Chart"
-
-    chart_spec_raw = payload.get("chart_spec")
-    if not chart_spec_raw:
-        return jsonify({"ok": False, "error": "chart_spec is required in template"}), 400
-
-    try:
-        template_id, query, normalized_spec = _compile_chart_spec(chart_spec_raw)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": f"Chart spec error: {exc}"}), 400
-
-    options_json = json.dumps({"chart_spec": normalized_spec}, ensure_ascii=False)
     existing = _get_charts(db, dashboard_id)
-    position = max((c["position"] for c in existing), default=-1) + 1
-
-    chart_id_new = str(uuid.uuid4())
     version = int(time.time() * 1000)
-    _insert_rows_json_each_row(
-        db,
-        "sobs_chart_configs",
-        [
-            {
-                "Id": chart_id_new,
-                "DashboardId": dashboard_id,
-                "Title": title,
-                "ChartType": template_id,
-                "Query": query,
-                "OptionsJson": options_json,
-                "Position": position,
-                "IsDeleted": 0,
-                "Version": version,
-            }
-        ],
-    )
+    try:
+        prepared = _prepare_import_chart(
+            payload,
+            dashboard_id=dashboard_id,
+            next_position=max((c["position"] for c in existing), default=-1) + 1,
+            version=version,
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    record = cast(dict[str, object], prepared["record"])
+    _insert_rows_json_each_row(db, "sobs_chart_configs", [record])
 
     return jsonify(
         {
             "ok": True,
-            "chart_id": chart_id_new,
+            "chart_id": prepared["chart_id"],
             "dashboard_id": dashboard_id,
             "dashboard_url": url_for("view_custom_dashboard", dashboard_id=dashboard_id),
         }
