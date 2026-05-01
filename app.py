@@ -30,7 +30,7 @@ import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import lru_cache, wraps
 from typing import Any, Callable, Mapping, cast, overload
 
@@ -350,6 +350,10 @@ from shared.output_masking import _mask_payload_for_output_json as _shared_mask_
 from shared.output_masking import _mask_string_for_output as _shared_mask_string_for_output
 from shared.output_masking import _mask_value_for_output as _shared_mask_value_for_output
 from shared.output_masking import _set_masking_settings_cache as _shared_set_masking_settings_cache
+from shared.query_params import _parse_limit as _shared_parse_limit
+from shared.query_params import _parse_offset as _shared_parse_offset
+from shared.query_params import _parse_sort as _shared_parse_sort
+from shared.query_params import _parse_time_window_args as _shared_parse_time_window_args
 from shared.raw_metrics_window import _ensure_raw_metrics_retention as _shared_ensure_raw_metrics_retention
 from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _shared_list_trace_overlapping_raw_windows
 from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
@@ -5957,55 +5961,19 @@ def _remap_rum_console_stacks(event: dict[str, Any]) -> None:
 
 
 def _parse_limit(default=200) -> int:
-    try:
-        return max(1, min(int(request.args.get("limit", default)), 5000))
-    except (TypeError, ValueError):
-        return default
+    return _shared_parse_limit(request.args, default=default)
 
 
 def _parse_offset() -> int:
-    try:
-        return max(0, int(request.args.get("offset", 0)))
-    except (TypeError, ValueError):
-        return 0
+    return _shared_parse_offset(request.args)
 
 
 def _parse_sort(allowed: dict, default_col: str = "Timestamp") -> tuple:
-    """Parse and validate ``sort_by`` / ``sort_dir`` query params.
-
-    *allowed* maps URL param values to SQL column names.
-    Returns ``(sort_by, sql_col, sort_dir)`` where ``sort_dir`` is ``'asc'`` or ``'desc'``.
-    """
-    sort_by = request.args.get("sort_by", default_col)
-    sort_dir = request.args.get("sort_dir", "desc").lower()
-    if sort_by not in allowed:
-        sort_by = default_col
-    if sort_dir not in ("asc", "desc"):
-        sort_dir = "desc"
-    return sort_by, allowed[sort_by], sort_dir
+    return _shared_parse_sort(request.args, allowed, default_col=default_col)
 
 
 def _parse_time_window_args() -> tuple[str, str, str]:
-    """Parse ``from_ts``/``to_ts`` query params and optional ``window_s``."""
-    from_ts_raw = request.args.get("from_ts", "").strip()
-    to_ts_raw = request.args.get("to_ts", "").strip()
-    window_s_raw = request.args.get("window_s", "").strip()
-
-    try:
-        from_ts = _normalize_ch_timestamp(from_ts_raw) if from_ts_raw else ""
-        to_ts = _normalize_ch_timestamp(to_ts_raw) if to_ts_raw else ""
-        if from_ts and not to_ts and window_s_raw:
-            window_s = max(1, int(window_s_raw))
-            from_dt = datetime.fromisoformat(from_ts)
-            to_ts = _normalize_ch_timestamp(from_dt + timedelta(seconds=window_s))
-        if from_ts and to_ts:
-            from_dt = datetime.fromisoformat(from_ts)
-            to_dt = datetime.fromisoformat(to_ts)
-            if to_dt <= from_dt:
-                return "", "", "Invalid time window: to_ts must be later than from_ts"
-        return from_ts, to_ts, ""
-    except (TypeError, ValueError):
-        return "", "", "Invalid time value. Use ISO-8601, e.g. 2026-03-29T12:00:00Z"
+    return _shared_parse_time_window_args(request.args, normalize_ch_timestamp=_normalize_ch_timestamp)
 
 
 def _time_window_conditions(column: str, from_ts: str, to_ts: str) -> tuple[list[str], list[str]]:
