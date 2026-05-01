@@ -60,7 +60,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/storage_write.py` now measures `100%` line coverage in its dedicated direct test run after extracting the write-table allowlist, ClickHouse timestamp normalization, and JSONEachRow storage insert helper from `app.py`.
 - `shared/otlp_attrs.py` now measures `100%` line coverage in its dedicated direct test run after extracting OTLP JSON attribute-list normalization plus protobuf `AnyValue` and key/value decoding helpers from `app.py`.
 - `shared/otlp_events.py` now measures `100%` line coverage in its dedicated direct test run after extracting protobuf OTLP log, trace, and metric event shaping from `app.py`.
-- The latest sequential full-suite validation passed at `1686 passed, 4 skipped`.
+- `shared/otlp_write.py` now measures `100%` line coverage in its dedicated direct test run after extracting OTLP log/span/error row shaping plus typed metric table routing from `app.py`.
+- The latest sequential full-suite validation passed at `1691 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -213,6 +214,7 @@ Measured result so far:
 - `shared/storage_write.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/otlp_attrs.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/otlp_events.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/otlp_write.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -255,6 +257,7 @@ Measured result so far:
 - `app.py` now delegates the write-table allowlist, ClickHouse timestamp normalization, and JSONEachRow storage insert helper to `shared/storage_write.py` while preserving the existing allowlist enforcement, stored timestamp normalization, ingest/settings/apps write paths, and trace-detail time-context behaviors exercised by the app tests.
 - `app.py` now delegates OTLP JSON attribute-list normalization plus protobuf `AnyValue` and key/value decoding to `shared/otlp_attrs.py` while preserving the existing JSON OTLP ingest, protobuf OTLP ingest, and downstream log/trace/metric event-shaping behaviors exercised by the app tests.
 - `app.py` now delegates protobuf OTLP log, trace, and metric event shaping to `shared/otlp_events.py` while preserving the existing protobuf ingest and downstream event-normalization behaviors exercised by the app tests.
+- `app.py` now delegates OTLP log/span/error row shaping plus typed metric table routing to `shared/otlp_write.py` while preserving the existing ingest persistence, attr-key discovery, tag-rule application, and typed metric write behavior exercised by the app tests.
 
 Why these slices were taken early:
 

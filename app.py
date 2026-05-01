@@ -351,6 +351,11 @@ from shared.otlp_security import _origin_allowed_for_otlp as _shared_origin_allo
 from shared.otlp_security import _otlp_cors_allow_methods as _shared_otlp_cors_allow_methods
 from shared.otlp_security import _path_needs_otlp_cors as _shared_path_needs_otlp_cors
 from shared.otlp_security import _request_is_secure_context as _shared_request_is_secure_context
+from shared.otlp_write import _insert_error_events as _shared_insert_error_events
+from shared.otlp_write import _insert_log_events as _shared_insert_log_events
+from shared.otlp_write import _insert_metric_events as _shared_insert_metric_events
+from shared.otlp_write import _insert_span_events as _shared_insert_span_events
+from shared.otlp_write import _insert_typed_metric_events as _shared_insert_typed_metric_events
 from shared.output_masking import _get_masking_settings_flags as _shared_get_masking_settings_flags
 from shared.output_masking import _is_output_masking_enabled as _shared_is_output_masking_enabled
 from shared.output_masking import _is_sql_output_masking_enabled as _shared_is_sql_output_masking_enabled
@@ -6273,164 +6278,68 @@ def _proto_metrics_to_events(msg: ExportMetricsServiceRequest) -> list[TypedMetr
 
 
 def _insert_log_events(db, events: list[LogEvent]) -> int:
-    rows = []
-    for event in events:
-        rows.append(
-            {
-                "Timestamp": event.ts,
-                "TraceId": event.trace_id,
-                "SpanId": event.span_id,
-                "TraceFlags": 0,
-                "SeverityText": event.level,
-                "SeverityNumber": _severity_number(event.level),
-                "ServiceName": event.service,
-                "Body": event.body,
-                "ResourceSchemaUrl": "",
-                "ResourceAttributes": _stringify_attrs(event.resource_attrs),
-                "ScopeSchemaUrl": "",
-                "ScopeName": "",
-                "ScopeVersion": "",
-                "ScopeAttributes": _stringify_attrs(event.scope_attrs),
-                "LogAttributes": _stringify_attrs(event.attrs),
-                "EventName": str(event.attrs.get("event.name", "")),
-            }
-        )
-    count = _insert_rows_json_each_row(db, "otel_logs", rows)
-    _remember_log_attr_keys(db, _extract_log_attr_maps(rows), record_type="log")
-    _remember_attr_keys(db, _extract_attr_maps(rows, "ResourceAttributes"), record_type="resource")
-    _remember_attr_keys(db, _extract_attr_maps(rows, "ScopeAttributes"), record_type="scope")
-    try:
-        rules = _load_tag_rules(db)
-        if rules:
-            _apply_tag_rules(db, "log", rows, rules)
-    except Exception:
-        app.logger.exception("auto-tag application failed for logs")
-    return count
+    return _shared_insert_log_events(
+        db,
+        events,
+        stringify_attrs=_stringify_attrs,
+        severity_number=_severity_number,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        remember_log_attr_keys=_remember_log_attr_keys,
+        remember_attr_keys=_remember_attr_keys,
+        extract_log_attr_maps=_extract_log_attr_maps,
+        extract_attr_maps=_extract_attr_maps,
+        load_tag_rules=_load_tag_rules,
+        apply_tag_rules=_apply_tag_rules,
+        log_exception=app.logger.exception,
+    )
 
 
 def _insert_span_events(db, span_events: list[SpanEvent]) -> int:
-    rows = []
-    for event in span_events:
-        rows.append(
-            {
-                "Timestamp": event.ts,
-                "TraceId": event.trace_id,
-                "SpanId": event.span_id,
-                "ParentSpanId": event.parent_span_id,
-                "TraceState": "",
-                "SpanName": event.name,
-                "SpanKind": event.attrs.get("span.kind", "INTERNAL"),
-                "ServiceName": event.service,
-                "ResourceAttributes": _stringify_attrs(event.resource_attrs),
-                "ScopeName": "",
-                "ScopeVersion": "",
-                "SpanAttributes": _stringify_attrs(event.attrs),
-                "Duration": max(0, int(event.duration_ms * 1_000_000)),
-                "StatusCode": _trace_status_code(event.status),
-                "StatusMessage": str(event.attrs.get("status.message", "")),
-                "Events": {"Timestamp": [], "Name": [], "Attributes": []},
-                "Links": {"TraceId": [], "SpanId": [], "TraceState": [], "Attributes": []},
-            }
-        )
-    count = _insert_rows_json_each_row(db, "otel_traces", rows)
-    _remember_attr_keys(db, _extract_attr_maps(rows, "SpanAttributes"), record_type="span")
-    _remember_attr_keys(db, _extract_attr_maps(rows, "ResourceAttributes"), record_type="resource")
-    try:
-        rules = _load_tag_rules(db)
-        if rules:
-            _apply_tag_rules(db, "trace", rows, rules)
-    except Exception:
-        app.logger.exception("auto-tag application failed for traces")
-    return count
+    return _shared_insert_span_events(
+        db,
+        span_events,
+        stringify_attrs=_stringify_attrs,
+        trace_status_code=_trace_status_code,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        remember_attr_keys=_remember_attr_keys,
+        extract_attr_maps=_extract_attr_maps,
+        load_tag_rules=_load_tag_rules,
+        apply_tag_rules=_apply_tag_rules,
+        log_exception=app.logger.exception,
+    )
 
 
 def _insert_error_events(db, error_events: list[ErrorEvent]):
-    rows = []
-    for event in error_events:
-        attrs = _stringify_attrs(event.attrs)
-        attrs["exception.type"] = event.err_type
-        attrs["exception.message"] = event.message
-        if event.stack:
-            attrs["exception.stacktrace"] = event.stack
-        rows.append(
-            {
-                "Timestamp": event.ts,
-                "TraceId": event.trace_id,
-                "SpanId": event.span_id,
-                "TraceFlags": 0,
-                "SeverityText": "ERROR",
-                "SeverityNumber": _severity_number("ERROR"),
-                "ServiceName": event.service,
-                "Body": event.message,
-                "ResourceSchemaUrl": "",
-                "ResourceAttributes": {},
-                "ScopeSchemaUrl": "",
-                "ScopeName": "",
-                "ScopeVersion": "",
-                "ScopeAttributes": {},
-                "LogAttributes": attrs,
-                "EventName": "exception",
-            }
-        )
-    _insert_rows_json_each_row(db, "otel_logs", rows)
-    _remember_log_attr_keys(db, _extract_log_attr_maps(rows), record_type="log")
-    try:
-        rules = _load_tag_rules(db)
-        if rules:
-            _apply_tag_rules(db, "error", rows, rules)
-    except Exception:
-        app.logger.exception("auto-tag application failed for errors")
+    _shared_insert_error_events(
+        db,
+        error_events,
+        stringify_attrs=_stringify_attrs,
+        severity_number=_severity_number,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+        remember_log_attr_keys=_remember_log_attr_keys,
+        extract_log_attr_maps=_extract_log_attr_maps,
+        load_tag_rules=_load_tag_rules,
+        apply_tag_rules=_apply_tag_rules,
+        log_exception=app.logger.exception,
+    )
 
 
 def _insert_metric_events(db, events: list[TypedMetricEvent]) -> int:
-    """Insert typed OTEL metric data points into the appropriate metric tables."""
-    return _insert_typed_metric_events(db, events)
+    return _shared_insert_metric_events(
+        db,
+        events,
+        stringify_attrs=_stringify_attrs,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+    )
 
 
 def _insert_typed_metric_events(db, events: list[TypedMetricEvent]) -> int:
-    """Route typed metric events to their respective OTEL metric tables."""
-    gauge_rows: list[dict] = []
-    sum_rows: list[dict] = []
-    histogram_rows: list[dict] = []
-
-    for ev in events:
-        base = {
-            "TimeUnix": ev.ts,
-            "ServiceName": ev.service,
-            "MetricName": ev.metric_name,
-            "MetricDescription": ev.metric_description,
-            "MetricUnit": ev.metric_unit,
-            "Attributes": _stringify_attrs(ev.attrs),
-            "Value": float(ev.value),
-            "Flags": 0,
-            "AttrFingerprint": ev.attr_fp,
-        }
-        if ev.metric_kind == "gauge":
-            gauge_rows.append(base)
-        elif ev.metric_kind == "sum":
-            sum_rows.append(
-                {**base, "IsMonotonic": ev.is_monotonic, "AggregationTemporality": ev.aggregation_temporality}
-            )
-        elif ev.metric_kind == "histogram":
-            histogram_rows.append(
-                {
-                    **{k: v for k, v in base.items() if k != "Value"},
-                    "Count": ev.histogram_count,
-                    "Sum": float(ev.histogram_sum),
-                    "BucketCounts": ev.histogram_buckets or [],
-                    "ExplicitBounds": ev.histogram_bounds or [],
-                    "AggregationTemporality": ev.aggregation_temporality,
-                }
-            )
-
-    inserted = 0
-    if gauge_rows:
-        inserted += _insert_rows_json_each_row(db, "otel_metrics_gauge", gauge_rows)
-    if sum_rows:
-        inserted += _insert_rows_json_each_row(db, "otel_metrics_sum", sum_rows)
-    if histogram_rows:
-        inserted += _insert_rows_json_each_row(db, "otel_metrics_histogram", histogram_rows)
-    return inserted
+    return _shared_insert_typed_metric_events(
+        db,
+        events,
+        stringify_attrs=_stringify_attrs,
+        insert_rows_json_each_row=_insert_rows_json_each_row,
+    )
 
 
 _PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
