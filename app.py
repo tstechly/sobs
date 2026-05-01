@@ -341,6 +341,11 @@ from shared.release_registry import _build_seed_registry_rows as _shared_build_s
 from shared.release_registry import _parse_app_registry_seed as _shared_parse_app_registry_seed
 from shared.release_registry import _serialize_artifact_row as _shared_serialize_artifact_row
 from shared.release_registry import _serialize_release_row as _shared_serialize_release_row
+from shared.repo_health import _build_repo_health_summary as _shared_build_repo_health_summary
+from shared.repo_health import _build_repo_health_targets as _shared_build_repo_health_targets
+from shared.repo_health import _collect_release_versions_by_app as _shared_collect_release_versions_by_app
+from shared.repo_health import _collect_repo_health_version_tokens as _shared_collect_repo_health_version_tokens
+from shared.repo_health import _summarize_repo_health_items as _shared_summarize_repo_health_items
 from shared.reports import REPORT_PAGE_TYPES as _SHARED_REPORT_PAGE_TYPES
 from shared.reports import REPORTS_EXPORT_VERSION as _SHARED_REPORTS_EXPORT_VERSION
 from shared.reports import _build_report_record as _shared_build_report_record
@@ -12317,40 +12322,14 @@ async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str,
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
-    versions_by_app: dict[str, list[str]] = {}
-    for row in release_rows:
-        app_id = str(row[0] or "")
-        rel_ver = str(row[1] or "").strip()
-        if not app_id or not rel_ver:
-            continue
-        versions = versions_by_app.setdefault(app_id, [])
-        if rel_ver not in versions and len(versions) < 5:
-            versions.append(rel_ver)
-
-    repo_targets: list[dict[str, Any]] = []
-    for row in app_rows:
-        app_id = str(row[0] or "")
-        app_name = str(row[1] or row[2] or "")
-        repo_url = str(row[3] or "")
-        owner, repo = _parse_github_repo_owner_name(repo_url)
-        versions = versions_by_app.get(app_id, [])
-        if not owner or not repo or not versions:
-            continue
-        repo_targets.append(
-            {
-                "app_name": app_name,
-                "owner": owner,
-                "repo": repo,
-                "versions": versions,
-            }
-        )
-
-    repo_targets = repo_targets[:_GITHUB_REPO_HEALTH_MAX_REPOS]
+    versions_by_app = _shared_collect_release_versions_by_app(release_rows)
+    repo_targets = _shared_build_repo_health_targets(
+        app_rows,
+        versions_by_app,
+        parse_github_repo_owner_name=_parse_github_repo_owner_name,
+    )[:_GITHUB_REPO_HEALTH_MAX_REPOS]
     client = await _get_async_http_client()
 
-    total_open_issues = 0
-    total_open_prs = 0
-    total_security_items = 0
     scanned_repos = 0
     repos_summary: list[dict[str, Any]] = []
 
@@ -12361,9 +12340,10 @@ async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str,
         if not github_token:
             continue
         versions = [str(v) for v in target.get("versions", []) if str(v).strip()]
-        version_tokens: set[str] = set()
-        for version in versions:
-            version_tokens.update(_github_version_tokens(version))
+        version_tokens = _shared_collect_repo_health_version_tokens(
+            versions,
+            github_version_tokens=_github_version_tokens,
+        )
         if not version_tokens:
             continue
 
@@ -12387,27 +12367,12 @@ async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str,
         except Exception:
             continue
 
-        repo_issues = 0
-        repo_prs = 0
-        repo_security = 0
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            text = f"{str(item.get('title') or '')}\n{str(item.get('body') or '')}"
-            if not _text_mentions_version_tokens(text, version_tokens):
-                continue
-            is_pr = isinstance(item.get("pull_request"), dict)
-            if is_pr:
-                repo_prs += 1
-            else:
-                repo_issues += 1
-            if _github_item_is_security_related(item):
-                repo_security += 1
-
-        total_open_issues += repo_issues
-        total_open_prs += repo_prs
-        total_security_items += repo_security
+        repo_issues, repo_prs, repo_security = _shared_summarize_repo_health_items(
+            items,
+            version_tokens=version_tokens,
+            text_mentions_version_tokens=_text_mentions_version_tokens,
+            github_item_is_security_related=_github_item_is_security_related,
+        )
         repos_summary.append(
             {
                 "repo": f"{owner}/{repo}",
@@ -12419,24 +12384,12 @@ async def _collect_github_repo_health_summary(db: "ChDbConnection") -> dict[str,
             }
         )
 
-    repos_summary.sort(
-        key=lambda r: (
-            -(int(r.get("security_items", 0)) + int(r.get("open_issues", 0)) + int(r.get("open_prs", 0))),
-            str(r.get("repo") or "").lower(),
-        )
+    return _shared_build_repo_health_summary(
+        repos_summary,
+        scanned_repos=scanned_repos,
+        total_repos_considered=len(repo_targets),
+        last_synced_at=_now_iso(),
     )
-
-    return {
-        "ok": True,
-        "scanned_repos": scanned_repos,
-        "total_repos_considered": len(repo_targets),
-        "open_issues": total_open_issues,
-        "open_prs": total_open_prs,
-        "security_items": total_security_items,
-        "version_scoped": True,
-        "last_synced_at": _now_iso(),
-        "repos": repos_summary,
-    }
 
 
 @app.route("/api/enrichment/github/repo-health", methods=["GET"])
