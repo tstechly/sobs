@@ -319,6 +319,10 @@ from shared.raw_metrics_window import _list_trace_overlapping_raw_windows as _sh
 from shared.raw_metrics_window import _register_raw_window as _shared_register_raw_window
 from shared.raw_metrics_window import _run_raw_window_copy_worker as _shared_run_raw_window_copy_worker
 from shared.raw_metrics_window import _window_copy_counts as _shared_window_copy_counts
+from shared.release_registry import _build_seed_registry_rows as _shared_build_seed_registry_rows
+from shared.release_registry import _parse_app_registry_seed as _shared_parse_app_registry_seed
+from shared.release_registry import _serialize_artifact_row as _shared_serialize_artifact_row
+from shared.release_registry import _serialize_release_row as _shared_serialize_release_row
 from shared.reports import REPORT_PAGE_TYPES as _SHARED_REPORT_PAGE_TYPES
 from shared.reports import REPORTS_EXPORT_VERSION as _SHARED_REPORTS_EXPORT_VERSION
 from shared.reports import _build_report_record as _shared_build_report_record
@@ -6803,33 +6807,11 @@ def _serialize_app_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _serialize_release_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": str(row.get("Id", "")),
-        "appId": str(row.get("AppId", "")),
-        "version": str(row.get("ReleaseVersion", "")),
-        "commitSha": str(row.get("CommitSha", "")),
-        "buildId": str(row.get("BuildId", "")),
-        "environment": str(row.get("Environment", "")),
-        "releasedAt": str(row.get("ReleasedAt", "")),
-        "metadata": _safe_json_loads(row.get("MetadataJson", ""), {}),
-    }
+    return _shared_serialize_release_row(row)
 
 
 def _serialize_artifact_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": str(row.get("Id", "")),
-        "releaseId": str(row.get("ReleaseId", "")),
-        "artifactType": str(row.get("ArtifactType", "")),
-        "name": str(row.get("Name", "")),
-        "contentType": str(row.get("ContentType", "")),
-        "size": int(row.get("Size", 0) or 0),
-        "storageRef": str(row.get("StorageRef", "")),
-        "checksumSha256": str(row.get("ChecksumSha256", "")),
-        "platform": str(row.get("Platform", "")),
-        "architecture": str(row.get("Architecture", "")),
-        "metadata": _safe_json_loads(row.get("MetadataJson", ""), {}),
-        "uploadedAt": str(row.get("UploadedAt", "")),
-    }
+    return _shared_serialize_artifact_row(row)
 
 
 def _seed_app_release_registry_from_env(db: ChDbConnection) -> None:
@@ -6837,126 +6819,42 @@ def _seed_app_release_registry_from_env(db: ChDbConnection) -> None:
     if not seed_raw:
         return
 
-    try:
-        parsed = json.loads(seed_raw)
-    except Exception as exc:
-        app.logger.warning("Failed to parse app registry seed JSON: %s", exc)
-        return
-
-    if isinstance(parsed, dict):
-        apps = parsed.get("apps", [])
-    elif isinstance(parsed, list):
-        apps = parsed
-    else:
-        app.logger.warning("Ignoring app registry seed: expected object with 'apps' or an array")
-        return
-
-    if not isinstance(apps, list):
-        app.logger.warning("Ignoring app registry seed: 'apps' must be an array")
+    apps, error_message = _shared_parse_app_registry_seed(seed_raw)
+    if error_message:
+        app.logger.warning(error_message)
         return
 
     now_version = int(time.time() * 1000)
-    app_rows: list[dict[str, Any]] = []
-    release_rows: list[dict[str, Any]] = []
-    artifact_rows: list[dict[str, Any]] = []
-
-    for app_item in apps:
-        if not isinstance(app_item, dict):
-            continue
-        name = str(app_item.get("name", "")).strip()
-        if not name:
-            continue
-
-        slug = _app_slug(str(app_item.get("slug", "")).strip() or name)
-        existing = db.execute(
-            "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 LIMIT 1",
-            [slug],
-        ).fetchone()
-        app_id = str(app_item.get("id", "")).strip() or (str(existing[0]) if existing else uuid.uuid4().hex)
-
-        app_rows.append(
-            {
-                "Id": app_id,
-                "Name": name,
-                "Slug": slug,
-                "OwnerTeam": str(app_item.get("ownerTeam", "")).strip(),
-                "RepoUrl": str(app_item.get("repoUrl", "")).strip(),
-                "DefaultEnvironment": str(app_item.get("defaultEnvironment", "")).strip(),
-                "Enabled": 1 if _parse_bool(app_item.get("enabled", True), True) else 0,
-                "MetadataJson": _safe_json_dumps(app_item.get("metadata", {})),
-                "IsDeleted": 0,
-                "Version": now_version,
-                "CreatedAt": _now_iso(),
-                "UpdatedAt": _now_iso(),
-            }
-        )
-
-        releases = app_item.get("releases", [])
-        if not isinstance(releases, list):
-            continue
-        for rel in releases:
-            if not isinstance(rel, dict):
-                continue
-            rel_version = str(rel.get("version", "")).strip()
-            if not rel_version:
-                continue
-
-            existing_rel = db.execute(
-                "SELECT Id FROM sobs_app_releases FINAL "
-                "WHERE AppId=? AND ReleaseVersion=? AND CommitSha=? AND Environment=? AND IsDeleted=0 LIMIT 1",
-                [
-                    app_id,
-                    rel_version,
-                    str(rel.get("commitSha", "")).strip(),
-                    str(rel.get("environment", "")).strip(),
-                ],
-            ).fetchone()
-            rel_id = str(rel.get("id", "")).strip() or (str(existing_rel[0]) if existing_rel else uuid.uuid4().hex)
-
-            release_rows.append(
-                {
-                    "Id": rel_id,
-                    "AppId": app_id,
-                    "ReleaseVersion": rel_version,
-                    "CommitSha": str(rel.get("commitSha", "")).strip(),
-                    "BuildId": str(rel.get("buildId", "")).strip(),
-                    "Environment": str(rel.get("environment", "")).strip(),
-                    "ReleasedAt": str(rel.get("releasedAt", "")).strip() or _now_iso(),
-                    "MetadataJson": _safe_json_dumps(rel.get("metadata", {})),
-                    "IsDeleted": 0,
-                    "Version": now_version,
-                }
-            )
-
-            artifacts = rel.get("artifacts", [])
-            if not isinstance(artifacts, list):
-                continue
-            for art in artifacts:
-                if not isinstance(art, dict):
-                    continue
-                artifact_type = str(art.get("artifactType", "")).strip()
-                artifact_name = str(art.get("name", "")).strip()
-                if not artifact_type or not artifact_name:
-                    continue
-
-                artifact_rows.append(
-                    {
-                        "Id": str(art.get("id", "")).strip() or uuid.uuid4().hex,
-                        "ReleaseId": rel_id,
-                        "ArtifactType": artifact_type,
-                        "Name": artifact_name,
-                        "ContentType": str(art.get("contentType", "")).strip(),
-                        "Size": int(art.get("size", 0) or 0),
-                        "StorageRef": str(art.get("storageRef", "")).strip(),
-                        "ChecksumSha256": str(art.get("checksumSha256", "")).strip(),
-                        "Platform": str(art.get("platform", "")).strip(),
-                        "Architecture": str(art.get("architecture", "")).strip(),
-                        "MetadataJson": _safe_json_dumps(art.get("metadata", {})),
-                        "UploadedAt": str(art.get("uploadedAt", "")).strip() or _now_iso(),
-                        "IsDeleted": 0,
-                        "Version": now_version,
-                    }
-                )
+    app_rows, release_rows, artifact_rows = _shared_build_seed_registry_rows(
+        apps,
+        find_existing_app_id=lambda slug: str(
+            (
+                db.execute(
+                    "SELECT Id FROM sobs_apps FINAL WHERE Slug=? AND IsDeleted=0 LIMIT 1",
+                    [slug],
+                ).fetchone()
+                or [""]
+            )[0]
+            or ""
+        ),
+        find_existing_release_id=lambda app_id, rel_version, commit_sha, environment: str(
+            (
+                db.execute(
+                    "SELECT Id FROM sobs_app_releases FINAL "
+                    "WHERE AppId=? AND ReleaseVersion=? AND CommitSha=? AND Environment=? AND IsDeleted=0 LIMIT 1",
+                    [app_id, rel_version, commit_sha, environment],
+                ).fetchone()
+                or [""]
+            )[0]
+            or ""
+        ),
+        app_slug=_app_slug,
+        parse_bool=_parse_bool,
+        safe_json_dumps=_safe_json_dumps,
+        now_iso=_now_iso,
+        now_version=now_version,
+        generate_id=lambda: uuid.uuid4().hex,
+    )
 
     _insert_rows_json_each_row(db, "sobs_apps", app_rows)
     _insert_rows_json_each_row(db, "sobs_app_releases", release_rows)
