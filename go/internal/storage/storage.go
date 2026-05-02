@@ -9,8 +9,6 @@ import (
 	"log/slog"
 	nethttp "net/http"
 	neturl "net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -138,34 +136,70 @@ func (d *DB) Close() error {
 	return d.conn.Close()
 }
 
-// InsertJSONRows inserts rows using ClickHouse JSONEachRow semantics.
-//
-// In HTTP mode we post to ClickHouse's HTTP endpoint. In embedded chDB mode
-// (httpURL unset), we materialize a temporary JSONEachRow file and load it via
-// the file() table function.
+var writableTables = map[string]struct{}{
+	// OTEL/observability ingest tables.
+	"otel_logs":                     {},
+	"otel_traces":                   {},
+	"otel_metrics_gauge":            {},
+	"otel_metrics_sum":              {},
+	"otel_metrics_histogram":        {},
+	"otel_metrics_gauge_pinned":     {},
+	"otel_metrics_sum_pinned":       {},
+	"otel_metrics_histogram_pinned": {},
+	"hyperdx_sessions":              {},
+	// SOBS internal state tables.
+	"sobs_ai_memories":           {},
+	"sobs_ai_settings":           {},
+	"sobs_agent_rules":           {},
+	"sobs_agent_runs":            {},
+	"sobs_anomaly_rules":         {},
+	"sobs_app_releases":          {},
+	"sobs_app_settings":          {},
+	"sobs_apps":                  {},
+	"sobs_chart_configs":         {},
+	"sobs_cve_dispositions":      {},
+	"sobs_cve_findings":          {},
+	"sobs_dashboards":            {},
+	"sobs_github_work_items":     {},
+	"sobs_log_attr_keys":         {},
+	"sobs_notification_channels": {},
+	"sobs_notification_log":      {},
+	"sobs_notification_rules":    {},
+	"sobs_raw_window_copy_state": {},
+	"sobs_raw_windows":           {},
+	"sobs_record_tags":           {},
+	"sobs_release_artifacts":     {},
+	"sobs_reports":               {},
+	"sobs_tag_rules":             {},
+}
+
 func (d *DB) InsertJSONRows(table string, rows []map[string]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
+	if !isWritableTable(table) {
+		return fmt.Errorf("insert into %s: unsupported table", table)
+	}
+
+	normalized := normalizeJSONRows(rows)
+	payload, err := marshalJSONEachRow(normalized)
+	if err != nil {
+		return err
+	}
 
 	if d.httpURL == "" {
-		return d.insertJSONRowsViaFile(table, rows)
+		query := fmt.Sprintf("INSERT INTO %s FORMAT JSONEachRow\n%s", table, payload)
+		if _, err := d.conn.ExecContext(context.Background(), query); err != nil {
+			return fmt.Errorf("insert into %s: %w", table, err)
+		}
+		return nil
 	}
 
-	var buf strings.Builder
-	for _, row := range rows {
-		data, err := json.Marshal(row)
-		if err != nil {
-			return fmt.Errorf("marshal row: %w", err)
-		}
-		buf.Write(data)
-		buf.WriteByte('\n')
-	}
 	url := fmt.Sprintf("%s/?query=%s&date_time_input_format=best_effort",
 		d.httpURL,
 		neturl.QueryEscape(fmt.Sprintf("INSERT INTO %s FORMAT JSONEachRow", table)),
 	)
-	resp, err := httpClient.Post(url, "application/json", strings.NewReader(buf.String()))
+	resp, err := httpClient.Post(url, "application/json", strings.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("insert into %s: %w", table, err)
 	}
@@ -177,104 +211,78 @@ func (d *DB) InsertJSONRows(table string, rows []map[string]any) error {
 	return nil
 }
 
-func (d *DB) insertJSONRowsViaFile(table string, rows []map[string]any) error {
-	f, err := os.CreateTemp("", "sobs-*.jsonl")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	path := f.Name()
-	defer os.Remove(path)
+func isWritableTable(table string) bool {
+	_, ok := writableTables[table]
+	return ok
+}
 
+func normalizeJSONRows(rows []map[string]any) []map[string]any {
+	dtKeys := map[string]struct{}{
+		"Timestamp":   {},
+		"TimeUnix":    {},
+		"UpdatedAt":   {},
+		"CreatedAt":   {},
+		"CompletedAt": {},
+		"ReleasedAt":  {},
+		"UploadedAt":  {},
+		"ScannedAt":   {},
+	}
+	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
+		item := make(map[string]any, len(row))
+		for k, v := range row {
+			item[k] = v
+		}
+		for key := range dtKeys {
+			if v, ok := item[key]; ok {
+				item[key] = normalizeCHTimestamp(v)
+			}
+		}
+		if events, ok := item["Events"].(map[string]any); ok {
+			if ts, ok := events["Timestamp"]; ok {
+				events["Timestamp"] = normalizeCHTimestamp(ts)
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func marshalJSONEachRow(rows []map[string]any) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	for i, row := range rows {
 		data, err := json.Marshal(row)
 		if err != nil {
-			return fmt.Errorf("marshal row: %w", err)
+			return "", fmt.Errorf("marshal row: %w", err)
 		}
-		if _, err := f.Write(append(data, '\n')); err != nil {
-			return fmt.Errorf("write temp file: %w", err)
+		if i > 0 {
+			b.WriteByte('\n')
 		}
+		b.Write(data)
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-
-	cols := insertColumns(table)
-	if len(cols) == 0 {
-		return fmt.Errorf("insert into %s: unsupported table", table)
-	}
-	colList := strings.Join(cols, ", ")
-	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) SELECT %s FROM file('%s', 'JSONEachRow')",
-		table,
-		colList,
-		colList,
-		escapeSQLString(filepath.ToSlash(path)),
-	)
-	if _, err := d.conn.ExecContext(context.Background(), query); err != nil {
-		return fmt.Errorf("insert into %s: %w", table, err)
-	}
-	return nil
+	return b.String(), nil
 }
 
-func insertColumns(table string) []string {
-	switch table {
-	case "otel_logs", "hyperdx_sessions":
-		return []string{
-			"Timestamp",
-			"TraceId",
-			"SpanId",
-			"TraceFlags",
-			"SeverityText",
-			"SeverityNumber",
-			"ServiceName",
-			"Body",
-			"ResourceSchemaUrl",
-			"ResourceAttributes",
-			"ScopeSchemaUrl",
-			"ScopeName",
-			"ScopeVersion",
-			"ScopeAttributes",
-			"LogAttributes",
-			"EventName",
-		}
-	case "otel_traces":
-		return []string{
-			"Timestamp",
-			"TraceId",
-			"SpanId",
-			"ParentSpanId",
-			"TraceState",
-			"SpanName",
-			"SpanKind",
-			"ServiceName",
-			"ResourceAttributes",
-			"ScopeName",
-			"ScopeVersion",
-			"SpanAttributes",
-			"Duration",
-			"StatusCode",
-			"StatusMessage",
-			"Events",
-			"Links",
-		}
-	case "otel_metrics_gauge", "otel_metrics_sum", "otel_metrics_histogram":
-		return []string{
-			"TimeUnix",
-			"ServiceName",
-			"MetricName",
-			"MetricDescription",
-			"MetricUnit",
-			"Attributes",
-			"Value",
-			"AttrFingerprint",
-		}
+func normalizeCHTimestamp(value any) string {
+	if value == nil {
+		return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
+	}
+	switch v := value.(type) {
+	case time.Time:
+		return v.UTC().Format("2006-01-02 15:04:05.000000")
 	default:
-		return nil
+		raw := strings.TrimSpace(fmt.Sprint(value))
+		if raw == "" || raw == "<nil>" {
+			return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
+		}
+		if t, err := time.Parse(time.RFC3339Nano, strings.ReplaceAll(raw, " ", "T")); err == nil {
+			return t.UTC().Format("2006-01-02 15:04:05.000000")
+		}
+		return strings.ReplaceAll(raw, "T", " ")
 	}
-}
-
-func escapeSQLString(s string) string {
-	return strings.ReplaceAll(s, "'", "\\'")
 }
 
 var httpClient = &nethttp.Client{Timeout: 30 * time.Second}
