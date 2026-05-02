@@ -638,6 +638,27 @@ Ingest API endpoints (`/v1/*`) use the separate `SOBS_API_KEY` mechanism.
 
 For reverse proxies, SOBS also honors `X-Forwarded-Prefix` for URL generation and prefixed routing.
 
+## Setup Wizard API
+
+SOBS exposes a first-time instrumentation bootstrap endpoint at `GET /api/setup-wizard/steps`.
+It returns tailored setup instructions for a chosen environment, language, and deployment target.
+The endpoint uses the same Web UI authentication mode as the rest of the UI (basic auth or external auth, depending on configuration).
+
+### Query parameters
+
+| Parameter | Default | Allowed values |
+|-----------|---------|----------------|
+| `env` | `dev` | `dev`, `prod` |
+| `language` | `python` | `python`, `node`, `go`, `java`, `dotnet`, `ruby`, `php` |
+| `deployment` | `docker` | `docker`, `kubernetes`, `baremetal`, `cloud` |
+
+### Example
+
+```bash
+curl -u "$SOBS_BASIC_AUTH_USERNAME:$SOBS_BASIC_AUTH_PASSWORD" \
+  "http://localhost:44317/api/setup-wizard/steps?env=dev&language=go&deployment=docker"
+```
+
 ## Live Tail (SSE)
 
 SOBS exposes a Server-Sent Events endpoint at `/tail` for real-time streaming of logs and traces as they arrive.

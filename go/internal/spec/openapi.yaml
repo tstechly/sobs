@@ -411,6 +411,56 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/setup-wizard/steps:
+    get:
+      summary: Get setup wizard steps
+      description: |
+        Returns tailored first-time instrumentation bootstrap steps for the chosen
+        environment, language, and deployment.
+      operationId: getSetupWizardSteps
+      security:
+        - BasicAuth: []
+      parameters:
+        - name: env
+          in: query
+          required: false
+          description: Deployment environment.
+          schema:
+            type: string
+            default: dev
+            enum: [dev, prod]
+        - name: language
+          in: query
+          required: false
+          description: Application language.
+          schema:
+            type: string
+            default: python
+            enum: [python, node, go, java, dotnet, ruby, php]
+        - name: deployment
+          in: query
+          required: false
+          description: Deployment target.
+          schema:
+            type: string
+            default: docker
+            enum: [docker, kubernetes, baremetal, cloud]
+      responses:
+        '200':
+          description: Tailored setup wizard steps
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupWizardResponse'
+        '400':
+          description: Invalid setup wizard parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupWizardResponse'
+        '401':
+          description: Unauthorized - invalid Web UI credentials
+
   /openapi.yaml:
     get:
       summary: Get OpenAPI specification
@@ -432,6 +482,10 @@ components:
       in: header
       name: Authorization
       description: Authorization header with API key
+    BasicAuth:
+      type: http
+      scheme: basic
+      description: Web UI basic-auth credentials used for UI-only endpoints
 
   schemas:
     ErrorResponse:
@@ -523,6 +577,69 @@ components:
           description: Whether browser context is unchanged from previous event
           example: false
       additionalProperties: true
+
+    SetupWizardChecklistItem:
+      type: object
+      properties:
+        id:
+          type: string
+          example: sdk
+        label:
+          type: string
+          example: Install & initialise the SDK
+
+    SetupWizardStep:
+      type: object
+      properties:
+        id:
+          type: string
+          example: sdk_install
+        title:
+          type: string
+          example: Install OpenTelemetry Python SDK
+        description:
+          type: string
+          example: Add the core SDK and OTLP exporter to your project.
+        commands:
+          type: array
+          items:
+            type: string
+        language:
+          type: string
+          example: bash
+
+    SetupWizardResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        version:
+          type: string
+          example: "1"
+        env:
+          type: string
+          enum: [dev, prod]
+          example: dev
+        language:
+          type: string
+          enum: [python, node, go, java, dotnet, ruby, php]
+          example: python
+        deployment:
+          type: string
+          enum: [docker, kubernetes, baremetal, cloud]
+          example: docker
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/SetupWizardStep'
+        checklist:
+          type: array
+          items:
+            $ref: '#/components/schemas/SetupWizardChecklistItem'
+        error:
+          type: string
+          example: Invalid env 'stage'. Must be one of: ['dev', 'prod']
 
     # OTLP protobuf schemas (simplified references)
     ExportLogsServiceRequest:
