@@ -3,11 +3,14 @@ package ingest
 import (
 	"compress/flate"
 	"compress/gzip"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -359,16 +362,18 @@ func gaugeValue(dp interface{ GetAsDouble() float64 }) float64 {
 
 func metricRow(table, svcName, name, desc, unit string, resAttrs map[string]string, dpAttrs []*commonpb.KeyValue, tsNano uint64, value float64) map[string]any {
 	ts := time.Unix(0, int64(tsNano)).UTC().Format(time.RFC3339Nano)
+	attrs := kvListToMap(dpAttrs)
 	return map[string]any{
 		"_table":             table,
-		"Timestamp":          ts,
+		"TimeUnix":           ts,
 		"MetricName":         name,
 		"MetricDescription":  desc,
 		"MetricUnit":         unit,
 		"ServiceName":        svcName,
 		"ResourceAttributes": resAttrs,
-		"Attributes":         kvListToMap(dpAttrs),
+		"Attributes":         attrs,
 		"Value":              value,
+		"AttrFingerprint":    metricFingerprint(attrs),
 	}
 }
 
@@ -378,6 +383,25 @@ func kvListToMap(kvs []*commonpb.KeyValue) map[string]string {
 		m[kv.GetKey()] = anyValueToString(kv.GetValue())
 	}
 	return m
+}
+
+func metricFingerprint(attrs map[string]string) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(attrs))
+	for k := range attrs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha1.New()
+	for _, k := range keys {
+		_, _ = h.Write([]byte(k))
+		_, _ = h.Write([]byte{'='})
+		_, _ = h.Write([]byte(attrs[k]))
+		_, _ = h.Write([]byte{'\x00'})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func anyValueToString(v *commonpb.AnyValue) string {

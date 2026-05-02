@@ -6,14 +6,18 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sobs/sobs-api/internal/storage"
-
 	sobshttp "github.com/sobs/sobs-api/internal/http"
 )
 
+// DBProbe describes the minimal storage behavior needed by /health/db.
+type DBProbe interface {
+	Ping(ctx context.Context) error
+	WriteQueueDepth() int
+}
+
 // Handler provides /health and /health/db endpoints.
 type Handler struct {
-	DB *storage.DB
+	DB DBProbe
 }
 
 // Health is a simple liveness probe.
@@ -29,6 +33,18 @@ func (h *Handler) HealthDB(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+
+	if h.DB == nil {
+		slog.Error("health/db ping failed", "error", "db probe not configured")
+		sobshttp.JSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":            "degraded",
+			"db":                "error",
+			"error":             "database unavailable",
+			"write_queue_depth": 0,
+			"version":           "1.0.0",
+		})
+		return
+	}
 
 	if err := h.DB.Ping(ctx); err != nil {
 		slog.Error("health/db ping failed", "error", err)

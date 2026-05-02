@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	nethttp "net/http"
 	neturl "net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -136,11 +138,20 @@ func (d *DB) Close() error {
 	return d.conn.Close()
 }
 
-// InsertJSONRows inserts rows via ClickHouse HTTP API using JSONEachRow format.
+// InsertJSONRows inserts rows using ClickHouse JSONEachRow semantics.
+//
+// In HTTP mode we post to ClickHouse's HTTP endpoint. In embedded chDB mode
+// (httpURL unset), we materialize a temporary JSONEachRow file and load it via
+// the file() table function.
 func (d *DB) InsertJSONRows(table string, rows []map[string]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
+
+	if d.httpURL == "" {
+		return d.insertJSONRowsViaFile(table, rows)
+	}
+
 	var buf strings.Builder
 	for _, row := range rows {
 		data, err := json.Marshal(row)
@@ -164,6 +175,106 @@ func (d *DB) InsertJSONRows(table string, rows []map[string]any) error {
 		return fmt.Errorf("insert into %s: HTTP %d: %s", table, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+func (d *DB) insertJSONRowsViaFile(table string, rows []map[string]any) error {
+	f, err := os.CreateTemp("", "sobs-*.jsonl")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return fmt.Errorf("marshal row: %w", err)
+		}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			return fmt.Errorf("write temp file: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	cols := insertColumns(table)
+	if len(cols) == 0 {
+		return fmt.Errorf("insert into %s: unsupported table", table)
+	}
+	colList := strings.Join(cols, ", ")
+	query := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM file('%s', 'JSONEachRow')",
+		table,
+		colList,
+		colList,
+		escapeSQLString(filepath.ToSlash(path)),
+	)
+	if _, err := d.conn.ExecContext(context.Background(), query); err != nil {
+		return fmt.Errorf("insert into %s: %w", table, err)
+	}
+	return nil
+}
+
+func insertColumns(table string) []string {
+	switch table {
+	case "otel_logs", "hyperdx_sessions":
+		return []string{
+			"Timestamp",
+			"TraceId",
+			"SpanId",
+			"TraceFlags",
+			"SeverityText",
+			"SeverityNumber",
+			"ServiceName",
+			"Body",
+			"ResourceSchemaUrl",
+			"ResourceAttributes",
+			"ScopeSchemaUrl",
+			"ScopeName",
+			"ScopeVersion",
+			"ScopeAttributes",
+			"LogAttributes",
+			"EventName",
+		}
+	case "otel_traces":
+		return []string{
+			"Timestamp",
+			"TraceId",
+			"SpanId",
+			"ParentSpanId",
+			"TraceState",
+			"SpanName",
+			"SpanKind",
+			"ServiceName",
+			"ResourceAttributes",
+			"ScopeName",
+			"ScopeVersion",
+			"SpanAttributes",
+			"Duration",
+			"StatusCode",
+			"StatusMessage",
+			"Events",
+			"Links",
+		}
+	case "otel_metrics_gauge", "otel_metrics_sum", "otel_metrics_histogram":
+		return []string{
+			"TimeUnix",
+			"ServiceName",
+			"MetricName",
+			"MetricDescription",
+			"MetricUnit",
+			"Attributes",
+			"Value",
+			"AttrFingerprint",
+		}
+	default:
+		return nil
+	}
+}
+
+func escapeSQLString(s string) string {
+	return strings.ReplaceAll(s, "'", "\\'")
 }
 
 var httpClient = &nethttp.Client{Timeout: 30 * time.Second}
