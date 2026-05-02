@@ -1,0 +1,547 @@
+openapi: 3.0.3
+info:
+  title: SOBS API - Ingestion Endpoints
+  description: OpenTelemetry Protocol (OTLP) and custom ingestion endpoints for SOBS observability platform
+  version: 1.0.0
+  contact:
+    name: SOBS Team
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.sobs.io
+    description: Production server
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /v1/logs:
+    post:
+      summary: Ingest OTLP logs
+      description: |
+        Accepts OpenTelemetry Protocol (OTLP) log data in either protobuf or JSON format.
+        Supports gzip and deflate compression.
+      operationId: ingestLogs
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              $ref: '#/components/schemas/ExportLogsServiceRequest'
+            example: "Binary protobuf data"
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportLogsServiceRequest'
+      responses:
+        '200':
+          description: Logs accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+                    description: Number of log records accepted
+                    example: 42
+        '400':
+          description: Bad request - invalid data format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid API key
+        '503':
+          description: Service unavailable - write queue is full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/traces:
+    post:
+      summary: Ingest OTLP traces
+      description: |
+        Accepts OpenTelemetry Protocol (OTLP) trace data in either protobuf or JSON format.
+        Supports gzip and deflate compression.
+      operationId: ingestTraces
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              $ref: '#/components/schemas/ExportTraceServiceRequest'
+            example: "Binary protobuf data"
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportTraceServiceRequest'
+      responses:
+        '200':
+          description: Traces accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+                    description: Number of spans accepted
+                    example: 15
+        '400':
+          description: Bad request - invalid data format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid API key
+        '503':
+          description: Service unavailable - write queue is full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/metrics:
+    post:
+      summary: Ingest OTLP metrics
+      description: |
+        Accepts OpenTelemetry Protocol (OTLP) metrics data in either protobuf or JSON format.
+        Supports gzip and deflate compression.
+      operationId: ingestMetrics
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              $ref: '#/components/schemas/ExportMetricsServiceRequest'
+            example: "Binary protobuf data"
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportMetricsServiceRequest'
+      responses:
+        '200':
+          description: Metrics accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+                    description: Number of metric data points accepted
+                    example: 128
+        '400':
+          description: Bad request - invalid data format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid API key
+        '503':
+          description: Service unavailable - write queue is full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/errors:
+    post:
+      summary: Ingest error data
+      description: |
+        Accepts custom JSON error payloads for exception tracking.
+        Automatically creates both log and trace records.
+      operationId: ingestErrors
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timestamp:
+                  type: string
+                  format: date-time
+                  description: ISO 8601 timestamp (defaults to current time)
+                  example: "2024-01-15T10:30:00.123456789Z"
+                trace_id:
+                  type: string
+                  description: Trace ID in hex format
+                  example: "4bf92f3577b34da6a3ce929d0e0e4736"
+                span_id:
+                  type: string
+                  description: Span ID in hex format
+                  example: "00f067aa0ba902b7"
+                service:
+                  type: string
+                  description: Service name
+                  example: "web-service"
+                type:
+                  type: string
+                  description: Error type (defaults to "Error")
+                  example: "ValidationError"
+                message:
+                  type: string
+                  description: Error message
+                  example: "Invalid input parameters"
+                stack:
+                  type: string
+                  description: Stack trace
+                  example: "Error: Invalid input\n    at validateInput (/app/validate.js:15:9)"
+                attributes:
+                  type: object
+                  description: Additional key-value attributes
+                  additionalProperties:
+                    type: string
+                  example:
+                    user_id: "12345"
+                    endpoint: "/api/users"
+      responses:
+        '200':
+          description: Error accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        '400':
+          description: Bad request - invalid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid API key
+        '503':
+          description: Service unavailable - write queue is full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/ai:
+    post:
+      summary: Ingest AI telemetry
+      description: |
+        Accepts custom JSON payloads for AI/GenAI operation telemetry.
+        Creates trace spans with standardized GenAI attributes.
+      operationId: ingestAI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timestamp:
+                  type: string
+                  format: date-time
+                  description: ISO 8601 timestamp (defaults to current time)
+                  example: "2024-01-15T10:30:00.123456789Z"
+                trace_id:
+                  type: string
+                  description: Trace ID in hex format
+                  example: "4bf92f3577b34da6a3ce929d0e0e4736"
+                span_id:
+                  type: string
+                  description: Span ID in hex format
+                  example: "00f067aa0ba902b7"
+                service:
+                  type: string
+                  description: Service name
+                  example: "ai-service"
+                provider:
+                  type: string
+                  description: AI provider name (e.g., "openai", "anthropic")
+                  example: "openai"
+                model:
+                  type: string
+                  description: Model name/version
+                  example: "gpt-4"
+                operation:
+                  type: string
+                  description: Operation type (defaults to "chat")
+                  enum: [chat, completion, embedding, image_generation, text_to_speech, speech_to_text]
+                  example: "chat"
+                duration_ms:
+                  type: number
+                  format: float
+                  description: Operation duration in milliseconds
+                  example: 1250.5
+                tokens_in:
+                  type: integer
+                  description: Input token count
+                  example: 150
+                tokens_out:
+                  type: integer
+                  description: Output token count
+                  example: 75
+                input_messages:
+                  type: string
+                  description: Input messages (JSON string or array)
+                  example: "[{\"role\": \"user\", \"content\": \"Hello\"}]"
+                output_messages:
+                  type: string
+                  description: Output messages (JSON string or array)
+                  example: "[{\"role\": \"assistant\", \"content\": \"Hi there!\"}]"
+                system_instructions:
+                  type: string
+                  description: System instructions/prompt
+                  example: "You are a helpful assistant."
+                prompt:
+                  type: string
+                  description: Legacy prompt field
+                  example: "Translate this text"
+                response:
+                  type: string
+                  description: Legacy response field
+                  example: "Traduce este texto"
+                error_type:
+                  type: string
+                  description: Error type if operation failed
+                  example: "rate_limit_exceeded"
+      responses:
+        '200':
+          description: AI telemetry accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        '400':
+          description: Bad request - invalid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid API key
+        '503':
+          description: Service unavailable - write queue is full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/rum:
+    post:
+      summary: Ingest Real User Monitoring data
+      description: |
+        Accepts custom JSON payloads for browser RUM events.
+        Supports both single events and batch event arrays.
+      operationId: ingestRUM
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/RUMEvent'
+                - type: array
+                  items:
+                    $ref: '#/components/schemas/RUMEvent'
+                - type: object
+                  properties:
+                    events:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/RUMEvent'
+      responses:
+        '200':
+          description: RUM events accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: integer
+                    description: Number of events accepted
+                    example: 3
+        '400':
+          description: Bad request - invalid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized - invalid API key
+        '503':
+          description: Service unavailable - write queue is full
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /openapi.yaml:
+    get:
+      summary: Get OpenAPI specification
+      description: Returns this OpenAPI specification document
+      operationId: getOpenAPISpec
+      security: []  # No auth required
+      responses:
+        '200':
+          description: OpenAPI specification
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Authorization header with API key
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "invalid request format"
+
+    RUMEvent:
+      type: object
+      description: Real User Monitoring event
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp (defaults to current time)
+          example: "2024-01-15T10:30:00.123456789Z"
+        sessionId:
+          type: string
+          description: User session identifier
+          example: "sess_abc123"
+        type:
+          type: string
+          description: Event type
+          enum: [pageview, click, error, unhandledrejection, custom]
+          example: "pageview"
+        service:
+          type: string
+          description: Service name (defaults to "browser")
+          example: "web-app"
+        url:
+          type: string
+          description: Current page URL
+          example: "https://example.com/dashboard"
+        traceId:
+          type: string
+          description: Trace ID in hex format
+          example: "4bf92f3577b34da6a3ce929d0e0e4736"
+        spanId:
+          type: string
+          description: Span ID in hex format
+          example: "00f067aa0ba902b7"
+        traceparent:
+          type: string
+          description: W3C Trace Context header
+          example: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        message:
+          type: string
+          description: Event message (especially for errors)
+          example: "TypeError: Cannot read property 'x' of undefined"
+        errorType:
+          type: string
+          description: Error type
+          example: "TypeError"
+        stack:
+          type: string
+          description: Error stack trace
+          example: "TypeError: Cannot read property 'x' of undefined\n    at example.js:15:9"
+        contextHash:
+          type: string
+          description: Hash of browser context for delta compression
+          example: "abc123def456"
+        browserContext:
+          type: object
+          description: Browser context information
+          properties:
+            userAgent:
+              type: string
+              example: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            language:
+              type: string
+              example: "en-US"
+            timezone:
+              type: string
+              example: "America/New_York"
+            screen:
+              type: object
+              properties:
+                width:
+                  type: integer
+                  example: 1920
+                height:
+                  type: integer
+                  example: 1080
+        contextUnchanged:
+          type: boolean
+          description: Whether browser context is unchanged from previous event
+          example: false
+      additionalProperties: true
+
+    # OTLP protobuf schemas (simplified references)
+    ExportLogsServiceRequest:
+      type: object
+      description: OTLP ExportLogsServiceRequest protobuf message
+      externalDocs:
+        url: https://opentelemetry.io/docs/specs/otlp/#logs
+      additionalProperties: false
+
+    ExportTraceServiceRequest:
+      type: object
+      description: OTLP ExportTraceServiceRequest protobuf message
+      externalDocs:
+        url: https://opentelemetry.io/docs/specs/otlp/#traces
+      additionalProperties: false
+
+    ExportMetricsServiceRequest:
+      type: object
+      description: OTLP ExportMetricsServiceRequest protobuf message
+      externalDocs:
+        url: https://opentelemetry.io/docs/specs/otlp/#metrics
+      additionalProperties: false
