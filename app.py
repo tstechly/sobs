@@ -249,6 +249,9 @@ from shared.dashboards import _get_dashboards as _shared_get_dashboards
 from shared.dashboards import _parse_chart_form_submission as _shared_parse_chart_form_submission
 from shared.dashboards import _prepare_import_chart as _shared_prepare_import_chart
 from shared.dashboards import _prepare_query_add_to_dashboard_chart as _shared_prepare_query_add_to_dashboard_chart
+from shared.db_stats import _active_part_rows as _shared_active_part_rows
+from shared.db_stats import _fmt_bytes as _shared_fmt_bytes
+from shared.db_stats import _get_db_stats as _shared_get_db_stats
 from shared.error_items import _build_error_item as _shared_build_error_item
 from shared.error_items import _compact_text as _shared_compact_text
 from shared.error_items import _error_group_key as _shared_error_group_key
@@ -6462,107 +6465,18 @@ def _get_resolved_error_ids(db) -> set[str]:
 
 
 def _active_part_rows(db, table_name: str) -> int:
-    row = db.execute(
-        "SELECT COALESCE(sum(rows), 0) AS c "
-        "FROM system.parts "
-        "WHERE active = 1 AND database = currentDatabase() AND table = ?",
-        [table_name],
-    ).fetchone()
-    if not row:
-        return 0
-    return int(row["c"] or 0)
+    return _shared_active_part_rows(db, table_name)
 
 
 # ---------------------------------------------------------------------------
 # DB stats helper
 # ---------------------------------------------------------------------------
 def _get_db_stats(db) -> dict:
-    """Return a dict of chDB/ClickHouse storage and activity metrics.
-
-    Queries are read-only against system tables and do not lock OTEL ingestion.
-    Returns a best-effort result; any unavailable metric defaults to None.
-    """
-    stats: dict = {
-        "compressed_bytes": None,
-        "uncompressed_bytes": None,
-        "compression_ratio": None,
-        "total_rows": None,
-        "active_queries": None,
-        "tables": [],
-    }
-    try:
-        # Overall compressed / uncompressed size and row count across all active parts
-        row = db.execute(
-            "SELECT "
-            "  sum(data_compressed_bytes)   AS comp, "
-            "  sum(data_uncompressed_bytes) AS uncomp, "
-            "  sum(rows)                    AS rws "
-            "FROM system.parts "
-            "WHERE active = 1 AND database = currentDatabase()"
-        ).fetchone()
-        if row:
-            comp = int(row["comp"] or 0)
-            uncomp = int(row["uncomp"] or 0)
-            stats["compressed_bytes"] = comp
-            stats["uncompressed_bytes"] = uncomp
-            stats["total_rows"] = int(row["rws"] or 0)
-            if comp > 0:
-                stats["compression_ratio"] = round(uncomp / comp, 2)
-    except Exception:
-        app.logger.debug("db_stats: system.parts query failed", exc_info=True)
-
-    try:
-        # Per-table breakdown (top tables by compressed size)
-        rows = db.execute(
-            "SELECT table, "
-            "  sum(data_compressed_bytes)   AS comp, "
-            "  sum(data_uncompressed_bytes) AS uncomp, "
-            "  sum(rows)                    AS rws "
-            "FROM system.parts "
-            "WHERE active = 1 AND database = currentDatabase() "
-            "GROUP BY table "
-            "ORDER BY comp DESC "
-            "LIMIT 10"
-        ).fetchall()
-        table_stats = []
-        for r in rows:
-            comp = int(r["comp"] or 0)
-            uncomp = int(r["uncomp"] or 0)
-            table_stats.append(
-                {
-                    "table": r["table"],
-                    "compressed_bytes": comp,
-                    "uncompressed_bytes": uncomp,
-                    "rows": int(r["rws"] or 0),
-                    "compression_ratio": round(uncomp / comp, 2) if comp > 0 else None,
-                }
-            )
-        stats["tables"] = table_stats
-    except Exception:
-        app.logger.debug("db_stats: per-table system.parts query failed", exc_info=True)
-
-    try:
-        # Number of currently executing queries (activity indicator)
-        row = db.execute("SELECT COUNT(*) AS cnt FROM system.processes").fetchone()
-        if row:
-            stats["active_queries"] = int(row["cnt"] or 0)
-    except Exception:
-        app.logger.debug("db_stats: system.processes query failed", exc_info=True)
-
-    return stats
+    return _shared_get_db_stats(db, log_debug=app.logger.debug)
 
 
 def _fmt_bytes(n: int | None) -> str:
-    """Format a byte count into a human-readable string."""
-    if n is None:
-        return "—"
-    if n >= 1024**3:
-        return f"{n / 1024 ** 3:.1f} GB"
-    if n >= 1024**2:
-        return f"{n / 1024 ** 2:.1f} MB"
-    if n >= 1024:
-        return f"{n / 1024:.1f} KB"
-    return f"{n} B"
+    return _shared_fmt_bytes(n)
 
 
 # ---------------------------------------------------------------------------

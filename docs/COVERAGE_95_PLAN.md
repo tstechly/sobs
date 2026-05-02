@@ -64,7 +64,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/otlp_request.py` now measures `100%` line coverage in its dedicated direct test run after extracting OTLP request decompression, size-cap enforcement, and protobuf/JSON parse-path handling from `app.py`.
 - `shared/error_items.py` now measures `100%` line coverage in its dedicated direct test run after extracting structured error summary derivation, pretty-JSON rendering, error item shaping, and grouped-error key normalization from `app.py`.
 - `shared/log_analysis.py` now measures `100%` line coverage in its dedicated direct test run after extracting log stats aggregation, message fingerprint normalization, and advanced log-analysis summarization from `app.py`.
-- The latest sequential full-suite validation passed at `1719 passed, 4 skipped`.
+- `shared/db_stats.py` now measures `100%` line coverage in its dedicated direct test run after extracting active-part row counting, database stats aggregation, and human-readable byte formatting from `app.py`.
+- The latest sequential full-suite validation passed at `1725 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -221,6 +222,7 @@ Measured result so far:
 - `shared/otlp_request.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/error_items.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/log_analysis.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/db_stats.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -267,6 +269,7 @@ Measured result so far:
 - `app.py` now delegates OTLP request decompression, decompression-bomb size enforcement, and protobuf/JSON OTLP parse-path handling to `shared/otlp_request.py` while preserving the existing gzip/deflate/chained-encoding ingest behavior and invalid-body 400 handling exercised by the app tests.
 - `app.py` now delegates structured error summary extraction, pretty-JSON rendering, error item shaping, and grouped-error key normalization to `shared/error_items.py` while preserving the existing errors-page rendering, grouped-errors deduplication, grouped trace-link fanout, and invalid-UTF8 error display behavior exercised by the app tests.
 - `app.py` now delegates log level/service stats aggregation, message fingerprint normalization, and advanced log-analysis summarization to `shared/log_analysis.py` while preserving the existing logs stats panel and advanced-analysis route behavior exercised by the app tests.
+- `app.py` now delegates active-part row counting, database stats aggregation, and human-readable byte formatting to `shared/db_stats.py` while preserving the existing summary-page counters and data-management database-stats behavior exercised by the app tests.
 
 Why these slices were taken early:
 
