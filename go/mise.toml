@@ -1,2 +1,53 @@
 [tools]
-go = "1.22"
+# Primary runtimes used by the repository. Mise will install/activate these for contributors.
+# Keep versions in sync with CI and the Dockerfile.
+go = "1.24.13"
+node = "22"
+
+[tasks.go_test]
+description = "Run all Go tests"
+dir = "{{config_root}}"
+run = "go test ./... -v"
+
+[tasks.go_test_unit]
+description = "Run Go unit tests under go/test"
+dir = "{{config_root}}/go"
+run = "go test ./test/... -v"
+
+[tasks.go_test_integration]
+description = "Run the Go logs integration test (requires a running SOBS at SOBS_BASE or http://127.0.0.1:15317)"
+dir = "{{config_root}}/go"
+run = "go test ./test/integration -run TestLogsEndpointVisibleInUI -v"
+
+[tasks.go_test_dockertest]
+description = "Run the ClickHouse dockertest integration test (requires Docker)"
+dir = "{{config_root}}/go"
+run = "go test -tags=dockertest ./test/integration -run TestClickHouseIntegration -v"
+
+[tasks.go_mod_tidy]
+description = "Tidy go.mod"
+dir = "{{config_root}}/go"
+run = "go mod tidy"
+
+[tasks.node_ci]
+description = "Install Node.js dependencies"
+dir = "{{config_root}}"
+run = "npm ci"
+
+[tasks.chdb_lib_download]
+description = "Download libchdb into the Go project directory"
+dir = "{{config_root}}"
+run = "bash scripts/chdb-lib-download.sh"
+
+[tasks.chdb_lib_env]
+description = "Print shell exports for the downloaded libchdb"
+dir = "{{config_root}}"
+run = '''
+set -e
+if [ ! -f .chdb-lib/env.sh ]; then
+  echo "run mise run chdb_lib_download first" >&2
+  exit 1
+fi
+cat .chdb-lib/env.sh
+'''
+
