@@ -65,7 +65,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/error_items.py` now measures `100%` line coverage in its dedicated direct test run after extracting structured error summary derivation, pretty-JSON rendering, error item shaping, and grouped-error key normalization from `app.py`.
 - `shared/log_analysis.py` now measures `100%` line coverage in its dedicated direct test run after extracting log stats aggregation, message fingerprint normalization, and advanced log-analysis summarization from `app.py`.
 - `shared/db_stats.py` now measures `100%` line coverage in its dedicated direct test run after extracting active-part row counting, database stats aggregation, and human-readable byte formatting from `app.py`.
-- The latest sequential full-suite validation passed at `1725 passed, 4 skipped`.
+- `shared/log_regex_filters.py` now measures `100%` line coverage in its dedicated direct test run after extracting logs regex expression splitting, negate/unescape parsing, RE2 validation, and combined filter preparation from `app.py`.
+- The latest sequential full-suite validation passed at `1731 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -223,6 +224,7 @@ Measured result so far:
 - `shared/error_items.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/log_analysis.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/db_stats.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/log_regex_filters.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -270,6 +272,7 @@ Measured result so far:
 - `app.py` now delegates structured error summary extraction, pretty-JSON rendering, error item shaping, and grouped-error key normalization to `shared/error_items.py` while preserving the existing errors-page rendering, grouped-errors deduplication, grouped trace-link fanout, and invalid-UTF8 error display behavior exercised by the app tests.
 - `app.py` now delegates log level/service stats aggregation, message fingerprint normalization, and advanced log-analysis summarization to `shared/log_analysis.py` while preserving the existing logs stats panel and advanced-analysis route behavior exercised by the app tests.
 - `app.py` now delegates active-part row counting, database stats aggregation, and human-readable byte formatting to `shared/db_stats.py` while preserving the existing summary-page counters and data-management database-stats behavior exercised by the app tests.
+- `app.py` now delegates logs regex expression splitting, negate/unescape parsing, RE2 validation, and combined filter preparation to `shared/log_regex_filters.py` while preserving the existing logs regex validation API, invalid-regex query handling, and regex-expression parsing behavior exercised by the app tests.
 
 Why these slices were taken early:
 

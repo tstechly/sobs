@@ -304,6 +304,12 @@ from shared.log_attr_keys import _get_cached_attr_keys as _shared_get_cached_att
 from shared.log_attr_keys import _load_log_attr_keys_from_db as _shared_load_log_attr_keys_from_db
 from shared.log_attr_keys import _prime_log_attr_key_cache as _shared_prime_log_attr_key_cache
 from shared.log_attr_keys import _remember_attr_keys as _shared_remember_attr_keys
+from shared.log_regex_filters import _parse_regex_filter_expression as _shared_parse_regex_filter_expression
+from shared.log_regex_filters import _prepare_re2_filter_patterns as _shared_prepare_re2_filter_patterns
+from shared.log_regex_filters import _split_regex_filter_expression_terms as _shared_split_regex_filter_expression_terms
+from shared.log_regex_filters import _unescape_regex_filter_term as _shared_unescape_regex_filter_term
+from shared.log_regex_filters import _validate_re2_pattern as _shared_validate_re2_pattern
+from shared.log_regex_filters import _validate_re2_patterns as _shared_validate_re2_patterns
 from shared.metrics_anomaly import DERIVED_SIGNAL_NAMES as _SHARED_DERIVED_SIGNAL_NAMES
 from shared.metrics_anomaly import DERIVED_SIGNAL_SOURCES as _SHARED_DERIVED_SIGNAL_SOURCES
 from shared.metrics_anomaly import METRICS_ANOMALY_DEFAULT_COLUMNS as _SHARED_METRICS_ANOMALY_DEFAULT_COLUMNS
@@ -6639,100 +6645,27 @@ def _compute_advanced_log_analysis(rows: list[dict], level_stats: dict, service_
 # Web UI – Logs
 # ---------------------------------------------------------------------------
 def _validate_re2_pattern(db: "ChDbConnection", pattern: str) -> str | None:
-    value = str(pattern or "").strip()
-    if not value:
-        return None
-    try:
-        # chDB uses RE2 for match(), which is stricter than Python's re.
-        db.execute("SELECT match('', ?)", [value]).fetchone()
-    except Exception as exc:
-        msg = str(exc).strip()
-        if ": while executing function" in msg:
-            msg = msg.split(": while executing function", 1)[0].strip()
-        return f"Regex error: {msg}"
-    return None
+    return _shared_validate_re2_pattern(db, pattern)
 
 
 def _split_regex_filter_expression_terms(expression: str) -> list[str]:
-    """Split expression by unescaped && while preserving escaped literal \\&& tokens."""
-    parts: list[str] = []
-    buf: list[str] = []
-    i = 0
-    n = len(expression)
-    while i < n:
-        if i + 1 < n and expression[i] == "&" and expression[i + 1] == "&":
-            backslashes = 0
-            j = i - 1
-            while j >= 0 and expression[j] == "\\":
-                backslashes += 1
-                j -= 1
-            if backslashes % 2 == 0:
-                parts.append("".join(buf).strip())
-                buf = []
-                i += 2
-                continue
-        buf.append(expression[i])
-        i += 1
-    parts.append("".join(buf).strip())
-    return parts
+    return _shared_split_regex_filter_expression_terms(expression)
 
 
 def _unescape_regex_filter_term(term: str) -> str:
-    """Interpret \\&& as literal && within a regex term."""
-    return term.replace(r"\&&", "&&")
+    return _shared_unescape_regex_filter_term(term)
 
 
 def _parse_regex_filter_expression(raw: str) -> tuple[list[str], list[str], str | None]:
-    """Parse `include && !exclude` style regex expressions from filter inputs."""
-    expression = str(raw or "").strip()
-    if not expression:
-        return [], [], None
-
-    parts = _split_regex_filter_expression_terms(expression)
-    if not parts or any(not part for part in parts):
-        return [], [], "Regex error: invalid expression around '&&'"
-
-    include_patterns: list[str] = []
-    exclude_patterns: list[str] = []
-    for part in parts:
-        negate = part.startswith("!")
-        token = part[1:].strip() if negate else part
-        token = _unescape_regex_filter_term(token)
-        if not token:
-            return [], [], "Regex error: expected a pattern after '!'"
-        try:
-            re.compile(token, re.IGNORECASE)
-        except re.error as exc:
-            return [], [], f"Regex error: {exc}"
-        if negate:
-            exclude_patterns.append(token)
-        else:
-            include_patterns.append(token)
-
-    return include_patterns, exclude_patterns, None
+    return _shared_parse_regex_filter_expression(raw)
 
 
 def _validate_re2_patterns(db: "ChDbConnection", patterns: list[str]) -> str | None:
-    for pattern in patterns:
-        re2_error = _validate_re2_pattern(db, pattern)
-        if re2_error:
-            return re2_error
-    return None
+    return _shared_validate_re2_patterns(db, patterns)
 
 
 def _prepare_re2_filter_patterns(db: "ChDbConnection", raw: str) -> tuple[list[str], list[str], str | None]:
-    """Parse and RE2-validate regex filters intended for SQL match() clauses.
-
-    This helper is for the RE2 DB path only. It does not affect Python-only regex
-    behavior or client-side JavaScript regex handling.
-    """
-    include_patterns, exclude_patterns, parse_error = _parse_regex_filter_expression(raw)
-    if parse_error:
-        return [], [], parse_error
-    re2_error = _validate_re2_patterns(db, [*include_patterns, *exclude_patterns])
-    if re2_error:
-        return [], [], re2_error
-    return include_patterns, exclude_patterns, None
+    return _shared_prepare_re2_filter_patterns(db, raw)
 
 
 def _append_time_window_filter(conditions: list[str], params: list[Any], column: str, from_ts: str, to_ts: str) -> None:
