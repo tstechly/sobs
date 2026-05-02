@@ -25,7 +25,6 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-import zlib
 from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
@@ -345,6 +344,11 @@ from shared.otlp_attrs import _proto_kvlist_to_dict as _shared_proto_kvlist_to_d
 from shared.otlp_events import _proto_logs_to_events as _shared_proto_logs_to_events
 from shared.otlp_events import _proto_metrics_to_events as _shared_proto_metrics_to_events
 from shared.otlp_events import _proto_traces_to_events as _shared_proto_traces_to_events
+from shared.otlp_request import _MAX_DECOMPRESSED_BODY_BYTES as _shared_max_decompressed_body_bytes
+from shared.otlp_request import _PROTOBUF_CONTENT_TYPE as _shared_protobuf_content_type
+from shared.otlp_request import _decompress_request_body as _shared_decompress_request_body
+from shared.otlp_request import _decompress_with_limit as _shared_decompress_with_limit
+from shared.otlp_request import _parse_otlp_request as _shared_parse_otlp_request
 from shared.otlp_security import _append_vary_header as _shared_append_vary_header
 from shared.otlp_security import _apply_security_headers as _shared_apply_security_headers
 from shared.otlp_security import _origin_allowed_for_otlp as _shared_origin_allowed_for_otlp
@@ -6342,125 +6346,30 @@ def _insert_typed_metric_events(db, events: list[TypedMetricEvent]) -> int:
     )
 
 
-_PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
+_PROTOBUF_CONTENT_TYPE = _shared_protobuf_content_type
 # Maximum number of bytes allowed after decompression (32 MiB). Prevents zip-bomb / decompression
 # bomb DoS where a tiny compressed payload expands to an unbounded amount of memory.
-_MAX_DECOMPRESSED_BODY_BYTES = 32 * 1024 * 1024
+_MAX_DECOMPRESSED_BODY_BYTES = _shared_max_decompressed_body_bytes
 
 
 def _decompress_with_limit(raw: bytes, *, wbits: int) -> bytes:
-    """Incrementally decompress *raw* and enforce ``_MAX_DECOMPRESSED_BODY_BYTES``.
-
-    Using ``gzip.decompress``/``zlib.decompress`` can allocate the full decoded
-    output before we can validate size. This helper streams decompression in
-    chunks and raises ``ValueError`` as soon as the cap is exceeded.
-    """
-    decompressor = zlib.decompressobj(wbits)
-    output_parts: list[bytes] = []
-    total = 0
-    chunk_size = 64 * 1024
-
-    for start in range(0, len(raw), chunk_size):
-        remaining = _MAX_DECOMPRESSED_BODY_BYTES - total
-        piece = decompressor.decompress(raw[start : start + chunk_size], remaining + 1)
-        total += len(piece)
-        if total > _MAX_DECOMPRESSED_BODY_BYTES:
-            raise ValueError(f"decompressed body exceeds {_MAX_DECOMPRESSED_BODY_BYTES} bytes")
-        if piece:
-            output_parts.append(piece)
-
-    remaining = _MAX_DECOMPRESSED_BODY_BYTES - total
-    tail = decompressor.flush(remaining + 1)
-    total += len(tail)
-    if total > _MAX_DECOMPRESSED_BODY_BYTES:
-        raise ValueError(f"decompressed body exceeds {_MAX_DECOMPRESSED_BODY_BYTES} bytes")
-    if tail:
-        output_parts.append(tail)
-    return b"".join(output_parts)
+    return _shared_decompress_with_limit(raw, wbits=wbits)
 
 
 def _decompress_request_body(raw: bytes, content_encoding: str) -> bytes:
-    """Decompress a request body according to its Content-Encoding.
-
-    The OpenTelemetry Collector's ``otlphttp`` exporter can send gzip-compressed
-    payloads (``Content-Encoding: gzip``).  Quart does not auto-decompress
-    request bodies, so we handle it explicitly here.
-
-    Per RFC 9110, Content-Encoding may contain multiple comma-separated values
-    applied in order (e.g. ``"gzip, deflate"``).  We apply decodings in reverse
-    order (outermost first).
-
-    Supported individual encodings: ``gzip``, ``deflate``.  Unrecognised
-    encodings are passed through so that a downstream parse error surfaces a
-    meaningful message.
-
-    Raises ``ValueError`` if the decompressed body exceeds
-    ``_MAX_DECOMPRESSED_BODY_BYTES`` to guard against decompression bombs.
-    """
-    encodings = [e.strip().lower() for e in (content_encoding or "").split(",") if e.strip()]
-    data = raw
-    for enc in reversed(encodings):
-        if enc == "gzip":
-            data = _decompress_with_limit(data, wbits=16 + zlib.MAX_WBITS)
-        elif enc == "deflate":
-            # Some senders use raw deflate (no zlib wrapper). Accept both.
-            try:
-                data = _decompress_with_limit(data, wbits=zlib.MAX_WBITS)
-            except zlib.error:
-                data = _decompress_with_limit(data, wbits=-zlib.MAX_WBITS)
-        elif len(data) > _MAX_DECOMPRESSED_BODY_BYTES:
-            raise ValueError(f"decompressed body exceeds {_MAX_DECOMPRESSED_BODY_BYTES} bytes")
-    return data
+    return _shared_decompress_request_body(raw, content_encoding)
 
 
 async def _parse_otlp_request(proto_class):
-    """
-    Parse an OTLP HTTP request body.
-
-    Returns ``(proto_message, error_response)`` where ``error_response`` is
-    ``None`` on success or a ``(flask_response, status_code)`` tuple on failure.
-
-    - ``Content-Type: application/x-protobuf`` → deserialise with *proto_class*.
-    - Any other content-type (including ``application/json``) → parse JSON and
-      map into the same protobuf class via protobuf JSON mapping.
-
-    Both paths transparently handle ``Content-Encoding: gzip`` and
-    ``Content-Encoding: deflate`` request bodies, which the OpenTelemetry
-    Collector ``otlphttp`` exporter may send when compression is enabled.
-    """
-    mimetype = (request.mimetype or "").lower()
-    content_encoding = request.headers.get("Content-Encoding", "")
-    msg = proto_class()
-    if mimetype == _PROTOBUF_CONTENT_TYPE:
-        app.logger.debug("OTLP ingest: parse_path=protobuf endpoint=%s", request.path)
-        try:
-            raw = await request.get_data()
-            body = _decompress_request_body(raw, content_encoding)
-            msg.ParseFromString(body)
-        except Exception as exc:
-            app.logger.warning("OTLP protobuf parse error [%s]: %s", request.path, exc)
-            return None, (jsonify({"error": "failed to parse protobuf body"}), 400)
-        return msg, None
-    app.logger.debug("OTLP ingest: parse_path=json endpoint=%s", request.path)
-    try:
-        raw = await request.get_data()
-        body = _decompress_request_body(raw, content_encoding)
-        payload = json.loads(body) if body else {}
-    except Exception as exc:
-        app.logger.warning("OTLP json body read/decompress error [%s]: %s", request.path, exc)
-        return None, (jsonify({"error": "failed to read request body"}), 400)
-    # Per OTLP spec, JSON ExportMetricsServiceRequest/ExportLogsServiceRequest/ExportTraceServiceRequest
-    # must have a top-level object (dict) with resource_metrics/resource_logs/resource_spans keys.
-    # Arrays and primitives are invalid and must return 400.
-    if not isinstance(payload, dict):
-        app.logger.warning("OTLP json parse error [%s]: top-level value is not an object", request.path)
-        return None, (jsonify({"error": "failed to parse json body"}), 400)
-    try:
-        ParseDict(payload, msg)
-    except Exception as exc:
-        app.logger.warning("OTLP json parse error [%s]: %s", request.path, exc)
-        return None, (jsonify({"error": "failed to parse json body"}), 400)
-    return msg, None
+    return await _shared_parse_otlp_request(
+        proto_class,
+        request=request,
+        logger=app.logger,
+        jsonify_func=jsonify,
+        parse_dict=ParseDict,
+        decompress_request_body=_decompress_request_body,
+        protobuf_content_type=_PROTOBUF_CONTENT_TYPE,
+    )
 
 
 ERROR_SOURCES_SQL = """
