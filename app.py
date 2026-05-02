@@ -439,6 +439,9 @@ from shared.rum_client_auth import _same_origin_request as _shared_same_origin_r
 from shared.rum_client_auth import _verify_rum_client_auth as _shared_verify_rum_client_auth
 from shared.rum_events import _build_rum_event_item as _shared_build_rum_event_item
 from shared.rum_events import _rum_session_key_from_attrs as _shared_rum_session_key_from_attrs
+from shared.sourcemap_utils import _maybe_demangle_js_stack as _shared_maybe_demangle_js_stack
+from shared.sourcemap_utils import _remap_rum_console_stacks as _shared_remap_rum_console_stacks
+from shared.sourcemap_utils import _sourcemap_lookup_for_file as _shared_sourcemap_lookup_for_file
 from shared.sql_where import _append_regex_expression_clauses as _shared_append_regex_expression_clauses
 from shared.sql_where import _append_time_window_filter as _shared_append_time_window_filter
 from shared.sql_where import _normalize_ai_sql_where as _shared_normalize_ai_sql_where
@@ -5885,123 +5888,29 @@ def _ns_to_iso(nanos: int) -> str:
         return _now_iso()
 
 
-_STACK_FRAME_RE = re.compile(
-    r"(?P<prefix>.*?)"
-    r"(?P<url>https?://[^\s\)]+|/[^\s\):]+\.js(?:\?[^\s\)]*)?)"
-    r"(?::(?P<line>\d+))"
-    r"(?::(?P<col>\d+))"
-    r"(?P<suffix>.*)$"
-)
-_SOURCE_MAP_CACHE: dict[str, tuple[float, Any]] = {}
-
-
 def _sourcemap_lookup_for_file(js_url: str, line: int, col: int) -> tuple[str, int, int, str] | None:
-    if not SOURCE_MAP_ENABLE or not SOURCE_MAP_DIR:
-        return None
-    if not os.path.isdir(SOURCE_MAP_DIR):
-        return None
-
-    parsed = urllib.parse.urlparse(str(js_url or ""))
-    rel_path = parsed.path.lstrip("/")
-    basename = os.path.basename(parsed.path)
-    candidates = []
-    if rel_path:
-        candidates.append(os.path.join(SOURCE_MAP_DIR, rel_path + ".map"))
-    if basename:
-        candidates.append(os.path.join(SOURCE_MAP_DIR, basename + ".map"))
-        if basename.endswith(".min.js"):
-            candidates.append(os.path.join(SOURCE_MAP_DIR, basename.replace(".min.js", ".js.map")))
-        if basename.endswith(".js"):
-            candidates.append(os.path.join(SOURCE_MAP_DIR, basename[:-3] + ".js.map"))
-
-    map_path = ""
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            map_path = candidate
-            break
-    if not map_path:
-        return None
-
-    try:
-        mtime = os.path.getmtime(map_path)
-    except OSError:
-        return None
-
-    cache_entry = _SOURCE_MAP_CACHE.get(map_path)
-    index = None
-    if cache_entry and cache_entry[0] == mtime:
-        index = cache_entry[1]
-    else:
-        try:
-            import sourcemap  # type: ignore
-
-            with open(map_path, encoding="utf-8") as handle:
-                index = sourcemap.loads(handle.read())
-            _SOURCE_MAP_CACHE[map_path] = (mtime, index)
-        except Exception:
-            return None
-
-    try:
-        token = index.lookup(max(0, line - 1), max(0, col - 1))
-    except Exception:
-        return None
-    if not token:
-        return None
-
-    src = str(getattr(token, "src", "") or "")
-    src_line = int(getattr(token, "src_line", 0) or 0)
-    src_col = int(getattr(token, "src_col", 0) or 0)
-    name = str(getattr(token, "name", "") or "")
-    return (src, src_line + 1, src_col + 1, name)
+    return _shared_sourcemap_lookup_for_file(
+        js_url,
+        line,
+        col,
+        source_map_enable=SOURCE_MAP_ENABLE,
+        source_map_dir=SOURCE_MAP_DIR,
+    )
 
 
 def _maybe_demangle_js_stack(stack_text: str) -> str:
-    text = str(stack_text or "")
-    if not text or not SOURCE_MAP_ENABLE:
-        return text
-
-    mapped_lines = []
-    for raw_line in text.splitlines():
-        match = _STACK_FRAME_RE.match(raw_line)
-        if not match:
-            mapped_lines.append(raw_line)
-            continue
-
-        url = str(match.group("url") or "")
-        try:
-            line = int(match.group("line") or "0")
-            col = int(match.group("col") or "0")
-        except ValueError:
-            mapped_lines.append(raw_line)
-            continue
-
-        mapped = _sourcemap_lookup_for_file(url, line, col)
-        if not mapped:
-            mapped_lines.append(raw_line)
-            continue
-
-        src, src_line, src_col, name = mapped
-        mapped_target = f"{src}:{src_line}:{src_col}" if src else f"{url}:{line}:{col}"
-        if name:
-            mapped_target = f"{name} ({mapped_target})"
-        mapped_lines.append(f"{match.group('prefix')}[mapped] {mapped_target}{match.group('suffix')}")
-
-    return "\n".join(mapped_lines)
+    return _shared_maybe_demangle_js_stack(
+        stack_text,
+        source_map_enable=SOURCE_MAP_ENABLE,
+        sourcemap_lookup_for_file=_sourcemap_lookup_for_file,
+    )
 
 
 def _remap_rum_console_stacks(event: dict[str, Any]) -> None:
-    breadcrumbs = event.get("breadcrumbs")
-    if not isinstance(breadcrumbs, dict):
-        return
-    console_entries = breadcrumbs.get("console")
-    if not isinstance(console_entries, list):
-        return
-    for entry in console_entries:
-        if not isinstance(entry, dict):
-            continue
-        stack = str(entry.get("stack", ""))
-        if stack:
-            entry["stack"] = _maybe_demangle_js_stack(stack)
+    _shared_remap_rum_console_stacks(
+        event,
+        maybe_demangle_js_stack=_maybe_demangle_js_stack,
+    )
 
 
 def _parse_limit(default=200) -> int:
