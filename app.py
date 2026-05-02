@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -293,6 +293,9 @@ from shared.library_inventory import (
     _inventory_versions_by_package_from_inventory as _shared_inventory_versions_by_package_from_inventory,
 )
 from shared.library_inventory import _merge_library_inventory as _shared_merge_library_inventory
+from shared.log_analysis import _compute_advanced_log_analysis as _shared_compute_advanced_log_analysis
+from shared.log_analysis import _compute_log_stats as _shared_compute_log_stats
+from shared.log_analysis import _fingerprint_log_message as _shared_fingerprint_log_message
 from shared.log_attr_keys import _extract_attr_maps as _shared_extract_attr_maps
 from shared.log_attr_keys import _get_cached_attr_keys as _shared_get_cached_attr_keys
 from shared.log_attr_keys import _load_log_attr_keys_from_db as _shared_load_log_attr_keys_from_db
@@ -6701,139 +6704,21 @@ async def summary():
 
 
 def _compute_log_stats(db, where_clause: str, params: list) -> tuple[dict, dict]:
-    """Return (level_stats, service_stats) counts for the given WHERE clause."""
-    level_query = (
-        "SELECT SeverityText, COUNT(*) AS cnt "
-        f"FROM otel_logs {where_clause} "
-        "GROUP BY SeverityText ORDER BY cnt DESC"
-    )
-    level_stats = {(r["SeverityText"] or "UNKNOWN"): r["cnt"] for r in db.execute(level_query, params).fetchall()}
-
-    svc_cond = "AND ServiceName!=''" if where_clause else "WHERE ServiceName!=''"
-    service_query = (
-        "SELECT ServiceName, COUNT(*) AS cnt "
-        f"FROM otel_logs {where_clause} {svc_cond} "
-        "GROUP BY ServiceName ORDER BY cnt DESC LIMIT 10"
-    )
-    service_stats = {r["ServiceName"]: r["cnt"] for r in db.execute(service_query, params).fetchall()}
-    return level_stats, service_stats
+    return _shared_compute_log_stats(db, where_clause, params)
 
 
 def _fingerprint_log_message(message: str) -> str:
-    """Normalize dynamic values so repeating message patterns can be grouped."""
-    normalized = (message or "").strip().lower()
-    if not normalized:
-        return "(empty message)"
-
-    patterns = [
-        (r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>"),
-        (r"\b0x[0-9a-f]+\b", "<hex>"),
-        (r"\b[0-9a-f]{16,}\b", "<hash>"),
-        (r"\b\d{4,}\b", "<num>"),
-        (r"\b\d+\b", "<n>"),
-    ]
-    for pattern, replacement in patterns:
-        normalized = re.sub(pattern, replacement, normalized)
-
-    normalized = re.sub(r"'[^']*'", "'<text>'", normalized)
-    normalized = re.sub(r'"[^"]*"', '"<text>"', normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized[:160]
+    return _shared_fingerprint_log_message(message)
 
 
 def _compute_advanced_log_analysis(rows: list[dict], level_stats: dict, service_stats: dict) -> dict:
-    """Compute message intelligence for manual advanced analysis runs."""
-    messages = [str(row["Body"] or "") for row in rows if row["Body"]]
-    if not messages:
-        return {
-            "top_patterns": [],
-            "top_keywords": [],
-            "error_families": [],
-            "hints": [],
-        }
-
-    fingerprint_counts: Counter[str] = Counter(_fingerprint_log_message(msg) for msg in messages)
-    most_common_patterns = fingerprint_counts.most_common(8)
-    top_patterns = [{"pattern": pattern, "count": count} for pattern, count in most_common_patterns]
-
-    family_regex = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Timeout|Refused|Unavailable|Failure))\b")
-    family_counts: Counter[str] = Counter()
-
-    # Prefer structured exception types when available, then fall back to message parsing.
-    for row in rows:
-        attrs = _map_to_dict(row.get("LogAttributes"))
-        exc_type = str(attrs.get("exception.type", "")).strip()
-        if exc_type:
-            family_counts[exc_type] += 1
-
-    for msg in messages:
-        for family in set(family_regex.findall(msg)):
-            family_counts[family] += 1
-    error_families = [{"family": family, "count": count} for family, count in family_counts.most_common(8)]
-
-    stop_words = {
-        "the",
-        "and",
-        "for",
-        "with",
-        "from",
-        "into",
-        "this",
-        "that",
-        "http",
-        "https",
-        "failed",
-        "error",
-        "warn",
-        "info",
-        "debug",
-        "trace",
-        "service",
-    }
-    keyword_counts: Counter[str] = Counter()
-    for msg in messages:
-        for token in re.findall(r"[a-z][a-z0-9_\-]{2,}", msg.lower()):
-            if token not in stop_words:
-                keyword_counts[token] += 1
-    top_keywords = [{"keyword": keyword, "count": count} for keyword, count in keyword_counts.most_common(10)]
-
-    hints = []
-    total = max(len(rows), 1)
-    severe = sum(
-        int(count)
-        for level, count in level_stats.items()
-        if str(level).upper() in {"ERROR", "FATAL", "CRITICAL", "ALERT", "EMERGENCY"}
+    return _shared_compute_advanced_log_analysis(
+        rows,
+        level_stats,
+        service_stats,
+        map_to_dict=_map_to_dict,
+        fingerprint_log_message=_fingerprint_log_message,
     )
-    severe_ratio = severe / total
-    if severe_ratio >= 0.25:
-        hints.append(
-            f"High severe-log ratio ({severe_ratio:.0%}); prioritize stabilizing error paths before scaling traffic."
-        )
-
-    if most_common_patterns and most_common_patterns[0][1] >= 3:
-        top_count = most_common_patterns[0][1]
-        hints.append(
-            "Most frequent message pattern repeats "
-            f"{top_count} times; consider deduplication/sampling and shared remediation guidance."
-        )
-
-    timeout_hits = keyword_counts.get("timeout", 0) + keyword_counts.get("timed", 0)
-    if timeout_hits >= 3:
-        hints.append("Timeout-related logs are common; review dependency latency, retry budgets, and circuit breakers.")
-
-    if service_stats:
-        top_service, top_service_count = next(iter(service_stats.items()))
-        if int(top_service_count) / total >= 0.6:
-            hints.append(
-                f"Most events come from {top_service}; investigate service-level hotspots and noisy call paths."
-            )
-
-    return {
-        "top_patterns": top_patterns,
-        "top_keywords": top_keywords,
-        "error_families": error_families,
-        "hints": hints,
-    }
 
 
 # ---------------------------------------------------------------------------

@@ -7,13 +7,13 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 ## Current Baseline
 
 - Overall line coverage is now `87%` from the latest sequential full-suite run.
-- `app.py` remains the dominant risk and coverage bottleneck at `80%` line coverage.
+- `app.py` remains the dominant risk and coverage bottleneck at `79%` line coverage.
 - Route blueprints are a foundation step, but they do not by themselves create the module seams needed for high-confidence unit coverage.
 
 ## Measured Current State
 
 - Fresh sequential coverage run from `coverage-latest.xml` measured overall line coverage at `87%` versus the prior `78.06%` checkpoint baseline.
-- `app.py` now measures `80%` line coverage while the extracted business-logic modules continue to climb above the direct-test target.
+- `app.py` now measures `79%` line coverage while the extracted business-logic modules continue to climb above the direct-test target.
 - `shared/ai_chart.py` now measures `97.52%` line coverage in the full-suite report, and its dedicated direct test run measured `98%` coverage for the extracted chart-spec parsing/repair/generation helpers.
 - `shared/chart_specs.py` now measures `96%` line coverage in its dedicated direct test run and `96%` in the latest full-suite report after extracting chart-query validation, SQL literal/coercion helpers, default/raw spec assembly, chart-spec normalization, builder SQL compilation, compiled-spec validation, template role-map resolution, boolean parsing, visual override helpers, column-type inference, public dashboard DB-error sanitization, deep placeholder substitution, binding extraction, drilldown timestamp normalization, drilldown metadata attachment, custom ECharts JSON parsing, custom binding resolution, custom drilldown payload assembly, series-point ordering, derived-signal row preparation, and generic chart-template rendering orchestration from `app.py`, including real missing-`sql.mode` and blank-error fallback bug fixes uncovered by the new direct tests.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report after extracting dashboard chart-query limit injection, shared query execution/result shaping, raw-row column/data shaping, chart-spec template API payload assembly, source-specific chart option-list branching, spec named-query execution, named-dataset shaping, AI chart-build dataset assembly, AI chart fallback-option handling, and AI chart-build response shaping from `app.py`.
@@ -63,7 +63,8 @@ Raise the codebase to sustainable `95%+` coverage by testing business logic dire
 - `shared/otlp_write.py` now measures `100%` line coverage in its dedicated direct test run after extracting OTLP log/span/error row shaping plus typed metric table routing from `app.py`.
 - `shared/otlp_request.py` now measures `100%` line coverage in its dedicated direct test run after extracting OTLP request decompression, size-cap enforcement, and protobuf/JSON parse-path handling from `app.py`.
 - `shared/error_items.py` now measures `100%` line coverage in its dedicated direct test run after extracting structured error summary derivation, pretty-JSON rendering, error item shaping, and grouped-error key normalization from `app.py`.
-- The latest sequential full-suite validation passed at `1713 passed, 4 skipped`.
+- `shared/log_analysis.py` now measures `100%` line coverage in its dedicated direct test run after extracting log stats aggregation, message fingerprint normalization, and advanced log-analysis summarization from `app.py`.
+- The latest sequential full-suite validation passed at `1719 passed, 4 skipped`.
 
 ## Working Rules
 
@@ -219,6 +220,7 @@ Measured result so far:
 - `shared/otlp_write.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/otlp_request.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/error_items.py` now measures `100%` line coverage in its dedicated direct test run.
+- `shared/log_analysis.py` now measures `100%` line coverage in its dedicated direct test run.
 - `shared/dashboard_api.py` now measures `100%` line coverage in its dedicated direct test run and `100%` in the latest full-suite report.
 - `shared/dashboards.py` now measures `100%` line coverage in its dedicated direct test run.
 - `app.py` now delegates the AI embedding, assistant-meta parsing, semantic-memory matching, memory consolidation, recent-turn loading, and tool-history helpers to `shared/ai_memory.py`.
@@ -264,6 +266,7 @@ Measured result so far:
 - `app.py` now delegates OTLP log/span/error row shaping plus typed metric table routing to `shared/otlp_write.py` while preserving the existing ingest persistence, attr-key discovery, tag-rule application, and typed metric write behavior exercised by the app tests.
 - `app.py` now delegates OTLP request decompression, decompression-bomb size enforcement, and protobuf/JSON OTLP parse-path handling to `shared/otlp_request.py` while preserving the existing gzip/deflate/chained-encoding ingest behavior and invalid-body 400 handling exercised by the app tests.
 - `app.py` now delegates structured error summary extraction, pretty-JSON rendering, error item shaping, and grouped-error key normalization to `shared/error_items.py` while preserving the existing errors-page rendering, grouped-errors deduplication, grouped trace-link fanout, and invalid-UTF8 error display behavior exercised by the app tests.
+- `app.py` now delegates log level/service stats aggregation, message fingerprint normalization, and advanced log-analysis summarization to `shared/log_analysis.py` while preserving the existing logs stats panel and advanced-analysis route behavior exercised by the app tests.
 
 Why these slices were taken early:
 
