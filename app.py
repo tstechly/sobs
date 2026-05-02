@@ -454,7 +454,7 @@ def _append_vary_header(response: Response, value: str) -> None:
     if value.lower() not in {p.lower() for p in parts}:
         response.headers["Vary"] = ", ".join(parts + [value])
 
-
+# migrated-to-go
 @app.after_request
 async def _apply_security_headers(response: Response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
