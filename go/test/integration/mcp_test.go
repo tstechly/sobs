@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -21,7 +22,7 @@ func TestMCPUI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /settings/mcp returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /settings/mcp", http.StatusOK)
 	})
 }
 
@@ -37,10 +38,11 @@ func TestMCPAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /mcp/tools returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /mcp/tools", http.StatusOK)
+		assertJSONBody(t, resp, "GET /mcp/tools")
 	})
 
-	t.Run("POST /mcp handles MCP protocol", func(t *testing.T) {
+	t.Run("POST /mcp without API key returns 401", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"method":  "tools/list",
@@ -54,7 +56,7 @@ func TestMCPAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /mcp returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /mcp", http.StatusUnauthorized)
 	})
 
 	t.Run("GET /api/mcp/keys lists MCP API keys", func(t *testing.T) {
@@ -64,7 +66,8 @@ func TestMCPAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/mcp/keys returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/mcp/keys", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/mcp/keys")
 	})
 
 	t.Run("POST /api/mcp/keys creates MCP API key", func(t *testing.T) {
@@ -79,10 +82,10 @@ func TestMCPAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/mcp/keys returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/mcp/keys", http.StatusOK, http.StatusCreated)
 	})
 
-	t.Run("DELETE /api/mcp/keys/<key_id> deletes MCP API key", func(t *testing.T) {
+	t.Run("DELETE /api/mcp/keys/<key_id> returns 404 for missing key", func(t *testing.T) {
 		req, err := http.NewRequest("DELETE", baseURL+"/api/mcp/keys/test-key-id", nil)
 		if err != nil {
 			t.Fatalf("Failed to create request: %v", err)
@@ -94,7 +97,7 @@ func TestMCPAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("DELETE /api/mcp/keys/test-key-id returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "DELETE /api/mcp/keys/test-key-id", http.StatusNotFound)
 	})
 
 	t.Run("POST /api/mcp/enabled toggles MCP enabled", func(t *testing.T) {
@@ -107,7 +110,7 @@ func TestMCPAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/mcp/enabled returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/mcp/enabled", http.StatusOK)
 	})
 }
 
@@ -123,45 +126,42 @@ func TestMetricsRules(t *testing.T) {
 		payload.Set("signalSource", "logs")
 		payload.Set("signalName", "error_volume")
 
-		resp, err := http.PostForm(baseURL+"/metrics/rules", payload)
+		resp, err := postFormNoRedirect(baseURL+"/metrics/rules", strings.NewReader(payload.Encode()))
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /metrics/rules returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /metrics/rules", http.StatusFound)
 	})
 
 	t.Run("POST /metrics/rules/auto auto-generates rules", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/metrics/rules/auto", payload)
+		resp, err := http.PostForm(baseURL+"/metrics/rules/auto", url.Values{})
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /metrics/rules/auto returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /metrics/rules/auto", http.StatusOK)
 	})
 
 	t.Run("POST /metrics/rules/dashboard/auto auto-generates dashboard rules", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/metrics/rules/dashboard/auto", payload)
+		resp, err := http.PostForm(baseURL+"/metrics/rules/dashboard/auto", url.Values{})
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /metrics/rules/dashboard/auto returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /metrics/rules/dashboard/auto", http.StatusOK)
 	})
 
 	t.Run("POST /metrics/rules/<rule_id>/delete deletes rule", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/metrics/rules/test-rule-id/delete", payload)
+		resp, err := postFormNoRedirect(baseURL+"/metrics/rules/test-rule-id/delete", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /metrics/rules/test-rule-id/delete returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /metrics/rules/test-rule-id/delete", http.StatusFound)
 	})
 }

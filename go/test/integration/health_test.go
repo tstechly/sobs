@@ -2,49 +2,18 @@
 package integration
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 )
 
-// getBaseURL returns the base URL for the SOBS server.
-// It checks the SOBS_TEST_URL environment variable, or defaults to localhost:5000.
-func getBaseURL() string {
-	if url := os.Getenv("SOBS_TEST_URL"); url != "" {
-		return url
-	}
-	return "http://localhost:5000"
-}
-
-// waitForServer waits for the server to be ready, up to a timeout.
-func waitForServer(baseURL string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/health")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return fmt.Errorf("server at %s not ready within %v", baseURL, timeout)
-}
-
 // TestHealthEndpoint tests the basic health check endpoint.
 func TestHealthEndpoint(t *testing.T) {
 	baseURL := getBaseURL()
-
-	// Wait for server to be ready (useful when running against a fresh instance)
-	if err := waitForServer(baseURL, 30*time.Second); err != nil {
-		t.Skipf("Skipping test: %v", err)
-	}
+	skipIfServerNotAvailable(t, baseURL)
 
 	t.Run("GET /health returns 200 OK", func(t *testing.T) {
 		resp, err := http.Get(baseURL + "/health")
@@ -53,24 +22,9 @@ func TestHealthEndpoint(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected status 200, got %d", resp.StatusCode)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("Failed to read response body: %v", err)
-		}
-
-		t.Logf("Health endpoint response: %s", string(body))
-
-		// Verify response is valid JSON
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err != nil {
-			t.Errorf("Response is not valid JSON: %v", err)
-		}
-
-		t.Logf("Health check response parsed successfully: %+v", result)
+		assertStatusIn(t, resp, "GET /health", http.StatusOK)
+		assertContentTypeContains(t, resp, "GET /health", "application/json")
+		assertJSONBody(t, resp, "GET /health")
 	})
 
 	t.Run("GET /health response time is acceptable", func(t *testing.T) {
@@ -85,87 +39,50 @@ func TestHealthEndpoint(t *testing.T) {
 		if elapsed > 5*time.Second {
 			t.Errorf("Health endpoint took too long: %v", elapsed)
 		}
-
-		t.Logf("Health endpoint responded in %v", elapsed)
+		assertStatusIn(t, resp, "GET /health (latency)", http.StatusOK)
 	})
 }
 
 // TestHealthDBEndpoint tests the database health check endpoint.
 func TestHealthDBEndpoint(t *testing.T) {
 	baseURL := getBaseURL()
+	skipIfServerNotAvailable(t, baseURL)
 
-	// Wait for server to be ready
-	if err := waitForServer(baseURL, 30*time.Second); err != nil {
-		t.Skipf("Skipping test: %v", err)
-	}
-
-	t.Run("GET /health/db returns 200 OK", func(t *testing.T) {
+	t.Run("GET /health/db returns 200 or 503", func(t *testing.T) {
 		resp, err := http.Get(baseURL + "/health/db")
 		if err != nil {
 			t.Fatalf("Failed to make request to /health/db: %v", err)
 		}
 		defer resp.Body.Close()
 
-		// Database health might return 200 (healthy) or 503 (unhealthy)
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
-			t.Errorf("Expected status 200 or 503, got %d", resp.StatusCode)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("Failed to read response body: %v", err)
-		}
-
-		t.Logf("Health DB endpoint response: %s", string(body))
-
-		// Verify response is valid JSON
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err != nil {
-			t.Errorf("Response is not valid JSON: %v", err)
-		}
-
-		// Check for expected fields in database health response
-		if status, ok := result["status"]; ok {
-			t.Logf("Database status: %v", status)
-		}
-
-		t.Logf("Database health check response: %+v", result)
+		// 200 when DB is healthy, 503 when unhealthy.
+		assertStatusIn(t, resp, "GET /health/db", http.StatusOK, http.StatusServiceUnavailable)
+		assertContentTypeContains(t, resp, "GET /health/db", "application/json")
+		assertJSONBody(t, resp, "GET /health/db")
 	})
 
-	t.Run("GET /health/db includes database status", func(t *testing.T) {
+	t.Run("GET /health/db response is non-empty JSON object", func(t *testing.T) {
 		resp, err := http.Get(baseURL + "/health/db")
 		if err != nil {
 			t.Fatalf("Failed to make request to /health/db: %v", err)
 		}
 		defer resp.Body.Close()
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			t.Fatalf("Failed to read response body: %v", err)
+		v := assertJSONBody(t, resp, "GET /health/db")
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected JSON object, got %T", v)
 		}
-
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err != nil {
-			t.Fatalf("Failed to parse JSON response: %v", err)
-		}
-
-		// Verify the response contains meaningful data
-		if len(result) == 0 {
+		if len(m) == 0 {
 			t.Error("Database health response is empty")
 		}
-
-		t.Logf("Database health contains %d fields", len(result))
 	})
 }
 
 // TestHealthEndpointsConcurrent tests that health endpoints handle concurrent requests.
 func TestHealthEndpointsConcurrent(t *testing.T) {
 	baseURL := getBaseURL()
-
-	// Wait for server to be ready
-	if err := waitForServer(baseURL, 30*time.Second); err != nil {
-		t.Skipf("Skipping test: %v", err)
-	}
+	skipIfServerNotAvailable(t, baseURL)
 
 	t.Run("Concurrent requests to /health", func(t *testing.T) {
 		numRequests := 10
@@ -192,47 +109,30 @@ func TestHealthEndpointsConcurrent(t *testing.T) {
 			}
 		}
 
-		if successCount < numRequests {
+		if successCount != numRequests {
 			t.Errorf("Only %d/%d concurrent requests succeeded", successCount, numRequests)
 		}
-
-		t.Logf("All %d concurrent requests to /health succeeded", successCount)
 	})
 }
 
 // TestHealthEndpointWithInvalidMethod tests that health endpoint handles non-GET methods appropriately.
 func TestHealthEndpointWithInvalidMethod(t *testing.T) {
 	baseURL := getBaseURL()
+	skipIfServerNotAvailable(t, baseURL)
 
-	// Wait for server to be ready
-	if err := waitForServer(baseURL, 30*time.Second); err != nil {
-		t.Skipf("Skipping test: %v", err)
-	}
-
-	t.Run("POST to /health returns appropriate status", func(t *testing.T) {
+	t.Run("POST to /health returns 405", func(t *testing.T) {
 		resp, err := http.Post(baseURL+"/health", "application/json", nil)
 		if err != nil {
 			t.Fatalf("Failed to make POST request to /health: %v", err)
 		}
 		defer resp.Body.Close()
 
-		// Health endpoint might allow or reject POST - both are valid behaviors
-		t.Logf("POST /health returned status: %d", resp.StatusCode)
-
-		// Common responses: 200 (allowed), 405 (method not allowed), or 404
-		if resp.StatusCode == http.StatusMethodNotAllowed {
-			t.Log("POST /health correctly returns 405 Method Not Allowed")
-		} else if resp.StatusCode == http.StatusOK {
-			t.Log("POST /health is allowed and returns 200 OK")
-		}
+		assertStatusIn(t, resp, "POST /health", http.StatusMethodNotAllowed)
 	})
 }
 
-// Helper test to verify the server is running (can be used with httptest for unit-style integration tests).
+// TestHealthEndpointWithTestServer demonstrates using httptest for controlled testing.
 func TestHealthEndpointWithTestServer(t *testing.T) {
-	// This test demonstrates how to use httptest for more controlled testing
-	// In a real scenario, you might mock parts of the app
-
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			w.Header().Set("Content-Type", "application/json")
@@ -257,12 +157,8 @@ func TestHealthEndpointWithTestServer(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected 200, got %d", resp.StatusCode)
-		}
-
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("TestServer health response: %s", string(body))
+		assertStatusIn(t, resp, "TestServer GET /health", http.StatusOK)
+		assertJSONBody(t, resp, "TestServer GET /health")
 	})
 
 	t.Run("TestServer: GET /health/db returns 200", func(t *testing.T) {
@@ -272,12 +168,8 @@ func TestHealthEndpointWithTestServer(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected 200, got %d", resp.StatusCode)
-		}
-
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("TestServer health/db response: %s", string(body))
+		assertStatusIn(t, resp, "TestServer GET /health/db", http.StatusOK)
+		assertJSONBody(t, resp, "TestServer GET /health/db")
 	})
 }
 
@@ -285,7 +177,6 @@ func TestHealthEndpointWithTestServer(t *testing.T) {
 func BenchmarkHealthEndpoint(b *testing.B) {
 	baseURL := getBaseURL()
 
-	// Quick check if server is available
 	resp, err := http.Get(baseURL + "/health")
 	if err != nil {
 		b.Skipf("Server not available: %v", err)

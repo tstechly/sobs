@@ -20,10 +20,11 @@ func TestOnboardingAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/setup-wizard/steps returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/setup-wizard/steps", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/setup-wizard/steps")
 	})
 
-	t.Run("POST /api/onboarding/create-repo creates repository", func(t *testing.T) {
+	t.Run("POST /api/onboarding/create-repo rejects unauth or invalid request", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"name": "test-onboarding-repo",
 			"url":  "https://github.com/test/repo",
@@ -36,10 +37,10 @@ func TestOnboardingAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/onboarding/create-repo returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/onboarding/create-repo", http.StatusBadRequest)
 	})
 
-	t.Run("POST /api/onboarding/import-repo imports repository", func(t *testing.T) {
+	t.Run("POST /api/onboarding/import-repo rejects unauth or invalid request", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"url": "https://github.com/test/repo",
 		}
@@ -51,10 +52,10 @@ func TestOnboardingAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/onboarding/import-repo returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/onboarding/import-repo", http.StatusBadRequest)
 	})
 
-	t.Run("POST /api/onboarding/list-repos lists repositories", func(t *testing.T) {
+	t.Run("POST /api/onboarding/list-repos rejects unauth or invalid request", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"org": "test-org",
 		}
@@ -66,20 +67,20 @@ func TestOnboardingAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/onboarding/list-repos returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/onboarding/list-repos", http.StatusBadRequest)
 	})
 
-	t.Run("GET /api/onboarding/inspect-repo inspects repository", func(t *testing.T) {
+	t.Run("GET /api/onboarding/inspect-repo rejects unauth or invalid request", func(t *testing.T) {
 		resp, err := http.Get(baseURL + "/api/onboarding/inspect-repo?url=https://github.com/test/repo")
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/onboarding/inspect-repo returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/onboarding/inspect-repo", http.StatusBadRequest)
 	})
 
-	t.Run("POST /api/onboarding/create-issues creates issues", func(t *testing.T) {
+	t.Run("POST /api/onboarding/create-issues rejects unauth or invalid request", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"repoUrl": "https://github.com/test/repo",
 			"count":   5,
@@ -92,6 +93,6 @@ func TestOnboardingAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/onboarding/create-issues returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/onboarding/create-issues", http.StatusBadRequest)
 	})
 }

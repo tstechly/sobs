@@ -20,7 +20,7 @@ func TestDataManagementUI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /settings/data-management returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /settings/data-management", http.StatusOK)
 	})
 }
 
@@ -36,20 +36,22 @@ func TestDataManagementAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/data-management/backup/list returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/data-management/backup/list", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/data-management/backup/list")
 	})
 
-	t.Run("POST /api/data-management/backup/run runs backup", func(t *testing.T) {
+	t.Run("POST /api/data-management/backup/run requires admin auth", func(t *testing.T) {
+		// Server returns 403 for unauthenticated callers; assert that contract.
 		resp, err := http.Post(baseURL+"/api/data-management/backup/run", "application/json", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/data-management/backup/run returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/data-management/backup/run", http.StatusForbidden)
 	})
 
-	t.Run("POST /api/data-management/restore restores backup", func(t *testing.T) {
+	t.Run("POST /api/data-management/restore requires admin auth", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"backupId": "test-backup-id",
 		}
@@ -61,6 +63,6 @@ func TestDataManagementAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/data-management/restore returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/data-management/restore", http.StatusForbidden)
 	})
 }

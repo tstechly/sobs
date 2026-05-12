@@ -4,9 +4,7 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/url"
 	"testing"
 )
 
@@ -23,45 +21,45 @@ func TestNotificationChannels(t *testing.T) {
 		}
 		body, _ := json.Marshal(payload)
 
-		resp, err := http.Post(baseURL+"/settings/notifications/channels", "application/json", bytes.NewReader(body))
+		resp, err := postJSONNoRedirect(baseURL+"/settings/notifications/channels", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/notifications/channels returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/notifications/channels", http.StatusFound)
 	})
 
 	t.Run("POST /settings/notifications/channels/<channel_id>/delete deletes channel", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/settings/notifications/channels/test-channel-id/delete", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/notifications/channels/test-channel-id/delete", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/notifications/channels/test-channel-id/delete returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/notifications/channels/test-channel-id/delete", http.StatusFound)
 	})
 
 	t.Run("POST /settings/notifications/channels/<channel_id>/toggle toggles channel", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/settings/notifications/channels/test-channel-id/toggle", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/notifications/channels/test-channel-id/toggle", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/notifications/channels/test-channel-id/toggle returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/notifications/channels/test-channel-id/toggle", http.StatusFound)
 	})
 
-	t.Run("POST /api/notifications/channels/<channel_id>/test tests channel", func(t *testing.T) {
+	t.Run("POST /api/notifications/channels/<channel_id>/test returns 404 for missing channel", func(t *testing.T) {
+		// endpoints.txt documents GET, but the route is registered for POST and returns
+		// 404 when the channel does not exist.
 		resp, err := http.Post(baseURL+"/api/notifications/channels/test-channel-id/test", "application/json", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/notifications/channels/test-channel-id/test returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/notifications/channels/test-channel-id/test", http.StatusNotFound)
 	})
 }
 
@@ -72,48 +70,46 @@ func TestNotificationRules(t *testing.T) {
 
 	t.Run("POST /settings/notifications/rules creates rule", func(t *testing.T) {
 		payload := map[string]interface{}{
-			"name":    "test-rule",
-			"enabled": true,
+			"name":           "test-rule",
+			"enabled":        true,
 			"conditionsJson": `{"severity": "critical"}`,
-			"channelIds": "test-channel-id",
+			"channelIds":     "test-channel-id",
 		}
 		body, _ := json.Marshal(payload)
 
-		resp, err := http.Post(baseURL+"/settings/notifications/rules", "application/json", bytes.NewReader(body))
+		resp, err := postJSONNoRedirect(baseURL+"/settings/notifications/rules", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/notifications/rules returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/notifications/rules", http.StatusFound)
 	})
 
 	t.Run("POST /settings/notifications/rules/<rule_id>/toggle toggles rule", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/settings/notifications/rules/test-rule-id/toggle", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/notifications/rules/test-rule-id/toggle", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/notifications/rules/test-rule-id/toggle returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/notifications/rules/test-rule-id/toggle", http.StatusFound)
 	})
 
 	t.Run("POST /settings/notifications/rules/<rule_id>/delete deletes rule", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/settings/notifications/rules/test-rule-id/delete", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/notifications/rules/test-rule-id/delete", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/notifications/rules/test-rule-id/delete returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/notifications/rules/test-rule-id/delete", http.StatusFound)
 	})
 
 	t.Run("POST /api/notifications/rules/auto-generate auto-generates rules", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"signalSource": "logs",
-			"signalName":  "error_volume",
+			"signalName":   "error_volume",
 		}
 		body, _ := json.Marshal(payload)
 
@@ -123,7 +119,7 @@ func TestNotificationRules(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/notifications/rules/auto-generate returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/notifications/rules/auto-generate", http.StatusOK)
 	})
 
 	t.Run("POST /api/notifications/check checks notifications", func(t *testing.T) {
@@ -133,7 +129,7 @@ func TestNotificationRules(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/notifications/check returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/notifications/check", http.StatusOK)
 	})
 }
 
@@ -142,18 +138,18 @@ func TestPushNotifications(t *testing.T) {
 	baseURL := getBaseURL()
 	skipIfServerNotAvailable(t, baseURL)
 
-	t.Run("GET /api/notifications/vapid-public-key returns VAPID key", func(t *testing.T) {
+	t.Run("GET /api/notifications/vapid-public-key returns 404 when no key generated", func(t *testing.T) {
+		// Server returns 404 until a VAPID key has been generated via /vapid-keygen.
 		resp, err := http.Get(baseURL + "/api/notifications/vapid-public-key")
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		body, _ := io.ReadAll(resp.Body)
-		t.Logf("GET /api/notifications/vapid-public-key returned status: %d, body: %s", resp.StatusCode, string(body))
+		assertStatusIn(t, resp, "GET /api/notifications/vapid-public-key", http.StatusOK, http.StatusNotFound)
 	})
 
-	t.Run("POST /api/notifications/subscribe subscribes to push", func(t *testing.T) {
+	t.Run("POST /api/notifications/subscribe rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"endpoint": "https://example.com/push",
 			"keys": map[string]string{
@@ -169,7 +165,7 @@ func TestPushNotifications(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/notifications/subscribe returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/notifications/subscribe", http.StatusBadRequest)
 	})
 
 	t.Run("POST /api/notifications/vapid-keygen generates VAPID keys", func(t *testing.T) {
@@ -179,10 +175,12 @@ func TestPushNotifications(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/notifications/vapid-keygen returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/notifications/vapid-keygen", http.StatusOK)
 	})
 
-	t.Run("POST /api/notifications/vapid-keys deletes VAPID keys", func(t *testing.T) {
+	t.Run("DELETE /api/notifications/vapid-keys deletes VAPID keys", func(t *testing.T) {
+		// endpoints.txt documents POST for "Delete VAPID keys" but the actual
+		// REST verb used by the server is DELETE.
 		req, err := http.NewRequest("DELETE", baseURL+"/api/notifications/vapid-keys", nil)
 		if err != nil {
 			t.Fatalf("Failed to create request: %v", err)
@@ -194,6 +192,6 @@ func TestPushNotifications(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("DELETE /api/notifications/vapid-keys returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "DELETE /api/notifications/vapid-keys", http.StatusOK, http.StatusNoContent)
 	})
 }

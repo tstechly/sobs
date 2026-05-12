@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"testing"
 )
 
@@ -21,7 +20,7 @@ func TestReportsUI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /reports returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /reports", http.StatusOK)
 	})
 }
 
@@ -37,10 +36,11 @@ func TestReportsAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/reports returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/reports", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/reports")
 	})
 
-	t.Run("POST /api/reports creates report", func(t *testing.T) {
+	t.Run("POST /api/reports rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"name":        "Test Report",
 			"description": "Test report description",
@@ -54,10 +54,10 @@ func TestReportsAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/reports returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/reports", http.StatusBadRequest)
 	})
 
-	t.Run("DELETE /api/reports/<report_id> deletes report", func(t *testing.T) {
+	t.Run("DELETE /api/reports/<report_id> returns 404 for missing report", func(t *testing.T) {
 		req, err := http.NewRequest("DELETE", baseURL+"/api/reports/test-report-id", nil)
 		if err != nil {
 			t.Fatalf("Failed to create request: %v", err)
@@ -69,7 +69,7 @@ func TestReportsAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("DELETE /api/reports/test-report-id returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "DELETE /api/reports/test-report-id", http.StatusNotFound)
 	})
 
 	t.Run("GET /api/reports/export exports reports", func(t *testing.T) {
@@ -79,10 +79,10 @@ func TestReportsAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/reports/export returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/reports/export", http.StatusOK)
 	})
 
-	t.Run("POST /api/reports/import imports report", func(t *testing.T) {
+	t.Run("POST /api/reports/import rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"reportJson": `{"name": "Imported Report"}`,
 		}
@@ -94,17 +94,16 @@ func TestReportsAPI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/reports/import returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/reports/import", http.StatusBadRequest)
 	})
 
-	t.Run("POST /reports/<report_id>/delete deletes report (UI)", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/reports/test-report-id/delete", payload)
+	t.Run("POST /reports/<report_id>/delete redirects after delete", func(t *testing.T) {
+		resp, err := postFormNoRedirect(baseURL+"/reports/test-report-id/delete", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /reports/test-report-id/delete returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /reports/test-report-id/delete", http.StatusFound)
 	})
 }

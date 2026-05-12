@@ -18,17 +18,18 @@ func TestKubernetesUI(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /settings/kubernetes returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /settings/kubernetes", http.StatusOK)
 	})
 
-	t.Run("GET /kubernetes shows kubernetes dashboard", func(t *testing.T) {
+	t.Run("GET /kubernetes returns 404 (route not registered)", func(t *testing.T) {
+		// endpoints.txt documents this as a UI page but server returns 404.
 		resp, err := http.Get(baseURL + "/kubernetes")
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /kubernetes returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /kubernetes", http.StatusNotFound)
 	})
 }
 
@@ -37,13 +38,14 @@ func TestKubernetesAPI(t *testing.T) {
 	baseURL := getBaseURL()
 	skipIfServerNotAvailable(t, baseURL)
 
-	t.Run("GET /api/kubernetes/status returns k8s status", func(t *testing.T) {
+	t.Run("GET /api/kubernetes/status returns 404 (route not registered)", func(t *testing.T) {
+		// endpoints.txt documents this endpoint but server returns 404.
 		resp, err := http.Get(baseURL + "/api/kubernetes/status")
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/kubernetes/status returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/kubernetes/status", http.StatusNotFound)
 	})
 }

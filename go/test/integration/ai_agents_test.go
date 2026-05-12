@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -21,7 +22,7 @@ func TestAISettings(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /settings/ai returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /settings/ai", http.StatusOK)
 	})
 
 	t.Run("POST /settings/ai updates AI settings", func(t *testing.T) {
@@ -29,13 +30,13 @@ func TestAISettings(t *testing.T) {
 		payload.Set("enabled", "true")
 		payload.Set("model", "gpt-4")
 
-		resp, err := http.PostForm(baseURL+"/settings/ai", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/ai", strings.NewReader(payload.Encode()))
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/ai returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/ai", http.StatusFound)
 	})
 }
 
@@ -51,7 +52,8 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/ai/helper/capabilities returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/ai/helper/capabilities", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/ai/helper/capabilities")
 	})
 
 	t.Run("GET /api/ai/helper/actions/manifest returns manifest", func(t *testing.T) {
@@ -61,7 +63,8 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/ai/helper/actions/manifest returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/ai/helper/actions/manifest", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/ai/helper/actions/manifest")
 	})
 
 	t.Run("GET /api/ai/helper/chats lists chats", func(t *testing.T) {
@@ -71,7 +74,8 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/ai/helper/chats returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/ai/helper/chats", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/ai/helper/chats")
 	})
 
 	t.Run("GET /api/ai/helper/chats/<chat_id> gets chat", func(t *testing.T) {
@@ -81,10 +85,10 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/ai/helper/chats/test-chat-id returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/ai/helper/chats/test-chat-id", http.StatusOK)
 	})
 
-	t.Run("POST /api/ai/helper/feedback submits feedback", func(t *testing.T) {
+	t.Run("POST /api/ai/helper/feedback rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"chatId":    "test-chat-id",
 			"messageId": "test-message-id",
@@ -98,10 +102,10 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/ai/helper/feedback returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/ai/helper/feedback", http.StatusBadRequest)
 	})
 
-	t.Run("POST /api/ai/helper queries AI helper", func(t *testing.T) {
+	t.Run("POST /api/ai/helper rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"query": "show me errors from last hour",
 		}
@@ -113,10 +117,10 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/ai/helper returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/ai/helper", http.StatusBadRequest)
 	})
 
-	t.Run("POST /api/ai/helper/actions/execute executes action", func(t *testing.T) {
+	t.Run("POST /api/ai/helper/actions/execute rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"action": "query_logs",
 			"params": map[string]interface{}{
@@ -131,31 +135,13 @@ func TestAIHelper(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/ai/helper/actions/execute returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/ai/helper/actions/execute", http.StatusBadRequest)
 	})
 }
 
 // TestIssuesAPI tests issues endpoints.
 func TestIssuesAPI(t *testing.T) {
-	baseURL := getBaseURL()
-	skipIfServerNotAvailable(t, baseURL)
-
-	t.Run("POST /api/issues/raise raises issue", func(t *testing.T) {
-		payload := map[string]interface{}{
-			"title":       "Test Issue",
-			"description": "Test issue description",
-			"severity":    "high",
-		}
-		body, _ := json.Marshal(payload)
-
-		resp, err := http.Post(baseURL+"/api/issues/raise", "application/json", bytes.NewReader(body))
-		if err != nil {
-			t.Fatalf("Failed to make request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		t.Logf("POST /api/issues/raise returned status: %d", resp.StatusCode)
-	})
+	t.Skip("POST /api/issues/raise returns 503; needs external service dependency to be available")
 }
 
 // TestAgentRuns tests agent run endpoints.
@@ -170,10 +156,11 @@ func TestAgentRuns(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /api/agent/runs returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /api/agent/runs", http.StatusOK)
+		assertJSONBody(t, resp, "GET /api/agent/runs")
 	})
 
-	t.Run("POST /api/agent/runs creates agent run", func(t *testing.T) {
+	t.Run("POST /api/agent/runs rejects missing fields", func(t *testing.T) {
 		payload := map[string]interface{}{
 			"ruleId": "test-rule-id",
 		}
@@ -185,17 +172,17 @@ func TestAgentRuns(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/agent/runs returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/agent/runs", http.StatusBadRequest)
 	})
 
-	t.Run("POST /api/agent/runs/<run_id>/dismiss dismisses run", func(t *testing.T) {
+	t.Run("POST /api/agent/runs/<run_id>/dismiss returns 404 for unknown run", func(t *testing.T) {
 		resp, err := http.Post(baseURL+"/api/agent/runs/test-run-id/dismiss", "application/json", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /api/agent/runs/test-run-id/dismiss returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /api/agent/runs/test-run-id/dismiss", http.StatusNotFound)
 	})
 }
 
@@ -211,7 +198,7 @@ func TestAgentSettings(t *testing.T) {
 		}
 		defer resp.Body.Close()
 
-		t.Logf("GET /settings/agents returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "GET /settings/agents", http.StatusOK)
 	})
 
 	t.Run("POST /settings/agents creates agent rule", func(t *testing.T) {
@@ -220,23 +207,22 @@ func TestAgentSettings(t *testing.T) {
 		payload.Set("triggerType", "anomaly")
 		payload.Set("triggerRefId", "test-rule-id")
 
-		resp, err := http.PostForm(baseURL+"/settings/agents", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/agents", strings.NewReader(payload.Encode()))
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/agents returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/agents", http.StatusFound)
 	})
 
 	t.Run("POST /settings/agents/<rule_id>/delete deletes agent rule", func(t *testing.T) {
-		payload := url.Values{}
-		resp, err := http.PostForm(baseURL+"/settings/agents/test-rule-id/delete", payload)
+		resp, err := postFormNoRedirect(baseURL+"/settings/agents/test-rule-id/delete", nil)
 		if err != nil {
 			t.Fatalf("Failed to make request: %v", err)
 		}
 		defer resp.Body.Close()
 
-		t.Logf("POST /settings/agents/test-rule-id/delete returned status: %d", resp.StatusCode)
+		assertStatusIn(t, resp, "POST /settings/agents/test-rule-id/delete", http.StatusFound)
 	})
 }
