@@ -1,0 +1,18 @@
+[tools]
+go = "1.24.13"
+uv = "latest"
+
+[tasks.chdb]
+#run = "go/scripts/chdb-lib-download.sh"
+run = "test -f .chdb-lib/libchdb.so || ./go/scripts/chdb-lib-download.sh;"
+
+[tasks.go_tests]
+depends = ["chdb"]
+run = ". .chdb-lib/env.sh; go run gotest.tools/gotestsum@latest"
+
+[tasks.run_sobs_docker]
+run = "docker run -p 44316:4317 -v sobs_data:/data ghcr.io/abartrim/sobs:latest"
+
+[tasks.run_go_server]
+depends = ["chdb"]
+run = "go run cmd/sobs/main.go"
