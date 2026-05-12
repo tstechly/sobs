@@ -141,7 +141,55 @@ func TestAIHelper(t *testing.T) {
 
 // TestIssuesAPI tests issues endpoints.
 func TestIssuesAPI(t *testing.T) {
-	t.Skip("POST /api/issues/raise returns 503; needs external service dependency to be available")
+	baseURL := getBaseURL()
+	skipIfServerNotAvailable(t, baseURL)
+
+	t.Run("POST /api/issues/raise creates issue", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"title": "Test Issue",
+			"body":  "Test issue description",
+		}
+		body, _ := json.Marshal(payload)
+
+		resp, err := http.Post(baseURL+"/api/issues/raise", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("Failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		assertStatusIn(t, resp, "POST /api/issues/raise", http.StatusCreated)
+		v := assertJSONBody(t, resp, "POST /api/issues/raise")
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected JSON object, got %T", v)
+		}
+		if _, ok := m["id"].(string); !ok {
+			t.Errorf("Expected string id field, got %v", m["id"])
+		}
+		if title, _ := m["title"].(string); title != "Test Issue" {
+			t.Errorf("Expected title %q, got %v", "Test Issue", m["title"])
+		}
+	})
+
+	t.Run("POST /api/issues/raise rejects empty body", func(t *testing.T) {
+		resp, err := http.Post(baseURL+"/api/issues/raise", "application/json", bytes.NewReader([]byte(`{}`)))
+		if err != nil {
+			t.Fatalf("Failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		assertStatusIn(t, resp, "POST /api/issues/raise (empty)", http.StatusBadRequest)
+	})
+
+	t.Run("GET /api/issues/raise rejects non-POST", func(t *testing.T) {
+		resp, err := http.Get(baseURL + "/api/issues/raise")
+		if err != nil {
+			t.Fatalf("Failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		assertStatusIn(t, resp, "GET /api/issues/raise", http.StatusMethodNotAllowed)
+	})
 }
 
 // TestAgentRuns tests agent run endpoints.

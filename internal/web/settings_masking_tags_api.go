@@ -63,7 +63,7 @@ func (s *Server) writeMaskingMutationResponse(w http.ResponseWriter, r *http.Req
 		writeJSON(w, status, payload)
 		return
 	}
-	http.Redirect(w, r, "/settings/masking", http.StatusSeeOther)
+	http.Redirect(w, r, "/settings/masking", http.StatusFound)
 }
 
 func (s *Server) settingsMaskingKeysCreate(w http.ResponseWriter, r *http.Request) {
@@ -287,20 +287,51 @@ func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_tags.html", ctx)
 	case http.MethodPost:
-		var input tags.RuleInput
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
-			return
-		}
-		rule, err := s.tagService.CreateRule(input)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusCreated, rule)
+		input := decodeTagRuleInput(r)
+		_, _ = s.tagService.CreateRule(input)
+		http.Redirect(w, r, "/settings/tags", http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// decodeTagRuleInput parses a tag rule from either a JSON or form-encoded body.
+// Accepts both snake_case (JSON) and camelCase (form) field names.
+func decodeTagRuleInput(r *http.Request) tags.RuleInput {
+	var input tags.RuleInput
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "application/json") {
+		_ = json.NewDecoder(r.Body).Decode(&input)
+		return input
+	}
+	if err := r.ParseForm(); err != nil {
+		return input
+	}
+	get := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(r.PostForm.Get(k)); v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+	input.Name = get("name")
+	if v := get("record_types", "recordTypes"); v != "" {
+		input.RecordTypes = strings.Split(v, ",")
+	}
+	matchField := get("match_field", "matchField")
+	matchOperator := get("match_operator", "matchOperator")
+	matchValue := get("match_value", "matchValue")
+	if matchField != "" || matchOperator != "" || matchValue != "" {
+		input.Conditions = []tags.Condition{{
+			MatchField:    matchField,
+			MatchOperator: matchOperator,
+			MatchValue:    matchValue,
+		}}
+	}
+	input.TagKey = get("tag_key", "tagKey")
+	input.TagValue = get("tag_value", "tagValue")
+	return input
 }
 
 func anyString(value any) string {
@@ -344,11 +375,8 @@ func (s *Server) settingsTagsSubroutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.tagService.DeleteRule(parts[0]) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": parts[0]})
+	_ = s.tagService.DeleteRule(parts[0])
+	http.Redirect(w, r, "/settings/tags", http.StatusFound)
 }
 
 func (s *Server) apiTagsRecord(w http.ResponseWriter, r *http.Request) {

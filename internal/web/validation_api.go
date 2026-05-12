@@ -36,7 +36,9 @@ func validateRegexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	pat := strings.TrimSpace(req.Pattern)
 	if pat == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pattern is required"})
+		// Match logs handler behavior: empty pattern is treated as a no-op
+		// rather than an error, so the UI can validate as the user types.
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sample": nil})
 		return
 	}
 	if _, err := regexp.Compile(pat); err != nil {

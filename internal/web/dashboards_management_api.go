@@ -50,7 +50,7 @@ func (s *Server) dashboardsRoot(w http.ResponseWriter, r *http.Request) {
 			if asJSON {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			} else {
-				http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards", http.StatusFound)
 			}
 			return
 		}
@@ -59,7 +59,7 @@ func (s *Server) dashboardsRoot(w http.ResponseWriter, r *http.Request) {
 			if asJSON {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			} else {
-				http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards", http.StatusFound)
 			}
 			return
 		}
@@ -67,7 +67,7 @@ func (s *Server) dashboardsRoot(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusCreated, d)
 			return
 		}
-		http.Redirect(w, r, "/dashboards/"+d.ID, http.StatusSeeOther)
+		http.Redirect(w, r, "/dashboards/"+d.ID, http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -112,7 +112,9 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 		}
 		d, ok := s.dashboardService.Get(dashboardID)
 		if !ok {
-			http.NotFound(w, r)
+			// Redirect to the dashboards list when the requested dashboard
+			// does not exist so the user lands somewhere usable.
+			http.Redirect(w, r, "/dashboards", http.StatusFound)
 			return
 		}
 		charts := s.listDashboardCharts(r, dashboardID)
@@ -142,14 +144,14 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			} else {
-				http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards", http.StatusFound)
 			}
 			return
 		}
 		if wantsJSONResponse(r) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		} else {
-			http.Redirect(w, r, "/dashboards", http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboards", http.StatusFound)
 		}
 		return
 	}
@@ -164,7 +166,7 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			} else {
-				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			}
 			return
 		}
@@ -173,14 +175,14 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			} else {
-				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			}
 			return
 		}
 		if wantsJSONResponse(r) {
 			writeJSON(w, http.StatusCreated, c)
 		} else {
-			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 		}
 		return
 	}
@@ -195,7 +197,7 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 			} else {
-				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			}
 			return
 		}
@@ -204,14 +206,14 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			} else {
-				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			}
 			return
 		}
 		if wantsJSONResponse(r) {
 			writeJSON(w, http.StatusOK, c)
 		} else {
-			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 		}
 		return
 	}
@@ -226,14 +228,14 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			} else {
-				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			}
 			return
 		}
 		if wantsJSONResponse(r) {
 			writeJSON(w, http.StatusCreated, c)
 		} else {
-			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 		}
 		return
 	}
@@ -247,14 +249,14 @@ func (s *Server) dashboardsSubroutes(w http.ResponseWriter, r *http.Request) {
 			if wantsJSONResponse(r) {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			} else {
-				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+				http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			}
 			return
 		}
 		if wantsJSONResponse(r) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		} else {
-			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 		}
 		return
 	}

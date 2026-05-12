@@ -106,7 +106,7 @@ func (s *Server) registerPageRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/settings/help/repositories", s.settingsRepositoriesHelpPage)
 	mux.HandleFunc("/settings/help/tags", s.settingsTagsHelpPage)
 	mux.HandleFunc("/settings/notifications", s.settingsNotificationsPage)
-	mux.HandleFunc("/query", s.queryPage)
+	// /query UI page intentionally unregistered (returns 404).
 	mux.HandleFunc("/query/help", s.queryHelpPage)
 	mux.HandleFunc("/metrics/help", s.metricsHelpPage)
 	mux.HandleFunc("/metrics/help/rules", s.metricsRulesHelpPage)

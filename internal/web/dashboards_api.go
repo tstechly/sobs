@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 type dashboardsQueryRequest struct {
@@ -25,6 +26,10 @@ func (s *Server) apiDashboardsQuery(w http.ResponseWriter, r *http.Request) {
 	var req dashboardsQueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query is required"})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.dashboardService.Query(req.Query))

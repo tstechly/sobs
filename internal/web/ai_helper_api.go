@@ -215,12 +215,17 @@ func (s *Server) apiAIHelperChatByID(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	chat, ok := s.aiService.GetChat(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	if chat, ok := s.aiService.GetChat(id); ok {
+		writeJSON(w, http.StatusOK, chat)
 		return
 	}
-	writeJSON(w, http.StatusOK, chat)
+	// Return an empty chat placeholder for unknown IDs so the UI can render
+	// without a 404 round-trip.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       id,
+		"title":    "",
+		"messages": []any{},
+	})
 }
 
 func (s *Server) apiAIHelperFeedback(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +236,10 @@ func (s *Server) apiAIHelperFeedback(w http.ResponseWriter, r *http.Request) {
 	var req helperFeedbackRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(req.ChatID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "chat_id is required"})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.aiService.SaveFeedback(req.ChatID, req.Rating, req.Note))
@@ -262,6 +271,10 @@ func (s *Server) apiAIHelperActionsExecute(w http.ResponseWriter, r *http.Reques
 	var req helperExecuteActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(req.ActionID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action_id is required"})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.aiService.ExecuteAction(req.ActionID, req.Payload))

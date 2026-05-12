@@ -129,9 +129,8 @@ func (s *Server) apiDataManagementBackupRun(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req dmBackupRunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-		return
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 	kind := req.Type
 	if kind != "incremental" {

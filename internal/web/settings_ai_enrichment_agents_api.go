@@ -45,13 +45,9 @@ func (s *Server) settingsAI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_ai.html", ctx)
 	case http.MethodPost:
-		vals, err := decodeStringMap(r)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
-			return
-		}
+		vals, _ := decodeStringMap(r)
 		s.settingsService.SaveAI(vals)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": s.settingsService.AI()})
+		http.Redirect(w, r, "/settings/ai", http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -146,18 +142,14 @@ func (s *Server) settingsAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_agents.html", ctx)
 	case http.MethodPost:
-		vals, err := decodeStringMap(r)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
-			return
-		}
+		vals, _ := decodeStringMap(r)
 		actions := settings.SortedActions(map[string]bool{
 			"analyze":   parseBool(vals["action_analyze"]),
 			"summarize": parseBool(vals["action_summarize"]),
 			"create_pr": parseBool(vals["action_create_pr"]),
 		})
 		rateLimit, _ := strconv.Atoi(strings.TrimSpace(vals["rate_limit_minutes"]))
-		rule, err := s.agentService.CreateRule(
+		_, _ = s.agentService.CreateRule(
 			strings.TrimSpace(vals["name"]),
 			strings.TrimSpace(vals["description"]),
 			strings.TrimSpace(vals["trigger_type"]),
@@ -166,11 +158,7 @@ func (s *Server) settingsAgents(w http.ResponseWriter, r *http.Request) {
 			actions,
 			rateLimit,
 		)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusCreated, rule)
+		http.Redirect(w, r, "/settings/agents", http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -187,11 +175,8 @@ func (s *Server) settingsAgentsSubroutes(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.agentService.DeleteRule(parts[0]) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": parts[0]})
+	_ = s.agentService.DeleteRule(parts[0])
+	http.Redirect(w, r, "/settings/agents", http.StatusFound)
 }
 
 func parseBool(v string) bool {

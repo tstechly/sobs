@@ -54,7 +54,7 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 		s.renderMetricsRulesPage(w, rules, services, signals, sources, nil, []map[string]any{}, nil, []map[string]any{}, openPanel)
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		name := strings.TrimSpace(r.Form.Get("name"))
@@ -69,30 +69,30 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 		secondaryComparator := strings.ToLower(strings.TrimSpace(defaultString(r.Form.Get("secondary_comparator"), "gt")))
 
 		if name == "" || source == "" || signal == "" {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		if ruleType != "threshold" && ruleType != "composite" {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		if comparator != "gt" && comparator != "lt" {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		if secondaryComparator != "gt" && secondaryComparator != "lt" {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 
 		warningThreshold, err := strconv.ParseFloat(strings.TrimSpace(r.Form.Get("warning_threshold")), 64)
 		if err != nil {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		criticalThreshold, err := strconv.ParseFloat(strings.TrimSpace(r.Form.Get("critical_threshold")), 64)
 		if err != nil {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		minSampleCount := coercePositiveInt(r.Form.Get("min_sample_count"), 1, 1, 1_000_000)
@@ -100,24 +100,24 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 		secondaryCriticalThreshold := coerceFloatDefault(r.Form.Get("secondary_critical_threshold"), 0)
 
 		if comparator == "gt" && criticalThreshold < warningThreshold {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		if comparator == "lt" && criticalThreshold > warningThreshold {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		if ruleType == "composite" {
 			if secondarySource == "" || secondarySignal == "" {
-				http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+				http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 				return
 			}
 			if secondaryComparator == "gt" && secondaryCriticalThreshold < secondaryWarningThreshold {
-				http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+				http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 				return
 			}
 			if secondaryComparator == "lt" && secondaryCriticalThreshold > secondaryWarningThreshold {
-				http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+				http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 				return
 			}
 		} else {
@@ -130,12 +130,12 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 
 		store, err := s.storeFactory.Open(r.Context())
 		if err != nil {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		defer store.Close()
 		if err := ensureMetricsRulesSchema(r.Context(), store); err != nil {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
 		_, err = store.Exec(
@@ -162,10 +162,10 @@ func (s *Server) metricsRules(w http.ResponseWriter, r *http.Request) {
 			persist.Version(),
 		)
 		if err != nil {
-			http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -199,7 +199,7 @@ func (s *Server) metricsRulesAuto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusFound)
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(defaultString(r.Form.Get("action"), "preview")))
@@ -218,12 +218,12 @@ func (s *Server) metricsRulesAuto(w http.ResponseWriter, r *http.Request) {
 
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusFound)
 		return
 	}
 	defer store.Close()
 	if err := ensureMetricsRulesSchema(r.Context(), store); err != nil {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusFound)
 		return
 	}
 	services, signals, sources := listDerivedSignalDimensions(r, store)
@@ -240,7 +240,7 @@ func (s *Server) metricsRulesAuto(w http.ResponseWriter, r *http.Request) {
 		autoPreview, stats, err = buildAutoMetricRuleCandidates(r.Context(), store, hours, minPoints, serviceFilter, includeAttrFP)
 	}
 	if err != nil && !isMissingTableError(err) {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusFound)
 		return
 	}
 	autoSummary := map[string]any{
@@ -294,7 +294,7 @@ func (s *Server) metricsRulesAuto(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-rules", http.StatusFound)
 		return
 	}
 
@@ -307,7 +307,7 @@ func (s *Server) metricsRulesDashboardAuto(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusFound)
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(defaultString(r.Form.Get("action"), "preview")))
@@ -321,12 +321,12 @@ func (s *Server) metricsRulesDashboardAuto(w http.ResponseWriter, r *http.Reques
 
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusFound)
 		return
 	}
 	defer store.Close()
 	if err := ensureMetricsRulesSchema(r.Context(), store); err != nil {
-		http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusFound)
 		return
 	}
 	services, signals, sources := listDerivedSignalDimensions(r, store)
@@ -352,7 +352,7 @@ func (s *Server) metricsRulesDashboardAuto(w http.ResponseWriter, r *http.Reques
 
 	if action == "create" {
 		if len(autoDashboardPreview) == 0 {
-			http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusFound)
 			return
 		}
 		cappedCandidates := autoDashboardPreview
@@ -361,12 +361,12 @@ func (s *Server) metricsRulesDashboardAuto(w http.ResponseWriter, r *http.Reques
 		}
 		dashboardID, err := seedDashboardIfMissing(r.Context(), store, dashboardName, "Auto-generated from active metric rules. window="+strconv.Itoa(hours)+"h, scope="+defaultString(serviceFilter, "all services")+".")
 		if err != nil {
-			http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusFound)
 			return
 		}
 		existingCharts, err := loadDashboardCharts(r.Context(), store, dashboardID)
 		if err != nil {
-			http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusSeeOther)
+			http.Redirect(w, r, "/metrics/rules?open_panel=auto-dashboard", http.StatusFound)
 			return
 		}
 		existingTitles := make(map[string]struct{}, len(existingCharts))
@@ -401,7 +401,7 @@ func (s *Server) metricsRulesDashboardAuto(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		if dashboardID != "" {
-			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboards/"+dashboardID, http.StatusFound)
 			return
 		}
 	}
@@ -410,40 +410,40 @@ func (s *Server) metricsRulesDashboardAuto(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) metricsRulesSubroutes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	path := strings.TrimPrefix(r.URL.Path, "/metrics/rules/")
 	parts := strings.Split(path, "/")
 	if len(parts) != 2 || parts[1] != "delete" || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
 	store, err := s.storeFactory.Open(r.Context())
 	if err != nil {
-		http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 		return
 	}
 	defer store.Close()
 	if err := ensureMetricsRulesSchema(r.Context(), store); err != nil {
-		http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 		return
 	}
 	rows, err := store.Query(r.Context(), "SELECT Name, RuleType, SignalSource, SignalName, ServiceName, AttrFingerprint, Comparator, WarningThreshold, CriticalThreshold, SecondarySignalSource, SecondarySignalName, SecondaryComparator, SecondaryWarningThreshold, SecondaryCriticalThreshold, MinSampleCount FROM sobs_anomaly_rules FINAL WHERE IsDeleted = 0 AND Id = ? LIMIT 1", parts[0])
 	if err != nil {
-		http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 		return
 	}
 	defer rows.Close()
 	if !rows.Next() {
-		http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 		return
 	}
 	var name, ruleType, signalSource, signalName, serviceName, attrFingerprint, comparator, secondarySource, secondarySignal, secondaryComparator any
 	var warningThreshold, criticalThreshold, secondaryWarningThreshold, secondaryCriticalThreshold, minSampleCount any
 	if err := rows.Scan(&name, &ruleType, &signalSource, &signalName, &serviceName, &attrFingerprint, &comparator, &warningThreshold, &criticalThreshold, &secondarySource, &secondarySignal, &secondaryComparator, &secondaryWarningThreshold, &secondaryCriticalThreshold, &minSampleCount); err != nil {
-		http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+		http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 		return
 	}
 	_, err = store.Exec(
@@ -469,7 +469,7 @@ func (s *Server) metricsRulesSubroutes(w http.ResponseWriter, r *http.Request) {
 		1,
 		persist.Version(),
 	)
-	http.Redirect(w, r, "/metrics/rules", http.StatusSeeOther)
+	http.Redirect(w, r, "/metrics/rules", http.StatusFound)
 }
 
 func (s *Server) renderMetricsRulesPage(

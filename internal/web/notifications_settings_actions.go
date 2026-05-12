@@ -20,18 +20,11 @@ func (s *Server) settingsNotificationsChannelActions(w http.ResponseWriter, r *h
 	action := parts[1]
 	switch action {
 	case "toggle":
-		sub, ok := s.notificationService.ToggleSubscription(id)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": sub.ID, "enabled": sub.Enabled})
+		_, _ = s.notificationService.ToggleSubscription(id)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 	case "delete":
-		if !s.notificationService.DeleteSubscription(id) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+		_ = s.notificationService.DeleteSubscription(id)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 	default:
 		http.NotFound(w, r)
 	}

@@ -17,14 +17,14 @@ func (s *Server) settingsNotificationsChannelsCreate(w http.ResponseWriter, r *h
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	channelType := strings.ToLower(strings.TrimSpace(r.FormValue("channel_type")))
 
 	if name == "" {
-		http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 		return
 	}
 
@@ -42,13 +42,13 @@ func (s *Server) settingsNotificationsChannelsCreate(w http.ResponseWriter, r *h
 		}
 		config["body_template"] = strings.TrimSpace(r.FormValue("webhook_body_template"))
 		if config["url"] == "" {
-			http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+			http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 			return
 		}
 	case "slack":
 		config["webhook_url"] = strings.TrimSpace(r.FormValue("slack_webhook_url"))
 		if config["webhook_url"] == "" {
-			http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+			http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 			return
 		}
 	case "email":
@@ -72,7 +72,7 @@ func (s *Server) settingsNotificationsChannelsCreate(w http.ResponseWriter, r *h
 			config["use_tls"] = "1"
 		}
 		if config["to_addr"] == "" {
-			http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+			http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 			return
 		}
 	case "browser_push", "webpush":
@@ -84,12 +84,12 @@ func (s *Server) settingsNotificationsChannelsCreate(w http.ResponseWriter, r *h
 			config["endpoint"] = strings.TrimSpace(r.FormValue("endpoint"))
 		}
 		if config["endpoint"] == "" {
-			http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+			http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 			return
 		}
 		channelType = "browser_push"
 	default:
-		http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 		return
 	}
 
@@ -104,7 +104,7 @@ func (s *Server) settingsNotificationsChannelsCreate(w http.ResponseWriter, r *h
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+	http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 }
 
 // settingsNotificationsRulesCreate handles POST /settings/notifications/rules.
@@ -115,7 +115,7 @@ func (s *Server) settingsNotificationsRulesCreate(w http.ResponseWriter, r *http
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 		return
 	}
 
@@ -126,7 +126,7 @@ func (s *Server) settingsNotificationsRulesCreate(w http.ResponseWriter, r *http
 	channelIDsRaw := r.Form["channel_ids"]
 
 	if name == "" {
-		http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 		return
 	}
 	if logicOperator == "" {
@@ -243,7 +243,7 @@ func (s *Server) settingsNotificationsRulesCreate(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	http.Redirect(w, r, "/settings/notifications", http.StatusSeeOther)
+	http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 }
 
 // maxLen returns the maximum length across a set of string slices.
@@ -280,18 +280,11 @@ func (s *Server) settingsNotificationsRulesActions(w http.ResponseWriter, r *htt
 	action := parts[1]
 	switch action {
 	case "toggle":
-		r, ok := s.notificationService.ToggleRule(id)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": r.ID, "enabled": r.Enabled})
+		_, _ = s.notificationService.ToggleRule(id)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 	case "delete":
-		if !s.notificationService.DeleteRule(id) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+		_ = s.notificationService.DeleteRule(id)
+		http.Redirect(w, r, "/settings/notifications", http.StatusFound)
 	default:
 		http.NotFound(w, r)
 	}

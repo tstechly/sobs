@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 type dashboardSpecRequest struct {
@@ -36,6 +37,10 @@ func (s *Server) apiDashboardsSpecCompile(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt is required"})
+		return
+	}
 	writeJSON(w, http.StatusOK, s.dashboardService.BuildSpec(req.Prompt))
 }
 
@@ -47,6 +52,10 @@ func (s *Server) apiDashboardsSpecDryRun(w http.ResponseWriter, r *http.Request)
 	var req dashboardSpecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if len(req.Spec) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec is required"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "preview": s.dashboardService.RenderSpec(req.Spec)})
@@ -80,6 +89,10 @@ func (s *Server) apiDashboardsSpecRender(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	if len(req.Spec) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec is required"})
+		return
+	}
 	writeJSON(w, http.StatusOK, s.dashboardService.RenderSpec(req.Spec))
 }
 
@@ -93,6 +106,10 @@ func (s *Server) apiDashboardsRender(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	if len(req.Spec) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec is required"})
+		return
+	}
 	writeJSON(w, http.StatusOK, s.dashboardService.RenderSpec(req.Spec))
 }
 
@@ -104,6 +121,10 @@ func (s *Server) apiDashboardsSpecAIBuild(w http.ResponseWriter, r *http.Request
 	var req dashboardSpecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt is required"})
 		return
 	}
 	built := s.dashboardService.BuildSpec(req.Prompt)

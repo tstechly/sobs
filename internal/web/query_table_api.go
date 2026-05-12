@@ -161,14 +161,14 @@ func (s *Server) apiQueryAsk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	cfg := s.queryAIConfig()
-	if !cfg.queryEnabled() {
-		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "Query page is unavailable."})
-		return
-	}
 	q := strings.TrimSpace(req.Question)
 	if q == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "question is required"})
+		return
+	}
+	cfg := s.queryAIConfig()
+	if !cfg.queryEnabled() {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "Query page is unavailable."})
 		return
 	}
 	preferredChartType := strings.TrimSpace(req.PreferredChartType)
@@ -348,21 +348,21 @@ func (s *Server) apiQueryRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	sqlText := strings.TrimSpace(req.SQL)
+	if sqlText == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sql is required"})
+		return
+	}
 	cfg := s.queryAIConfig()
 	if !cfg.queryEnabled() {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "Query page is unavailable."})
 		return
 	}
-	sqlText := strings.TrimSpace(req.SQL)
 	question := strings.TrimSpace(req.Question)
 	preferredChartType := strings.TrimSpace(req.PreferredChartType)
 	chartInstruction := strings.TrimSpace(req.ChartInstruction)
 	thinkingLevel := normalizeThinkingLevel(firstNonEmpty(req.ThinkingLevel, cfg.ThinkingLevel))
 	streamRequested := req.Stream || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
-	if sqlText == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sql is required"})
-		return
-	}
 	traceID := fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("query-run|%s|%d", sqlText, time.Now().UnixNano()))))
 	turnID := traceID[:16]
 	if streamRequested {

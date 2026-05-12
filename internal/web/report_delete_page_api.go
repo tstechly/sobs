@@ -17,8 +17,8 @@ func (s *Server) reportsPageDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.reportService.Delete(parts[0]) {
-		http.Redirect(w, r, "/reports", http.StatusSeeOther)
+		http.Redirect(w, r, "/reports", http.StatusFound)
 		return
 	}
-	http.Redirect(w, r, "/reports", http.StatusSeeOther)
+	http.Redirect(w, r, "/reports", http.StatusFound)
 }

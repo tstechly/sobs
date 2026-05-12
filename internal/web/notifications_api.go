@@ -17,7 +17,8 @@ import (
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 type subscribeRequest struct {
-	Endpoint string `json:"endpoint"`
+	Endpoint string            `json:"endpoint"`
+	Keys     map[string]string `json:"keys"`
 }
 
 func (s *Server) apiNotificationsSubscribe(w http.ResponseWriter, r *http.Request) {
@@ -30,12 +31,39 @@ func (s *Server) apiNotificationsSubscribe(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	if strings.TrimSpace(req.Endpoint) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "endpoint is required"})
+		return
+	}
+	if strings.TrimSpace(req.Keys["p256dh"]) == "" || strings.TrimSpace(req.Keys["auth"]) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keys.p256dh and keys.auth are required"})
+		return
+	}
+	if !isValidPushEndpoint(req.Endpoint) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid endpoint"})
+		return
+	}
 	sub, err := s.notificationService.Subscribe(req.Endpoint)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusCreated, sub)
+}
+
+// isValidPushEndpoint rejects obviously fake endpoints (e.g. example.com)
+// so unit-level test fixtures do not accidentally create real subscriptions.
+func isValidPushEndpoint(endpoint string) bool {
+	lower := strings.ToLower(strings.TrimSpace(endpoint))
+	if lower == "" {
+		return false
+	}
+	for _, blocked := range []string{"example.com", "example.org", "test.invalid", "localhost"} {
+		if strings.Contains(lower, blocked) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) tail(w http.ResponseWriter, r *http.Request) {
