@@ -205,6 +205,8 @@ cython_debug/
 node_modules/
 data/
 file:/tmp/
+.chdb-lib/
+.opencode/
 
 # Integration test screenshots (uploaded as CI artifacts)
 tests/screenshots/
