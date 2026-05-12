@@ -45,9 +45,17 @@ func (s *Server) settingsAI(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_ai.html", ctx)
 	case http.MethodPost:
-		vals, _ := decodeStringMap(r)
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			return
+		}
 		s.settingsService.SaveAI(vals)
-		http.Redirect(w, r, "/settings/ai", http.StatusFound)
+		if prefersHTMLRedirect(r) {
+			http.Redirect(w, r, "/settings/ai", http.StatusSeeOther)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": s.settingsService.AI()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -142,14 +150,18 @@ func (s *Server) settingsAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_agents.html", ctx)
 	case http.MethodPost:
-		vals, _ := decodeStringMap(r)
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			return
+		}
 		actions := settings.SortedActions(map[string]bool{
 			"analyze":   parseBool(vals["action_analyze"]),
 			"summarize": parseBool(vals["action_summarize"]),
 			"create_pr": parseBool(vals["action_create_pr"]),
 		})
 		rateLimit, _ := strconv.Atoi(strings.TrimSpace(vals["rate_limit_minutes"]))
-		_, _ = s.agentService.CreateRule(
+		rule, err := s.agentService.CreateRule(
 			strings.TrimSpace(vals["name"]),
 			strings.TrimSpace(vals["description"]),
 			strings.TrimSpace(vals["trigger_type"]),
@@ -158,7 +170,15 @@ func (s *Server) settingsAgents(w http.ResponseWriter, r *http.Request) {
 			actions,
 			rateLimit,
 		)
-		http.Redirect(w, r, "/settings/agents", http.StatusFound)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if prefersHTMLRedirect(r) {
+			http.Redirect(w, r, "/settings/agents", http.StatusSeeOther)
+			return
+		}
+		writeJSON(w, http.StatusCreated, rule)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -176,7 +196,11 @@ func (s *Server) settingsAgentsSubroutes(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	_ = s.agentService.DeleteRule(parts[0])
-	http.Redirect(w, r, "/settings/agents", http.StatusFound)
+	if prefersHTMLRedirect(r) {
+		http.Redirect(w, r, "/settings/agents", http.StatusSeeOther)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func parseBool(v string) bool {
@@ -249,27 +273,27 @@ func githubTokenExpiryStatus(values map[string]string) (string, map[string]any) 
 
 func defaultAIPricing() map[string]map[string]float64 {
 	return map[string]map[string]float64{
-		"gpt-4o":                            {"in": 2.50, "out": 10.00},
-		"gpt-4o-mini":                       {"in": 0.15, "out": 0.60},
-		"gpt-4-turbo":                       {"in": 10.00, "out": 30.00},
-		"gpt-4":                             {"in": 30.00, "out": 60.00},
-		"gpt-3.5-turbo":                     {"in": 0.50, "out": 1.50},
-		"o1":                                {"in": 15.00, "out": 60.00},
-		"o1-mini":                           {"in": 3.00, "out": 12.00},
-		"o3-mini":                           {"in": 1.10, "out": 4.40},
-		"claude-3-5-sonnet-20241022":       {"in": 3.00, "out": 15.00},
-		"claude-3-5-sonnet":                 {"in": 3.00, "out": 15.00},
-		"claude-3-5-haiku":                  {"in": 0.80, "out": 4.00},
-		"claude-3-opus":                     {"in": 15.00, "out": 75.00},
-		"claude-3-sonnet":                   {"in": 3.00, "out": 15.00},
-		"claude-3-haiku":                    {"in": 0.25, "out": 1.25},
-		"gemini-1.5-pro":                    {"in": 1.25, "out": 5.00},
-		"gemini-1.5-flash":                  {"in": 0.075, "out": 0.30},
-		"gemini-2.0-flash":                  {"in": 0.10, "out": 0.40},
-		"llama-3.1-70b":                     {"in": 0.90, "out": 0.90},
-		"llama-3.1-8b":                      {"in": 0.20, "out": 0.20},
-		"mistral-large":                     {"in": 3.00, "out": 9.00},
-		"mistral-small":                     {"in": 0.20, "out": 0.60},
+		"gpt-4o":                     {"in": 2.50, "out": 10.00},
+		"gpt-4o-mini":                {"in": 0.15, "out": 0.60},
+		"gpt-4-turbo":                {"in": 10.00, "out": 30.00},
+		"gpt-4":                      {"in": 30.00, "out": 60.00},
+		"gpt-3.5-turbo":              {"in": 0.50, "out": 1.50},
+		"o1":                         {"in": 15.00, "out": 60.00},
+		"o1-mini":                    {"in": 3.00, "out": 12.00},
+		"o3-mini":                    {"in": 1.10, "out": 4.40},
+		"claude-3-5-sonnet-20241022": {"in": 3.00, "out": 15.00},
+		"claude-3-5-sonnet":          {"in": 3.00, "out": 15.00},
+		"claude-3-5-haiku":           {"in": 0.80, "out": 4.00},
+		"claude-3-opus":              {"in": 15.00, "out": 75.00},
+		"claude-3-sonnet":            {"in": 3.00, "out": 15.00},
+		"claude-3-haiku":             {"in": 0.25, "out": 1.25},
+		"gemini-1.5-pro":             {"in": 1.25, "out": 5.00},
+		"gemini-1.5-flash":           {"in": 0.075, "out": 0.30},
+		"gemini-2.0-flash":           {"in": 0.10, "out": 0.40},
+		"llama-3.1-70b":              {"in": 0.90, "out": 0.90},
+		"llama-3.1-8b":               {"in": 0.20, "out": 0.20},
+		"mistral-large":              {"in": 3.00, "out": 9.00},
+		"mistral-small":              {"in": 0.20, "out": 0.60},
 	}
 }
 

@@ -18,8 +18,8 @@ import (
 const summaryAISpanCondition = "(SpanAttributes['gen_ai.provider.name'] != '' OR SpanAttributes['gen_ai.system'] != '' OR SpanAttributes['gen_ai.operation.name'] != '')"
 
 var (
-	summarySeverityRanks          = map[string]int{"normal": 0, "warning": 1, "outlier": 2}
-	rumSessionDetailEventCap      = 200 // RUM_SESSION_DETAIL_EVENT_CAP from Python
+	summarySeverityRanks     = map[string]int{"normal": 0, "warning": 1, "outlier": 2}
+	rumSessionDetailEventCap = 200 // RUM_SESSION_DETAIL_EVENT_CAP from Python
 )
 
 func init() {
@@ -106,8 +106,9 @@ func (s *Server) registerPageRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/settings/help/repositories", s.settingsRepositoriesHelpPage)
 	mux.HandleFunc("/settings/help/tags", s.settingsTagsHelpPage)
 	mux.HandleFunc("/settings/notifications", s.settingsNotificationsPage)
-	// /query UI page intentionally unregistered (returns 404).
+	mux.HandleFunc("/query", s.queryPage)
 	mux.HandleFunc("/query/help", s.queryHelpPage)
+	mux.HandleFunc("/table-explorer/help", s.tableExplorerHelpPage)
 	mux.HandleFunc("/metrics/help", s.metricsHelpPage)
 	mux.HandleFunc("/metrics/help/rules", s.metricsRulesHelpPage)
 	mux.HandleFunc("/metrics/help/rules/auto", s.metricsRulesAutoHelpPage)
@@ -1442,14 +1443,14 @@ func parseRegexFilterExpression(raw string) ([]string, []string, string) {
 	if expression == "" {
 		return []string{}, []string{}, ""
 	}
-	
+
 	parts := splitRegexFilterExpressionTerms(expression)
 	for _, part := range parts {
 		if part == "" {
 			return []string{}, []string{}, "Regex error: invalid expression around '&&'"
 		}
 	}
-	
+
 	var includePatterns, excludePatterns []string
 	for _, part := range parts {
 		negate := strings.HasPrefix(part, "!")
@@ -1467,7 +1468,7 @@ func parseRegexFilterExpression(raw string) ([]string, []string, string) {
 			includePatterns = append(includePatterns, token)
 		}
 	}
-	
+
 	return includePatterns, excludePatterns, ""
 }
 
@@ -1551,26 +1552,26 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 	// Build WHERE clause with time window and filters
 	where := ""
 	var params []any
-	
+
 	// Time window filter
 	timeWhere, timeParams := rumTimeWhereAndParams(fromTS, toTS)
 	if timeWhere != "" {
 		where = timeWhere
 		params = append(params, timeParams...)
 	}
-	
+
 	// Event type filter
 	if eventType != "" {
 		where = appendWhereClause(where, "EventName = ?")
 		params = append(params, eventType)
 	}
-	
+
 	// Error source filter
 	if errorSource != "" {
 		where = appendWhereClause(where, "LogAttributes['errorSource'] = ?")
 		params = append(params, errorSource)
 	}
-	
+
 	// Regex filter - build regex conditions
 	if q != "" && qError == "" {
 		for _, pattern := range includePatterns {
@@ -1615,7 +1616,7 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 				countSQL = "SELECT count() FROM (SELECT " + sessionKeyExpr + " AS session_key FROM hyperdx_sessions GROUP BY session_key)"
 			}
 			total = summaryQuerySingleInt(r.Context(), store, countSQL, params...)
-			
+
 			// Get session summary rows
 			summarySQL := "SELECT " + sessionKeyExpr + " AS session_key," +
 				" max(Timestamp) AS last_ts," +
@@ -1662,7 +1663,7 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 				// Get detail events with row_rank pagination per session
 				if len(sessionKeys) > 0 {
 					placeholders := strings.TrimSuffix(strings.Repeat("?,", len(sessionKeys)), ",")
-					
+
 					// Build detail conditions (without WHERE keyword)
 					var detailConditions []string
 					if where != "" {
@@ -1672,15 +1673,15 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 					}
 					detailConditions = append(detailConditions, sessionKeyExpr+" IN ("+placeholders+")")
 					detailWhere := "WHERE " + strings.Join(detailConditions, " AND ")
-					
+
 					detailParams := append(append([]any{}, params...), make([]any, 0, len(sessionKeys))...)
 					for _, sessionKey := range sessionKeys {
 						detailParams = append(detailParams, sessionKey)
 					}
-					
+
 					detailSQL := "SELECT Timestamp, EventName, Body, " + urlExpr + " AS url, " + traceExpr + " AS trace_id, " + spanExpr + " AS span_id, " + sessionKeyExpr + " AS session_key " +
 						"FROM hyperdx_sessions " + detailWhere + " ORDER BY session_key ASC, Timestamp DESC LIMIT ? BY session_key"
-					
+
 					detailParams = append(detailParams, rumSessionDetailEventCap)
 					detailRows, detailErr := queryRows(r.Context(), store, detailSQL, detailParams...)
 					if detailErr == nil {
@@ -1752,12 +1753,12 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Get vitals summary from derived signals (Python uses v_derived_signals_anomaly)
-		vitalRows, vitalErr := store.Query(r.Context(), 
+		vitalRows, vitalErr := store.Query(r.Context(),
 			"SELECT SignalName, argMax(value, time) AS latest_value, argMax(anomaly_state, time) AS latest_state, "+
-			"toUInt64(argMax(SampleCount, time)) AS latest_count "+
-			"FROM v_derived_signals_anomaly "+
-			"WHERE SignalSource = 'rum_vitals' AND time >= now() - INTERVAL 60 MINUTE "+
-			"GROUP BY SignalName")
+				"toUInt64(argMax(SampleCount, time)) AS latest_count "+
+				"FROM v_derived_signals_anomaly "+
+				"WHERE SignalSource = 'rum_vitals' AND time >= now() - INTERVAL 60 MINUTE "+
+				"GROUP BY SignalName")
 		if vitalErr == nil {
 			defer vitalRows.Close()
 			for vitalRows.Next() {
@@ -1788,9 +1789,9 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get vitals sparklines from derived signals (Python uses v_derived_signals_1m)
 		sparkRows, sparkErr := store.Query(r.Context(),
 			"SELECT SignalName, MinuteBucket, Value, SampleCount "+
-			"FROM v_derived_signals_1m "+
-			"WHERE SignalSource = 'rum_vitals' AND MinuteBucket >= now() - INTERVAL 60 MINUTE "+
-			"ORDER BY SignalName, MinuteBucket")
+				"FROM v_derived_signals_1m "+
+				"WHERE SignalSource = 'rum_vitals' AND MinuteBucket >= now() - INTERVAL 60 MINUTE "+
+				"ORDER BY SignalName, MinuteBucket")
 		if sparkErr == nil {
 			defer sparkRows.Close()
 			for sparkRows.Next() {
@@ -1819,13 +1820,13 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get vitals hotspot
 		hotspotRows, hotspotErr := store.Query(r.Context(),
 			"SELECT JSONExtractString(Body, 'name') AS metric, LogAttributes['url'] AS url, count() AS total, "+
-			"countIf(JSONExtractString(Body, 'rating') = 'poor') AS poor_count, "+
-			"round(toFloat64(poor_count) / toFloat64(total), 3) AS poor_rate, "+
-			"round(quantileExact(0.75)(JSONExtractFloat(Body, 'value')), 1) AS p75 "+
-			"FROM hyperdx_sessions "+
-			"WHERE EventName = 'web-vital' AND Timestamp >= now() - INTERVAL 24 HOUR "+
-			"GROUP BY metric, url HAVING total >= 3 "+
-			"ORDER BY metric ASC, poor_rate DESC, total DESC LIMIT 60")
+				"countIf(JSONExtractString(Body, 'rating') = 'poor') AS poor_count, "+
+				"round(toFloat64(poor_count) / toFloat64(total), 3) AS poor_rate, "+
+				"round(quantileExact(0.75)(JSONExtractFloat(Body, 'value')), 1) AS p75 "+
+				"FROM hyperdx_sessions "+
+				"WHERE EventName = 'web-vital' AND Timestamp >= now() - INTERVAL 24 HOUR "+
+				"GROUP BY metric, url HAVING total >= 3 "+
+				"ORDER BY metric ASC, poor_rate DESC, total DESC LIMIT 60")
 		if hotspotErr == nil {
 			defer hotspotRows.Close()
 			for hotspotRows.Next() {
@@ -1855,9 +1856,9 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get error trend
 		trendRows, trendErr := store.Query(r.Context(),
 			"SELECT countIf(Timestamp >= now() - INTERVAL 30 MINUTE) AS recent, "+
-			"countIf(Timestamp >= now() - INTERVAL 60 MINUTE AND Timestamp < now() - INTERVAL 30 MINUTE) AS prior "+
-			"FROM hyperdx_sessions "+
-			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 60 MINUTE")
+				"countIf(Timestamp >= now() - INTERVAL 60 MINUTE AND Timestamp < now() - INTERVAL 30 MINUTE) AS prior "+
+				"FROM hyperdx_sessions "+
+				"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 60 MINUTE")
 		if trendErr == nil {
 			defer trendRows.Close()
 			if trendRows.Next() {
@@ -1883,9 +1884,9 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get error type counts
 		typeRows, typeErr := store.Query(r.Context(),
 			"SELECT EventName, count() AS cnt "+
-			"FROM hyperdx_sessions "+
-			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
-			"GROUP BY EventName")
+				"FROM hyperdx_sessions "+
+				"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
+				"GROUP BY EventName")
 		if typeErr == nil {
 			defer typeRows.Close()
 			totalErr := 0
@@ -1906,12 +1907,12 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get error sparkline
 		sparkErrRows, sparkErrQuery := store.Query(r.Context(),
 			"SELECT mb, cnt FROM "+
-			"(SELECT toStartOfMinute(Timestamp) AS mb, count() AS cnt "+
-			"FROM hyperdx_sessions "+
-			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 180 MINUTE "+
-			"GROUP BY mb) "+
-			"ORDER BY mb "+
-			"WITH FILL FROM toStartOfMinute(now() - INTERVAL 180 MINUTE) TO toStartOfMinute(now()) STEP toIntervalMinute(1)")
+				"(SELECT toStartOfMinute(Timestamp) AS mb, count() AS cnt "+
+				"FROM hyperdx_sessions "+
+				"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 180 MINUTE "+
+				"GROUP BY mb) "+
+				"ORDER BY mb "+
+				"WITH FILL FROM toStartOfMinute(now() - INTERVAL 180 MINUTE) TO toStartOfMinute(now()) STEP toIntervalMinute(1)")
 		if sparkErrQuery == nil {
 			defer sparkErrRows.Close()
 			errSpark := []map[string]any{}
@@ -1928,10 +1929,10 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get top error messages
 		topMsgRows, topMsgErr := store.Query(r.Context(),
 			"SELECT JSONExtractString(Body, 'message') AS message, count() AS cnt "+
-			"FROM hyperdx_sessions "+
-			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
-			"AND JSONExtractString(Body, 'message') != '' "+
-			"GROUP BY message ORDER BY cnt DESC LIMIT 8")
+				"FROM hyperdx_sessions "+
+				"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
+				"AND JSONExtractString(Body, 'message') != '' "+
+				"GROUP BY message ORDER BY cnt DESC LIMIT 8")
 		if topMsgErr == nil {
 			defer topMsgRows.Close()
 			msgs := []map[string]any{}
@@ -1948,10 +1949,10 @@ func (s *Server) rumPage(w http.ResponseWriter, r *http.Request) {
 		// Get top error URLs
 		topURLRows, topURLErr := store.Query(r.Context(),
 			"SELECT LogAttributes['url'] AS url, count() AS cnt "+
-			"FROM hyperdx_sessions "+
-			"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
-			"AND LogAttributes['url'] != '' "+
-			"GROUP BY url ORDER BY cnt DESC LIMIT 5")
+				"FROM hyperdx_sessions "+
+				"WHERE EventName IN ('error','unhandledrejection') AND Timestamp >= now() - INTERVAL 24 HOUR "+
+				"AND LogAttributes['url'] != '' "+
+				"GROUP BY url ORDER BY cnt DESC LIMIT 5")
 		if topURLErr == nil {
 			defer topURLRows.Close()
 			urls := []map[string]any{}

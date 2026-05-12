@@ -2,10 +2,13 @@ package web
 
 import (
 	"net/http"
-
 )
 
 func (s *Server) tableExplorerPage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/table-explorer" {
+		http.NotFound(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

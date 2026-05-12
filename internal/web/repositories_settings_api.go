@@ -107,9 +107,21 @@ func (s *Server) settingsRepositories(w http.ResponseWriter, r *http.Request) {
 		}
 		s.renderTemplate(w, "settings_repositories.html", ctx)
 	case http.MethodPost:
-		vals, _ := decodeStringMap(r)
-		_, _ = s.repositoryService.Create(strings.TrimSpace(vals["name"]), strings.TrimSpace(vals["url"]))
-		http.Redirect(w, r, "/settings/repositories", http.StatusFound)
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			return
+		}
+		repo, err := s.repositoryService.Create(strings.TrimSpace(vals["name"]), strings.TrimSpace(vals["url"]))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if prefersHTMLRedirect(r) {
+			http.Redirect(w, r, "/settings/repositories", http.StatusSeeOther)
+			return
+		}
+		writeJSON(w, http.StatusCreated, repositoryResponse(repo))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -143,14 +155,39 @@ func trimTo(items []string, n int) []string {
 	return out
 }
 
+func prefersHTMLRedirect(r *http.Request) bool {
+	accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+	return strings.Contains(accept, "text/html") && !strings.Contains(accept, "application/json")
+}
+
+func repositoryResponse(repo repositories.Repository) map[string]any {
+	return map[string]any{
+		"id":         repo.ID,
+		"name":       repo.Name,
+		"url":        repo.URL,
+		"realtime":   repo.Realtime,
+		"releases":   repo.Releases,
+		"created_at": repo.CreatedAt,
+		"updated_at": repo.UpdatedAt,
+	}
+}
+
 func (s *Server) settingsRepositoriesValidateToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	vals, _ := decodeStringMap(r)
-	_ = repositories.ValidateGitHubToken(vals["token"])
-	http.Redirect(w, r, "/settings/repositories", http.StatusFound)
+	vals, err := decodeStringMap(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+		return
+	}
+	ok := repositories.ValidateGitHubToken(vals["token"])
+	if prefersHTMLRedirect(r) {
+		http.Redirect(w, r, "/settings/repositories", http.StatusSeeOther)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": ok})
 }
 
 func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Request) {
@@ -166,8 +203,12 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	redirectRepos := func() {
-		http.Redirect(w, r, "/settings/repositories", http.StatusFound)
+	redirectRepos := func() bool {
+		if prefersHTMLRedirect(r) {
+			http.Redirect(w, r, "/settings/repositories", http.StatusSeeOther)
+			return true
+		}
+		return false
 	}
 
 	if len(parts) == 1 {
@@ -175,9 +216,20 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		vals, _ := decodeStringMap(r)
-		_, _ = s.repositoryService.Update(id, strings.TrimSpace(vals["name"]), strings.TrimSpace(vals["url"]))
-		redirectRepos()
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			return
+		}
+		repo, ok := s.repositoryService.Update(id, strings.TrimSpace(vals["name"]), strings.TrimSpace(vals["url"]))
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if redirectRepos() {
+			return
+		}
+		writeJSON(w, http.StatusOK, repositoryResponse(repo))
 		return
 	}
 
@@ -186,8 +238,14 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = s.repositoryService.Delete(id)
-		redirectRepos()
+		if !s.repositoryService.Delete(id) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if redirectRepos() {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 
@@ -197,11 +255,19 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			return
 		}
 		enabled := false
-		if vals, err := decodeStringMap(r); err == nil {
+		vals, err := decodeStringMap(r)
+		if err == nil {
 			enabled = parseBool(vals["enabled"])
 		}
-		_, _ = s.repositoryService.SetRealtime(id, enabled)
-		redirectRepos()
+		repo, ok := s.repositoryService.SetRealtime(id, enabled)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if redirectRepos() {
+			return
+		}
+		writeJSON(w, http.StatusOK, repositoryResponse(repo))
 		return
 	}
 
@@ -210,8 +276,17 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_, _, _ = s.repositoryService.RotateCIIngestKey(id)
-		redirectRepos()
+		repo, plain, ok := s.repositoryService.RotateCIIngestKey(id)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if redirectRepos() {
+			return
+		}
+		payload := repositoryResponse(repo)
+		payload["ci_ingest_key"] = plain
+		writeJSON(w, http.StatusOK, payload)
 		return
 	}
 
@@ -220,8 +295,15 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_, _ = s.repositoryService.RevokeCIIngestKey(id)
-		redirectRepos()
+		repo, ok := s.repositoryService.RevokeCIIngestKey(id)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if redirectRepos() {
+			return
+		}
+		writeJSON(w, http.StatusOK, repositoryResponse(repo))
 		return
 	}
 
@@ -230,9 +312,20 @@ func (s *Server) settingsRepositoriesSubroutes(w http.ResponseWriter, r *http.Re
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		vals, _ := decodeStringMap(r)
-		_, _ = s.repositoryService.AddRelease(id, strings.TrimSpace(vals["release"]))
-		redirectRepos()
+		vals, err := decodeStringMap(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+			return
+		}
+		repo, ok := s.repositoryService.AddRelease(id, strings.TrimSpace(vals["release"]))
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		if redirectRepos() {
+			return
+		}
+		writeJSON(w, http.StatusOK, repositoryResponse(repo))
 		return
 	}
 

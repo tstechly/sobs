@@ -63,7 +63,7 @@ func (s *Server) writeMaskingMutationResponse(w http.ResponseWriter, r *http.Req
 		writeJSON(w, status, payload)
 		return
 	}
-	http.Redirect(w, r, "/settings/masking", http.StatusFound)
+	http.Redirect(w, r, "/settings/masking", http.StatusSeeOther)
 }
 
 func (s *Server) settingsMaskingKeysCreate(w http.ResponseWriter, r *http.Request) {
@@ -288,8 +288,16 @@ func (s *Server) settingsTags(w http.ResponseWriter, r *http.Request) {
 		s.renderTemplate(w, "settings_tags.html", ctx)
 	case http.MethodPost:
 		input := decodeTagRuleInput(r)
-		_, _ = s.tagService.CreateRule(input)
-		http.Redirect(w, r, "/settings/tags", http.StatusFound)
+		rule, err := s.tagService.CreateRule(input)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if prefersHTMLRedirect(r) {
+			http.Redirect(w, r, "/settings/tags", http.StatusSeeOther)
+			return
+		}
+		writeJSON(w, http.StatusCreated, rule)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -304,33 +312,34 @@ func decodeTagRuleInput(r *http.Request) tags.RuleInput {
 		_ = json.NewDecoder(r.Body).Decode(&input)
 		return input
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := r.ParseForm(); err == nil && len(r.PostForm) > 0 {
+		get := func(keys ...string) string {
+			for _, k := range keys {
+				if v := strings.TrimSpace(r.PostForm.Get(k)); v != "" {
+					return v
+				}
+			}
+			return ""
+		}
+		input.Name = get("name")
+		if v := get("record_types", "recordTypes"); v != "" {
+			input.RecordTypes = strings.Split(v, ",")
+		}
+		matchField := get("match_field", "matchField")
+		matchOperator := get("match_operator", "matchOperator")
+		matchValue := get("match_value", "matchValue")
+		if matchField != "" || matchOperator != "" || matchValue != "" {
+			input.Conditions = []tags.Condition{{
+				MatchField:    matchField,
+				MatchOperator: matchOperator,
+				MatchValue:    matchValue,
+			}}
+		}
+		input.TagKey = get("tag_key", "tagKey")
+		input.TagValue = get("tag_value", "tagValue")
 		return input
 	}
-	get := func(keys ...string) string {
-		for _, k := range keys {
-			if v := strings.TrimSpace(r.PostForm.Get(k)); v != "" {
-				return v
-			}
-		}
-		return ""
-	}
-	input.Name = get("name")
-	if v := get("record_types", "recordTypes"); v != "" {
-		input.RecordTypes = strings.Split(v, ",")
-	}
-	matchField := get("match_field", "matchField")
-	matchOperator := get("match_operator", "matchOperator")
-	matchValue := get("match_value", "matchValue")
-	if matchField != "" || matchOperator != "" || matchValue != "" {
-		input.Conditions = []tags.Condition{{
-			MatchField:    matchField,
-			MatchOperator: matchOperator,
-			MatchValue:    matchValue,
-		}}
-	}
-	input.TagKey = get("tag_key", "tagKey")
-	input.TagValue = get("tag_value", "tagValue")
+	_ = json.NewDecoder(r.Body).Decode(&input)
 	return input
 }
 
@@ -376,7 +385,11 @@ func (s *Server) settingsTagsSubroutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.tagService.DeleteRule(parts[0])
-	http.Redirect(w, r, "/settings/tags", http.StatusFound)
+	if prefersHTMLRedirect(r) {
+		http.Redirect(w, r, "/settings/tags", http.StatusSeeOther)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) apiTagsRecord(w http.ResponseWriter, r *http.Request) {

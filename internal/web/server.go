@@ -168,9 +168,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/agent/runs/", s.apiAgentRunsSubroutes)
 	mux.HandleFunc("/api/query/ask", s.apiQueryAsk)
 	mux.HandleFunc("/api/query/run", s.apiQueryRun)
-	// /api/query/refine-chart, /api/query/schema, /table-explorer*, /api/table-explorer*
-	// and the /kubernetes UI routes are intentionally unregistered so that they
-	// return 404 (matching the documented endpoints surface).
+	mux.HandleFunc("/api/query/refine-chart", s.apiQueryRefineChart)
+	mux.HandleFunc("/api/query/schema", s.apiQuerySchema)
+	mux.HandleFunc("/table-explorer", s.tableExplorerPage)
+	mux.HandleFunc("/api/table-explorer/tables", s.apiTableExplorerTables)
+	mux.HandleFunc("/api/table-explorer/table/", s.apiTableExplorerTable)
 	mux.HandleFunc("/api/chart-types", s.apiChartTypes)
 	mux.HandleFunc("/api/web-traffic/geo", s.apiWebTrafficGeo)
 	mux.HandleFunc("/api/web-traffic/browsers", s.apiWebTrafficBrowsers)
@@ -185,7 +187,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/enrichment/cve/scan", s.apiEnrichmentCVEScan)
 	mux.HandleFunc("/enrichment/cve", s.enrichmentCVEPage)
 	mux.HandleFunc("/settings/kubernetes", s.settingsKubernetes)
-	// /kubernetes and /api/kubernetes/status intentionally unregistered (return 404).
+	mux.HandleFunc("/kubernetes", s.kubernetesPage)
+	mux.HandleFunc("/api/kubernetes/status", s.apiKubernetesStatus)
 	mux.HandleFunc("/settings/data-management", s.settingsDataManagement)
 	mux.HandleFunc("/api/data-management/backup/list", s.apiDataManagementBackupList)
 	mux.HandleFunc("/api/data-management/backup/run", s.apiDataManagementBackupRun)
