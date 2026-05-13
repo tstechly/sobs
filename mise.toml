@@ -15,4 +15,4 @@ run = "docker run -p 44316:4317 -v sobs_data:/data ghcr.io/abartrim/sobs:latest"
 
 [tasks.run_go_server]
 depends = ["chdb"]
-run = "go run cmd/sobs/main.go"
+run = ". .chdb-lib/env.sh; go run cmd/sobs/main.go"
