@@ -2,12 +2,15 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	sobstelemetry "github.com/abartrim/sobs/go/telemetry"
 )
 
 // TestHealthEndpoint tests the basic health check endpoint.
@@ -15,8 +18,17 @@ func TestHealthEndpoint(t *testing.T) {
 	baseURL := getBaseURL()
 	skipIfServerNotAvailable(t, baseURL)
 
+	// Initialize test context with telemetry
+	tc, cleanup := InitTest(t, "TestHealthEndpoint")
+	defer cleanup()
+
 	t.Run("GET /health returns 200 OK", func(t *testing.T) {
-		resp, err := http.Get(baseURL + "/health")
+		ctx := context.Background()
+		if tc != nil {
+			ctx = tc.Ctx
+		}
+
+		resp, err := sobstelemetry.Get(ctx, baseURL+"/health")
 		if err != nil {
 			t.Fatalf("Failed to make request to /health: %v", err)
 		}
@@ -28,8 +40,13 @@ func TestHealthEndpoint(t *testing.T) {
 	})
 
 	t.Run("GET /health response time is acceptable", func(t *testing.T) {
+		ctx := context.Background()
+		if tc != nil {
+			ctx = tc.Ctx
+		}
+
 		start := time.Now()
-		resp, err := http.Get(baseURL + "/health")
+		resp, err := sobstelemetry.Get(ctx, baseURL+"/health")
 		if err != nil {
 			t.Fatalf("Failed to make request to /health: %v", err)
 		}
@@ -48,8 +65,17 @@ func TestHealthDBEndpoint(t *testing.T) {
 	baseURL := getBaseURL()
 	skipIfServerNotAvailable(t, baseURL)
 
+	// Initialize test context with telemetry
+	tc, cleanup := InitTest(t, "TestHealthDBEndpoint")
+	defer cleanup()
+
 	t.Run("GET /health/db returns 200 or 503", func(t *testing.T) {
-		resp, err := http.Get(baseURL + "/health/db")
+		ctx := context.Background()
+		if tc != nil {
+			ctx = tc.Ctx
+		}
+
+		resp, err := sobstelemetry.Get(ctx, baseURL+"/health/db")
 		if err != nil {
 			t.Fatalf("Failed to make request to /health/db: %v", err)
 		}
@@ -62,7 +88,12 @@ func TestHealthDBEndpoint(t *testing.T) {
 	})
 
 	t.Run("GET /health/db response is non-empty JSON object", func(t *testing.T) {
-		resp, err := http.Get(baseURL + "/health/db")
+		ctx := context.Background()
+		if tc != nil {
+			ctx = tc.Ctx
+		}
+
+		resp, err := sobstelemetry.Get(ctx, baseURL+"/health/db")
 		if err != nil {
 			t.Fatalf("Failed to make request to /health/db: %v", err)
 		}
@@ -84,13 +115,22 @@ func TestHealthEndpointsConcurrent(t *testing.T) {
 	baseURL := getBaseURL()
 	skipIfServerNotAvailable(t, baseURL)
 
+	// Initialize test context with telemetry
+	tc, cleanup := InitTest(t, "TestHealthEndpointsConcurrent")
+	defer cleanup()
+
 	t.Run("Concurrent requests to /health", func(t *testing.T) {
 		numRequests := 10
 		results := make(chan int, numRequests)
 
 		for i := 0; i < numRequests; i++ {
 			go func(id int) {
-				resp, err := http.Get(baseURL + "/health")
+				ctx := context.Background()
+				if tc != nil {
+					ctx = tc.Ctx
+				}
+
+				resp, err := sobstelemetry.Get(ctx, baseURL+"/health")
 				if err != nil {
 					t.Errorf("Goroutine %d: Failed to make request: %v", id, err)
 					results <- 0
@@ -120,8 +160,17 @@ func TestHealthEndpointWithInvalidMethod(t *testing.T) {
 	baseURL := getBaseURL()
 	skipIfServerNotAvailable(t, baseURL)
 
+	// Initialize test context with telemetry
+	tc, cleanup := InitTest(t, "TestHealthEndpointWithInvalidMethod")
+	defer cleanup()
+
 	t.Run("POST to /health returns 405", func(t *testing.T) {
-		resp, err := http.Post(baseURL+"/health", "application/json", nil)
+		ctx := context.Background()
+		if tc != nil {
+			ctx = tc.Ctx
+		}
+
+		resp, err := sobstelemetry.Post(ctx, baseURL+"/health", "application/json", nil)
 		if err != nil {
 			t.Fatalf("Failed to make POST request to /health: %v", err)
 		}
@@ -174,6 +223,7 @@ func TestHealthEndpointWithTestServer(t *testing.T) {
 }
 
 // BenchmarkHealthEndpoint provides a simple benchmark for the health endpoint.
+// Note: Benchmarks don't use telemetry to avoid overhead during benchmarking.
 func BenchmarkHealthEndpoint(b *testing.B) {
 	baseURL := getBaseURL()
 

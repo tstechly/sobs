@@ -2,6 +2,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	sobstelemetry "github.com/abartrim/sobs/go/telemetry"
 )
 
 // getBaseURL returns the base URL for the SOBS server.
@@ -19,14 +22,14 @@ func getBaseURL() string {
 	if url := os.Getenv("SOBS_TEST_URL"); url != "" {
 		return url
 	}
-	return "http://localhost:8080" //44317"
+	return "http://localhost:8080" //8080" //44317"
 }
 
 // waitForServer waits for the server to be ready, up to a timeout.
 func waitForServer(baseURL string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/health")
+		resp, err := sobstelemetry.Get(context.Background(), baseURL+"/health")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -55,7 +58,9 @@ func newTestServer(handler http.HandlerFunc) *httptest.Server {
 // Used to assert that POST endpoints respond with the expected 3xx status
 // rather than transparently following to the redirect target.
 func noRedirectClient() *http.Client {
+	baseClient := sobstelemetry.GetClient()
 	return &http.Client{
+		Transport: baseClient.Transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -70,7 +75,8 @@ func postFormNoRedirect(urlStr string, body io.Reader) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return noRedirectClient().Do(req)
+	client := noRedirectClient()
+	return client.Do(req)
 }
 
 // postJSONNoRedirect issues a POST with a JSON body using a client that does not follow redirects.
@@ -80,7 +86,8 @@ func postJSONNoRedirect(urlStr string, body io.Reader) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return noRedirectClient().Do(req)
+	client := noRedirectClient()
+	return client.Do(req)
 }
 
 // assertStatusIn fails the test if the response status is not one of the expected codes.
