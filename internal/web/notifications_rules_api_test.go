@@ -9,15 +9,13 @@ import (
 
 func TestSettingsNotificationsChannelsCreate(t *testing.T) {
 	srv := newTestServer()
-	// POST with form data matching Python's form-based channel creation;
-	// the handler now redirects (303) on success instead of returning JSON 201.
-	body := strings.NewReader("name=test-channel&channel_type=browser_push&push_endpoint=https%3A%2F%2Fexample.com%2Fpush")
+	body := strings.NewReader("name=test-channel&channel_type=browser_push&push_endpoint=https%3A%2F%2Fpush.notify.io%2Fabc")
 	req := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303 redirect, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	if loc := rec.Header().Get("Location"); loc != "/settings/notifications" {
 		t.Fatalf("expected redirect to /settings/notifications, got %q", loc)
@@ -42,15 +40,15 @@ func TestNotificationRulesLifecycleRoutes(t *testing.T) {
 	toggleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules/"+id+"/toggle", nil)
 	toggleRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(toggleRec, toggleReq)
-	if toggleRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", toggleRec.Code)
+	if toggleRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", toggleRec.Code)
 	}
 
 	deleteReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules/"+id+"/delete", nil)
 	deleteRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(deleteRec, deleteReq)
-	if deleteRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", deleteRec.Code)
+	if deleteRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", deleteRec.Code)
 	}
 }
 

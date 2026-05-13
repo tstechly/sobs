@@ -19,14 +19,15 @@ func TestWriteRoutesRequireUIAuthInBasicMode(t *testing.T) {
 	cfg := config.Default()
 	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
-	unauthReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	subscribeBody := []byte(`{"endpoint":"https://push.notify.test.io/abc","keys":{"p256dh":"BNc...","auth":"a1b2c3"}}`)
+	unauthReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader(subscribeBody))
 	unauthRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(unauthRec, unauthReq)
 	if unauthRec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", unauthRec.Code)
 	}
 
-	authReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	authReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader(subscribeBody))
 	authReq.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")))
 	authRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(authRec, authReq)
@@ -83,7 +84,7 @@ func TestCSRFDefaultFollowsBehindTLSWhenUnset(t *testing.T) {
 	cfg := config.Default()
 	srv := NewServer(cfg, store.NewNoopStoreFactory())
 
-	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://push.notify.test.io/abc","keys":{"p256dh":"BNc...","auth":"a1b2c3"}}`)))
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:pass")))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

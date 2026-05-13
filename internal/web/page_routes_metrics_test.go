@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abartrim/sobs/internal/config"
 	"github.com/abartrim/sobs/internal/store"
@@ -180,8 +182,15 @@ func TestAPIMetricsAnomalyReturnsPythonParityContract(t *testing.T) {
 	if len(payload.Rows[0]) != len(expectedColumns) {
 		t.Fatalf("expected row width %d, got %#v", len(expectedColumns), payload.Rows[0])
 	}
-	if ts, ok := payload.Rows[0][0].(string); !ok || !strings.HasPrefix(ts, "2026-04-20 ") || strings.Contains(ts, "UTC") {
-		t.Fatalf("unexpected timestamp cell: %#v", payload.Rows[0])
+	ts, ok := payload.Rows[0][0].(string)
+	if !ok {
+		t.Fatalf("expected string timestamp, got %#v", payload.Rows[0][0])
+	}
+	if strings.Contains(ts, "UTC") {
+		t.Fatalf("timestamp must not contain UTC: %#v", payload.Rows[0])
+	}
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`).MatchString(ts) {
+		t.Fatalf("timestamp %q lacks YYYY-MM-DD HH:MM:SS format (row=%#v)", ts, payload.Rows[0])
 	}
 	if payload.Rows[0][8] != "warning" || payload.Rows[0][9] != "histogram" || payload.Rows[0][10] != "fp-otel" {
 		t.Fatalf("unexpected trailing cells: %#v", payload.Rows[0])
@@ -282,8 +291,9 @@ func seedMetricsPageTables(t *testing.T, srv *Server) {
 		}
 	}
 
+	recentTS := time.Now().UTC().Add(-5 * time.Minute).Format("2006-01-02 15:04:05.000")
 	if _, err := store.Exec(t.Context(), "INSERT INTO v_derived_signals_anomaly (time, ServiceName, SignalSource, SignalName, AttrFingerprint, value, anomaly_score, anomaly_state, SampleCount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		"2026-04-20 10:00:00.000",
+		recentTS,
 		"svc-metrics",
 		"rum_vitals",
 		"LCP",
@@ -297,7 +307,7 @@ func seedMetricsPageTables(t *testing.T, srv *Server) {
 	}
 
 	if _, err := store.Exec(t.Context(), "INSERT INTO v_otel_metrics_anomaly (time, ServiceName, MetricName, MetricKind, AttrFingerprint, value, SampleCount, baseline_mean, baseline_stddev, baseline_lower, baseline_upper, anomaly_score, anomaly_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		"2026-04-20 10:00:00.000",
+		recentTS,
 		"svc-otel",
 		"http.server.duration",
 		"histogram",

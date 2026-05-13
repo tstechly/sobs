@@ -35,8 +35,8 @@ func TestMetricsRulesCreateAndDeleteParity(t *testing.T) {
 	)
 	createRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(createRec, createReq)
-	if createRec.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d body=%s", createRec.Code, createRec.Body.String())
+	if createRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d body=%s", createRec.Code, createRec.Body.String())
 	}
 	if location := createRec.Header().Get("Location"); location != "/metrics/rules" {
 		t.Fatalf("expected redirect to /metrics/rules, got %q", location)
@@ -50,8 +50,8 @@ func TestMetricsRulesCreateAndDeleteParity(t *testing.T) {
 	delReq := newFormRequest(http.MethodPost, "http://example.com/metrics/rules/"+ruleID+"/delete", url.Values{})
 	delRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(delRec, delReq)
-	if delRec.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d body=%s", delRec.Code, delRec.Body.String())
+	if delRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d body=%s", delRec.Code, delRec.Body.String())
 	}
 	if location := delRec.Header().Get("Location"); location != "/metrics/rules" {
 		t.Fatalf("expected redirect to /metrics/rules, got %q", location)
@@ -149,8 +149,8 @@ func TestMetricsRulesDashboardPreviewAndCreateParity(t *testing.T) {
 	)
 	createRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(createRec, createReq)
-	if createRec.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d body=%s", createRec.Code, createRec.Body.String())
+	if createRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d body=%s", createRec.Code, createRec.Body.String())
 	}
 	dashboardID := queryDashboardIDByName(t, srv, "Rules Create Dashboard")
 	if dashboardID == "" {

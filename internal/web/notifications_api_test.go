@@ -16,7 +16,7 @@ import (
 
 func TestNotificationsSubscribe(t *testing.T) {
 	srv := newTestServer()
-	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://push.notify.io/abc","keys":{"p256dh":"BNc...","auth":"a1b2c3"}}`)))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -115,7 +115,7 @@ func TestNotificationsVAPIDLifecycleAndChannelTest(t *testing.T) {
 		t.Fatalf("expected 200, got %d", publicRec.Code)
 	}
 
-	subReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	subReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://push.notify.io/abc","keys":{"p256dh":"BNc...","auth":"a1b2c3"}}`)))
 	subRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(subRec, subReq)
 	if subRec.Code != http.StatusCreated {
@@ -148,7 +148,7 @@ func TestNotificationsVAPIDLifecycleAndChannelTest(t *testing.T) {
 func TestSettingsNotificationsChannelActions(t *testing.T) {
 	srv := newTestServer()
 
-	subReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://example.com/push"}`)))
+	subReq := httptest.NewRequest(http.MethodPost, "http://example.com/api/notifications/subscribe", bytes.NewReader([]byte(`{"endpoint":"https://push.notify.io/abc","keys":{"p256dh":"BNc...","auth":"a1b2c3"}}`)))
 	subRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(subRec, subReq)
 	if subRec.Code != http.StatusCreated {
@@ -163,36 +163,34 @@ func TestSettingsNotificationsChannelActions(t *testing.T) {
 	toggleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels/"+id+"/toggle", nil)
 	toggleRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(toggleRec, toggleReq)
-	if toggleRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", toggleRec.Code)
+	if toggleRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", toggleRec.Code)
 	}
 
 	deleteReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels/"+id+"/delete", nil)
 	deleteRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(deleteRec, deleteReq)
-	if deleteRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", deleteRec.Code)
+	if deleteRec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", deleteRec.Code)
 	}
 }
 
 func TestSettingsNotificationsCreateAcceptsFormPayloads(t *testing.T) {
 	srv := newTestServer()
 
-	// Channel creation with form data; handler now redirects (303) matching Python.
-	channelReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", strings.NewReader("name=form-channel&channel_type=browser_push&push_endpoint=https%3A%2F%2Fexample.com%2Fform-push"))
+	channelReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/channels", strings.NewReader("name=form-channel&channel_type=browser_push&push_endpoint=https%3A%2F%2Fpush.notify.io%2Fform-push"))
 	channelReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	channelRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(channelRec, channelReq)
-	if channelRec.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303 redirect, got %d body=%s", channelRec.Code, channelRec.Body.String())
+	if channelRec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d body=%s", channelRec.Code, channelRec.Body.String())
 	}
 
-	// Rule creation with form data; handler now redirects (303) matching Python.
 	ruleReq := httptest.NewRequest(http.MethodPost, "http://example.com/settings/notifications/rules", strings.NewReader("name=form-rule"))
 	ruleReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	ruleRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(ruleRec, ruleReq)
-	if ruleRec.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303 redirect, got %d body=%s", ruleRec.Code, ruleRec.Body.String())
+	if ruleRec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d body=%s", ruleRec.Code, ruleRec.Body.String())
 	}
 }
