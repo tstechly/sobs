@@ -508,8 +508,17 @@ func renderTemplate(w http.ResponseWriter, r *http.Request, name string, ctx map
 	// PORT-NOTE: render fully to a buffer before writing the response. This makes
 	// a real render error a clean 500 (instead of partial streamed output), and a
 	// client disconnect during the final write is a harmless ignored Write error
-	// rather than a logged template-execution failure (e.g. "broken pipe").
-	out, err := tpl.ExecuteToBytes(exec.NewContext(data))
+	// rather than a logged template-execution failure (e.g. "broken pipe"). The
+	// recover guards against panics inside the template engine so one bad value
+	// yields a clean 500 instead of a raw stack trace.
+	out, err := func() (b []byte, e error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				e = fmt.Errorf("template panic: %v", rec)
+			}
+		}()
+		return tpl.ExecuteToBytes(exec.NewContext(data))
+	}()
 	if err != nil {
 		es := err.Error()
 		if len(es) > 500 {
