@@ -289,7 +289,10 @@ func summary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	rumSummary := rumRes.Fetchall()
+	// PORT-NOTE: summary.html indexes these rows positionally (row[0], row[1], …),
+	// matching Python's tuple DB rows. The Go Fetchall() yields maps (no integer
+	// index), so emit ordered tuples here.
+	rumSummary := rowsAsTuples(rumRes)
 	// AI summary
 	aiSummaryRes, err := db.Execute(
 		"SELECT SpanAttributes['gen_ai.request.model'] AS model, " +
@@ -305,7 +308,7 @@ func summary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-	aiSummary := aiSummaryRes.Fetchall()
+	aiSummary := rowsAsTuples(aiSummaryRes)
 
 	// CVE summary for Summary page security panel.
 	cveEnabledRaw := getAppSetting(db, cveEnabledSetting)
@@ -359,6 +362,21 @@ func summary(w http.ResponseWriter, r *http.Request) {
 		"signal_health": getSignalHealthByService(db),
 		"cve_overview":  cveOverview,
 	})
+}
+
+// rowsAsTuples converts a query result into ordered positional tuples
+// ([][]any, columns in SELECT order) for templates that index rows by position
+// (row[0], row[1], …) — mirroring Python's tuple DB rows.
+func rowsAsTuples(res *ChDbResult) [][]any {
+	out := make([][]any, 0, len(res.Rows))
+	for _, row := range res.Fetchall() {
+		tuple := make([]any, len(res.Cols))
+		for i, col := range res.Cols {
+			tuple[i] = row[col]
+		}
+		out = append(out, tuple)
+	}
+	return out
 }
 
 // computeLogStats returns (level_stats, service_stats) counts for the given
