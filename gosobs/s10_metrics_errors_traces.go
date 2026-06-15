@@ -16,8 +16,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/flosch/pongo2/v6"
 )
 
 func init() {
@@ -60,20 +58,8 @@ func init() {
 			map[string]any{"dashboard.name": "traces", "route": "/traces"},
 		)(viewTraces))(w, r)
 	})
-
-	// Expose label helpers as template globals so every template can call them
-	// without explicit route-level injection (mirrors app.jinja_env.globals).
-	ts := getTemplateSet()
-	ts.Globals["signal_label"] = signalLabel
-	ts.Globals["signal_description"] = signalDescription
-	ts.Globals["source_label"] = sourceLabel
-
-	// Register the ``mask`` filter so any template can write
-	// ``{{ value|mask }}`` to redact PII/secrets from OTEL output.
-	// PORT-NOTE: pongo2 filter wraps _mask_value_for_output with db=None.
-	_ = pongo2.RegisterFilter("mask", func(in *pongo2.Value, param *pongo2.Value) (*pongo2.Value, *pongo2.Error) {
-		return pongo2.AsValue(maskValueForOutput(in.Interface(), nil)), nil
-	})
+	// Template globals (signal_label/signal_description/source_label) and the
+	// `mask` filter are registered by s00's gonja setup (initTemplateEngine).
 }
 
 // ---------------------------------------------------------------------------

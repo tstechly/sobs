@@ -734,7 +734,11 @@ func rumEtag(path string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func rumStaticDir() string { return filepath.Join(moduleDir(), "static") }
+// rumStaticDir resolves the static asset directory. Delegates to staticDir()
+// (s00d_static.go) so it works whether run from gosobs/, the repo root, or
+// alongside the executable — moduleDir() alone points at the binary's temp dir
+// under `go run`.
+func rumStaticDir() string { return staticDir() }
 
 func rumJs(w http.ResponseWriter, r *http.Request) {
 	staticDir := rumStaticDir()

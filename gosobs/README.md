@@ -75,13 +75,31 @@ bootstraps the chDB schema, seeds defaults, and serves. Verified live:
 - `GET /api/chart-types` → 404 graceful error (catalog needs the `node`
   extract script, same as Python)
 
-**Known gap — HTML pages return 500.** The shared Jinja templates in
-`../templates` use `url_for('endpoint', kwarg=value)` keyword-argument calls,
-which **pongo2 cannot parse** (`base.html:28`). JSON/API routes are unaffected.
-Rendering the HTML UI requires either a template preprocessing pass that
-rewrites `url_for(... kw=val)` (and any other Jinja-only constructs) into
-pongo2-compatible syntax, or a different template engine. This is a
-template-engine incompatibility, independent of the `app.py` → Go port.
+All 14+ HTML pages render (verified 200 with real content: summary, logs,
+metrics, errors, traces, rum, web-traffic, settings/*, work-items, cve,
+dashboards, ai).
+
+### Template engine
+
+Rendering uses **gonja v2** (natively Jinja2-compatible), not pongo2. The
+shared `../templates` exercise the full Jinja2 surface, so `s00_core.go` adds a
+thin compatibility layer on top of gonja:
+
+- **block-set** `{% set x %}...{% endset %}` → rewritten to a macro + assign
+  (gonja's `set` is expression-only)
+- **global macro registration** — child templates that `{% extends %}` get the
+  parent/macro-file macros loaded as globals (gonja doesn't run an extending
+  child's top-level `{% macro %}`/`{% from import %}`)
+- **`{% call %}` / `caller()`** control structure — implemented (incl. the
+  `{% call(params) %}` form)
+- **dict `.get(k, default)` / `.values()`** — gonja ships only `keys`/`items`
+- registered globals/filters: `url_for`, `get_flashed_messages`, `config`,
+  `signal_label`, `signal_description`, `source_label`, and the `mask` filter
+
+Two small patches are vendored under `vendor/.../gonja/v2/` (re-apply if
+`go mod vendor` is rerun): a **ternary expression node** so `(A if C else B)`
+parses inside parens/lists/call-args, and an optional `count` arg on string
+`.replace()`.
 
 ## Port notes
 

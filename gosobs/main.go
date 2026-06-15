@@ -30,7 +30,15 @@ func buildMux() *http.ServeMux {
 		if method == "" {
 			method = http.MethodGet
 		}
-		key := method + " " + rt.Pattern
+		pattern := rt.Pattern
+		// PORT-NOTE: Go's ServeMux treats a bare "/" as a subtree match (it would
+		// catch every otherwise-unmatched path). Quart's `@app.route("/")` matches
+		// only "/", so anchor the root with the exact-match marker "{$}" — unknown
+		// paths then 404 instead of silently serving the index.
+		if pattern == "/" {
+			pattern = "/{$}"
+		}
+		key := method + " " + pattern
 		if seen[key] {
 			logger.Warn("duplicate route registration ignored", "route", key)
 			continue
