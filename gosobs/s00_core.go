@@ -161,6 +161,11 @@ func initTemplateEngine() {
 		gonja.DefaultEnvironment.Context.Set("signal_label", wrap2(signalLabel))
 		gonja.DefaultEnvironment.Context.Set("signal_description", wrap2(signalDescription))
 		gonja.DefaultEnvironment.Context.Set("source_label", wrap1(sourceLabel))
+		// url_for is request-independent (resolves endpoint names to static paths),
+		// so register it as a shared global. This makes it resolvable from
+		// globally-registered component macros (e.g. render_error_accordion), which
+		// execute against the shared env context and cannot see per-render data.
+		gonja.DefaultEnvironment.Context.Set("url_for", urlForGlobal)
 		// Jinja's {% call %}/caller() block (gonja has no such control structure).
 		_ = gonja.DefaultEnvironment.ControlStructures.Register("call", callParser)
 		installDictMethods()
