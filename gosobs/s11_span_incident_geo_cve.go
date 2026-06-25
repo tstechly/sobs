@@ -191,25 +191,27 @@ func viewIncident(w http.ResponseWriter, r *http.Request) {
 
 	if traceId == "" && errorId == "" && rumSession == "" {
 		renderTemplate(w, r, "incident.html", map[string]any{
-			"trace_id":                "",
-			"error_id":                "",
-			"rum_session":             "",
-			"rum_ts":                  "",
-			"primary_error":           nil,
-			"primary_trace":           nil,
-			"primary_rum":             nil,
-			"service":                 "",
-			"from_ts":                 "",
-			"to_ts":                   "",
-			"window_minutes":          windowMinutes,
-			"related_errors":          []map[string]any{},
-			"related_log_count":       0,
-			"related_span_count":      0,
-			"related_rum_count":       0,
-			"related_rum_sessions":    0,
-			"related_rum_error_count": 0,
-			"related_rum_events":      []map[string]any{},
-			"raw_windows":             []map[string]any{},
+			"trace_id":                 "",
+			"error_id":                 "",
+			"rum_session":              "",
+			"rum_ts":                   "",
+			"primary_error":            nil,
+			"primary_trace":            nil,
+			"primary_rum":              nil,
+			"service":                  "",
+			"from_ts":                  "",
+			"to_ts":                    "",
+			"window_minutes":           windowMinutes,
+			"related_errors":           []map[string]any{},
+			"related_errors_truncated": false,
+			"existing_work_item":       nil,
+			"related_log_count":        0,
+			"related_span_count":       0,
+			"related_rum_count":        0,
+			"related_rum_sessions":     0,
+			"related_rum_error_count":  0,
+			"related_rum_events":       []map[string]any{},
+			"raw_windows":              []map[string]any{},
 			"metrics_context": map[string]any{
 				"source_mode":      "none",
 				"total_points":     0,
@@ -2361,7 +2363,16 @@ func fetchTraceMetricContext(
 		}
 		byMetric := map[string]any{}
 		for _, mn := range topMetricNames {
-			byMetric[mn] = make([]any, numBuckets)
+			// ponytail: typed nil (*float64), not untyped any-nil. Empty buckets are
+			// chart gaps (tojson → null); but gonja eagerly stringifies this whole
+			// dict on any `.get(...)` call, and an untyped-nil slice element resolves
+			// to a zero reflect.Value that panics in Value.String(). A typed nil
+			// pointer stays a valid reflect.Value and still marshals to JSON null.
+			buckets := make([]any, numBuckets)
+			for i := range buckets {
+				buckets[i] = (*float64)(nil)
+			}
+			byMetric[mn] = buckets
 		}
 		for _, r := range tsRows {
 			mname := rowString(r["MetricName"])
